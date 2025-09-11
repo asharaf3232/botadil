@@ -1003,11 +1003,14 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
             pnl_usdt = (result['exit_price'] - original_trade['entry_price']) * original_trade['quantity']
             if not original_trade.get('is_real_trade'):
                 portfolio_pnl += pnl_usdt
-            closed_at_str = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')
             
-            start_dt = datetime.strptime(original_trade['timestamp'], '%Y-%m-%d %H:%M:%S')
+            # [إصلاح] التعامل مع التواريخ بطريقة واعية للمنطقة الزمنية (timezone-aware)
+            closed_at_str = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')
+            start_dt_naive = datetime.strptime(original_trade['timestamp'], '%Y-%m-%d %H:%M:%S')
+            start_dt = start_dt_naive.replace(tzinfo=EGYPT_TZ)
             end_dt = datetime.now(EGYPT_TZ)
             duration = end_dt - start_dt
+
             days, remainder = divmod(duration.total_seconds(), 86400)
             hours, remainder = divmod(remainder, 3600)
             minutes, _ = divmod(remainder, 60)
@@ -1417,10 +1420,17 @@ async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_T
     ])
     message_text = "🖥️ *لوحة التحكم الرئيسية*\n\nاختر التقرير أو البيانات التي تريد عرضها:"
     
-    if update.callback_query and update.callback_query.data == "dashboard_refresh":
-         await target_message.edit_text(message_text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
-    else:
-        await target_message.reply_text(message_text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+    # [إصلاح] تجاهل خطأ "Message is not modified"
+    try:
+        if update.callback_query and update.callback_query.data == "dashboard_refresh":
+            await target_message.edit_text(message_text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+        else:
+            await target_message.reply_text(message_text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            pass # تجاهل الخطأ بصمت
+        else:
+            logger.error(f"Error in show_dashboard_command: {e}")
 
 async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE): await (update.message or update.callback_query.message).reply_text("اختر الإعداد:", reply_markup=ReplyKeyboardMarkup(settings_menu_keyboard, resize_keyboard=True))
 
@@ -1501,7 +1511,7 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
         conn = sqlite3.connect(DB_FILE, timeout=10)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT symbol, status, pnl_usdt, entry_value_usdt, reason FROM trades WHERE DATE(closed_at) = ?", (today_str,))
+        cursor.execute("SELECT symbol, status, pnl_usdt, entry_value_usdt, reason, closed_at FROM trades WHERE DATE(closed_at) = ?", (today_str,))
         closed_today = [dict(row) for row in cursor.fetchall()]
         conn.close()
 
@@ -1513,8 +1523,10 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
             total_pnl = sum(t['pnl_usdt'] for t in closed_today if t['pnl_usdt'] is not None)
             win_rate = (len(wins) / len(closed_today) * 100) if closed_today else 0
             
-            current_balance = bot_data['settings']['virtual_portfolio_balance_usdt']
-            start_of_day_balance = current_balance - total_pnl
+            # [إصلاح] حساب رصيد بداية اليوم بشكل صحيح
+            current_virtual_balance = bot_data['settings']['virtual_portfolio_balance_usdt']
+            pnl_from_virtual_trades_today = sum(t['pnl_usdt'] for t in closed_today if not t.get('is_real_trade') and t['pnl_usdt'] is not None)
+            start_of_day_balance = current_virtual_balance - pnl_from_virtual_trades_today
 
             best_trade = max(closed_today, key=lambda t: t.get('pnl_usdt', -float('inf')), default=None)
             worst_trade = min(closed_today, key=lambda t: t.get('pnl_usdt', float('inf')), default=None)
@@ -1530,11 +1542,11 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
 
             parts = [f"**🗓️ التقرير اليومي المفصل | {today_str}**\n"]
             
-            parts.append("💰 **الأداء المالي:**")
+            parts.append("💰 **الأداء المالي (اليوم):**")
             parts.append(f"  - الربح/الخسارة الصافي: `${total_pnl:+.2f}`")
-            parts.append(f"  - تغير رصيد المحفظة: `${start_of_day_balance:,.2f} ⬅️ ${current_balance:,.2f}`\n")
+            parts.append(f"  - تغير رصيد المحفظة الافتراضية: `${start_of_day_balance:,.2f} ⬅️ ${current_virtual_balance:,.2f}`\n")
 
-            parts.append("📊 **إحصائيات الصفقات:**")
+            parts.append("📊 **إحصائيات الصفقات (اليوم):**")
             parts.append(f"  - الإجمالي: {len(closed_today)}")
             parts.append(f"  - ✅ الرابحة: {len(wins)}")
             parts.append(f"  - ❌ الخاسرة: {len(losses)}")
@@ -1656,7 +1668,10 @@ async def check_trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not trade: await target.reply_text(f"لم يتم العثور على صفقة بالرقم `{trade_id}`."); return
         if trade['status'] != 'نشطة':
             pnl_percent = (trade['pnl_usdt'] / trade['entry_value_usdt'] * 100) if trade.get('entry_value_usdt', 0) > 0 else 0
-            closed_at_dt = datetime.strptime(trade['closed_at'], '%Y-%m-%d %H:%M:%S')
+            
+            # [إصلاح] التعامل مع التواريخ بطريقة واعية للمنطقة الزمنية (timezone-aware)
+            closed_at_dt_naive = datetime.strptime(trade['closed_at'], '%Y-%m-%d %H:%M:%S')
+            closed_at_dt = closed_at_dt_naive.replace(tzinfo=EGYPT_TZ)
             message = f"📋 *ملخص الصفقة #{trade_id}*\n\n*العملة:* `{trade['symbol']}`\n*الحالة:* `{trade['status']}`\n*تاريخ الإغلاق:* `{closed_at_dt.strftime('%Y-%m-%d %I:%M %p')}`\n*الربح/الخسارة:* `${trade.get('pnl_usdt', 0):+.2f} ({pnl_percent:+.2f}%)`"
         else:
             if not (exchange := bot_data["exchanges"].get(trade['exchange'].lower())): await target.reply_text("المنصة غير متصلة."); return
@@ -1805,6 +1820,10 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
 # [إصلاح] معالج رسائل موحد وذكي
 async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # [إصلاح] التحقق من وجود رسالة قبل معالجتها لتجنب خطأ AttributeError
+    if not update.message:
+        return
+        
     user_data = context.user_data
     text = update.message.text
     
@@ -1912,4 +1931,3 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
-
