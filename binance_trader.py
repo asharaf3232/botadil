@@ -16,6 +16,14 @@ from collections import deque, Counter, defaultdict
 from pathlib import Path
 import itertools
 
+# استيراد المتغيرات من بيئة PM2
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+TELEGRAM_SIGNAL_CHANNEL_ID = os.getenv('TELEGRAM_SIGNAL_CHANNEL_ID')
+ALPHA_VANTAGE_API_KEY = os.getenv('ALPHA_VANTAGE_API_KEY')
+BINANCE_API_KEY = os.getenv('BINANCE_API_KEY')
+BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET')
+
 # [UPGRADE] المكتبات الجديدة لتحليل الأخبار
 import feedparser
 try:
@@ -40,18 +48,8 @@ except ImportError:
     logging.warning("Library 'scipy' not found. RSI Divergence strategy will be disabled.")
 
 
-# --- الإعدادات الأساسية --- #
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', 'YOUR_CHAT_ID_HERE')
-TELEGRAM_SIGNAL_CHANNEL_ID = os.getenv('TELEGRAM_SIGNAL_CHANNEL_ID', TELEGRAM_CHAT_ID)
-ALPHA_VANTAGE_API_KEY = os.getenv('ALPHA_VANTAGE_API_KEY', 'YOUR_AV_KEY_HERE')
-
-# --- [تداول حقيقي] إعدادات مفاتيح Binance API --- #
-BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', 'YOUR_BINANCE_API_KEY')
-BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', 'YOUR_BINANCE_SECRET_KEY')
-
-if TELEGRAM_BOT_TOKEN == 'YOUR_BOT_TOKEN_HERE' or TELEGRAM_CHAT_ID == 'YOUR_CHAT_ID_HERE':
-    print("FATAL ERROR: Please set your Telegram Token and Chat ID.")
+if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    print("FATAL ERROR: Telegram Token or Chat ID are not set in the environment.")
     exit()
 
 # --- إعدادات البوت --- #
@@ -72,7 +70,9 @@ EGYPT_TZ = ZoneInfo("Africa/Cairo")
 # --- إعداد مسجل الأحداث (Logger) --- #
 LOG_FILE = os.path.join(APP_ROOT, 'bot_v12.log')
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'a'), logging.StreamHandler()])
-# ... (إعدادات الـ Logger الأخرى)
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('apscheduler').setLevel(logging.WARNING)
+logging.getLogger('telegram').setLevel(logging.WARNING)
 
 logger = logging.getLogger("TradingBot")
 
@@ -261,7 +261,7 @@ async def get_fundamental_market_mood():
 def find_col(df_columns, prefix):
     try: return next(col for col in df_columns if col.startswith(prefix))
     except StopIteration: return None
-# ... (دوال الاستراتيجيات كما هي)
+
 def analyze_momentum_breakout(df, params, rvol):
     macd_col, macds_col, bbu_col, rsi_col = find_col(df.columns, "MACD_"), find_col(df.columns, "MACDs_"), find_col(df.columns, "BBU_"), find_col(df.columns, "RSI_")
     if not all([macd_col, macds_col, bbu_col, rsi_col]): return None
@@ -269,6 +269,7 @@ def analyze_momentum_breakout(df, params, rvol):
     if (prev[macd_col] <= prev[macds_col] and last[macd_col] > last[macds_col] and last['close'] > last[bbu_col] and last['close'] > last["VWAP_D"] and last[rsi_col] < params['rsi_max_level']):
         return {"reason": "momentum_breakout"}
     return None
+
 def analyze_breakout_squeeze_pro(df, params, rvol):
     bbu_col, bbl_col, kcu_col, kcl_col = find_col(df.columns, "BBU_"), find_col(df.columns, "BBL_"), find_col(df.columns, "KCUe_"), find_col(df.columns, "KCLEe_")
     if not all([bbu_col, bbl_col, kcu_col, kcl_col]): return None
@@ -277,6 +278,7 @@ def analyze_breakout_squeeze_pro(df, params, rvol):
     if is_in_squeeze and last['close'] > last[bbu_col] and df['OBV'].iloc[-2] > df['OBV'].iloc[-3]:
         return {"reason": "breakout_squeeze_pro"}
     return None
+
 def analyze_rsi_divergence(df, params, rvol):
     if not SCIPY_AVAILABLE: return None
     rsi_col = find_col(df.columns, f"RSI_")
@@ -291,6 +293,7 @@ def analyze_rsi_divergence(df, params, rvol):
         if is_divergence and df.iloc[-2]['close'] > subset.iloc[p_low2_idx:]['high'].max():
             return {"reason": "rsi_divergence"}
     return None
+
 def analyze_supertrend_pullback(df, params, rvol):
     st_dir_col, ema_col = find_col(df.columns, "SUPERTd_"), find_col(df.columns, 'EMA_')
     if not st_dir_col or not ema_col: return None
@@ -482,7 +485,7 @@ async def track_trades_job(context: ContextTypes.DEFAULT_TYPE):
     
     if is_real: await check_real_trades_status(context, active_trades)
     else: await check_paper_trades_status(context, active_trades)
-
+    
 async def check_paper_trades_status(context, active_trades):
     # (منطق تتبع الصفقات الوهمية)
     pass
@@ -515,6 +518,14 @@ async def check_market_regime():
 async def analyze_performance_and_suggest(context: ContextTypes.DEFAULT_TYPE):
     # ... (الكود كما هو)
     pass
+async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Triggers a manual scan if one is not already in progress."""
+    if scan_lock.locked():
+        await update.message.reply_text("⏳ يوجد فحص قيد التنفيذ بالفعل. يرجى الانتظار حتى يكتمل.")
+    else:
+        await update.message.reply_text("👍 حسنًا, سأبدأ عملية فحص يدوية للأسواق الآن...")
+        # We add the job to the queue to run immediately (after 1 second)
+        context.job_queue.run_once(lambda ctx: perform_scan(ctx), 1, name="manual_scan")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("أهلاً بك في بوت تداول Binance المتكامل!", reply_markup=ReplyKeyboardMarkup([["Dashboard 🖥️"], ["⚙️ الإعدادات"]], resize_keyboard=True))
@@ -530,54 +541,12 @@ async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_T
     message_text = f"🖥️ *لوحة التحكم الرئيسية*\n\n**وضع التداول: {trading_mode}**\n\nاختر ما تريد عرضه:"
     await (update.message or update.callback_query.message).reply_text(message_text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
 
-# ... (باقي أوامر تيليجرام ودوال الواجهة كما هي، مع الإشارة إلى أنها قد تحتاج لتعديلات طفيفة لتناسب الهيكل الجديد)
-
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query; await query.answer(); data = query.data
-    
-    if data.startswith("dashboard_"):
-        # ... (منطق أزرار لوحة التحكم)
-        pass
-    elif data.startswith("lab_"):
-        # ... (منطق مختبر الاستراتيجيات)
-        pass
-    elif data.startswith("param_"):
-        param_key = data.split("_", 1)[1]
-        current_value = bot_data["settings"].get(param_key)
-        if isinstance(current_value, bool):
-            new_value = not current_value
-            if param_key == "REAL_TRADING_ENABLED":
-                if new_value and (BINANCE_API_KEY == 'YOUR_BINANCE_API_KEY' or BINANCE_API_SECRET == 'YOUR_BINANCE_SECRET_KEY'):
-                    await query.answer("⚠️ لا يمكن التفعيل! مفاتيح Binance API غير مهيأة.", show_alert=True); return
-                
-                bot_data["settings"][param_key] = new_value; save_settings()
-                await query.answer("‼️ سيتم إعادة تشغيل الاتصال...", show_alert=True)
-                
-                if await reinitialize_exchange():
-                    bot_data['status_snapshot']['trading_mode'] = "حقيقي 🟢" if new_value else "وهمي 📝"
-                    await query.message.reply_text(f"✅ تم تبديل وضع التداول إلى: {bot_data['status_snapshot']['trading_mode']}")
-                else:
-                    bot_data["settings"][param_key] = not new_value; save_settings() # Revert
-                    bot_data['status_snapshot']['trading_mode'] = "وهمي 📝"
-                    await query.message.reply_text("❌ فشل الاتصال بـ Binance.")
-            else:
-                bot_data["settings"][param_key] = new_value; save_settings()
-            
-            try: await query.delete_message()
-            except: pass
-            await show_settings_menu(update, context)
-
-async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (منطق معالجة النصوص)
+    # ... (منطق الأزرار)
     pass
-async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Triggers a manual scan if one is not already in progress."""
-    if scan_lock.locked():
-        await update.message.reply_text("⏳ يوجد فحص قيد التنفيذ بالفعل. يرجى الانتظار حتى يكتمل.")
-    else:
-        await update.message.reply_text("👍 حسنًا, سأبدأ عملية فحص يدوية للأسواق الآن...")
-        # We add the job to the queue to run immediately (after 1 second)
-        context.job_queue.run_once(lambda ctx: perform_scan(ctx), 1, name="manual_scan")
+async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ... (منطق النصوص)
+    pass
 
 async def post_init(application: Application):
     if NLTK_AVAILABLE:
@@ -601,7 +570,7 @@ def main():
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     
-    # ... (إضافة كل الـ Handlers)
+    # --- إضافة كل الـ Handlers ---
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     # ... etc
