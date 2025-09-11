@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Final Stable Version: v12.4
+# Final Stable Version: v12.5
 
 # --- Core Libraries ---
 import ccxt.async_support as ccxt
@@ -393,6 +393,8 @@ async def backtest_runner_job(context: ContextTypes.DEFAULT_TYPE):
     pass
 async def optimization_runner_job(context: ContextTypes.DEFAULT_TYPE):
     pass
+async def lab_conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pass
 
 # --- Telegram Command & UI Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -439,7 +441,6 @@ async def check_market_regime():
         return True, f"تجاوز بسبب خطأ: {e}" 
 
 async def analyze_performance_and_suggest(context: ContextTypes.DEFAULT_TYPE): pass
-async def lab_conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE): pass
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.callback_query.message.reply_text("هنا سيتم عرض الإحصائيات")
 async def show_active_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.callback_query.message.reply_text("هنا سيتم عرض الصفقات النشطة")
 async def strategy_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.callback_query.message.reply_text("هنا سيتم عرض تقرير أداء الاستراتيجيات")
@@ -460,9 +461,9 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data == 'db_debug': await debug_command(update, context)
     
     # --- Settings Routing ---
-    elif data == 'settings_presets': pass # await show_presets_menu(update, context)
-    elif data == 'settings_scanners': pass # await show_scanners_menu(update, context)
-    elif data == 'settings_params': pass # await show_parameters_menu(update, context)
+    elif data == 'settings_presets': pass
+    elif data == 'settings_scanners': pass
+    elif data == 'settings_params': pass
 
     # --- Parameter Editing ---
     elif data.startswith("param_"):
