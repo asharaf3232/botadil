@@ -1722,17 +1722,25 @@ async def execute_manual_trade(exchange_id, symbol, amount_usdt, side, context: 
         quantity = float(amount_usdt) / current_price
         formatted_quantity = exchange.amount_to_precision(symbol, quantity)
 
-        order = None
+        order_receipt = None
         if side == 'buy':
-            order = await exchange.create_market_buy_order(symbol, float(formatted_quantity))
+            order_receipt = await exchange.create_market_buy_order(symbol, float(formatted_quantity))
         elif side == 'sell':
-            order = await exchange.create_market_sell_order(symbol, float(formatted_quantity))
+            order_receipt = await exchange.create_market_sell_order(symbol, float(formatted_quantity))
+        
+        # [إصلاح جوهري] انتظار وجلب تفاصيل الأمر بعد التنفيذ لضمان الحصول على البيانات الصحيحة
+        await asyncio.sleep(2) # انتظار قصير
+        order = await exchange.fetch_order(order_receipt['id'], symbol)
         
         logger.info(f"MANUAL ORDER SUCCESS: {order}")
         
-        filled_quantity = order.get('filled', 0) or order.get('amount', 0)
-        filled_price = order.get('average', 0) or order.get('price', current_price)
-        cost = order.get('cost', filled_quantity * filled_price)
+        filled_quantity = order.get('filled', 0)
+        filled_price = order.get('average', current_price)
+        cost = order.get('cost', 0)
+
+        # Fallback if cost is not provided by the exchange response
+        if not cost and filled_quantity and filled_price:
+            cost = filled_quantity * filled_price
         
         success_message = (
             f"**✅ تم تنفيذ الأمر اليدوي بنجاح**\n\n"
@@ -1752,15 +1760,15 @@ async def execute_manual_trade(exchange_id, symbol, amount_usdt, side, context: 
         logger.error(f"MANUAL TRADE FAILED: {error_msg} - {e}")
         return {"success": False, "error": error_msg}
     except ccxt.InvalidOrder as e:
-        error_msg = f"❌ فشل: أمر غير صالح. قد يكون المبلغ أقل من الحد الأدنى للمنصة. ({e})"
+        error_msg = f"❌ فشل: أمر غير صالح. قد يكون المبلغ أقل من الحد الأدنى للمنصة.\n`{e}`"
         logger.error(f"MANUAL TRADE FAILED: {error_msg} - {e}")
         return {"success": False, "error": error_msg}
     except ccxt.ExchangeError as e:
-        error_msg = f"❌ فشل: خطأ من المنصة. ({e})"
+        error_msg = f"❌ فشل: خطأ من المنصة.\n`{e}`"
         logger.error(f"MANUAL TRADE FAILED: {error_msg} - {e}")
         return {"success": False, "error": error_msg}
     except Exception as e:
-        error_msg = f"❌ فشل: حدث خطأ غير متوقع. ({e})"
+        error_msg = f"❌ فشل: حدث خطأ غير متوقع.\n`{e}`"
         logger.error(f"MANUAL TRADE FAILED: {error_msg} - {e}", exc_info=True)
         return {"success": False, "error": error_msg}
 
@@ -2103,3 +2111,4 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
+
