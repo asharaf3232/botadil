@@ -570,6 +570,14 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 async def main_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ... (منطق معالجة النصوص)
     pass
+async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Triggers a manual scan if one is not already in progress."""
+    if scan_lock.locked():
+        await update.message.reply_text("⏳ يوجد فحص قيد التنفيذ بالفعل. يرجى الانتظار حتى يكتمل.")
+    else:
+        await update.message.reply_text("👍 حسنًا, سأبدأ عملية فحص يدوية للأسواق الآن...")
+        # We add the job to the queue to run immediately (after 1 second)
+        context.job_queue.run_once(lambda ctx: perform_scan(ctx), 1, name="manual_scan")
 
 async def post_init(application: Application):
     if NLTK_AVAILABLE:
