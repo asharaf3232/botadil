@@ -1526,12 +1526,12 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         elif action == "debug": await debug_command(update, context)
         elif action == "refresh": await show_dashboard_command(update, context)
         elif action == "tools": # [ميزة جديدة] قائمة الأدوات
-             # [تعديل] تبسيط قائمة الأدوات بعد إزالة مختبر الاستراتيجيات
+             # [تطوير] قائمة أدوات جديدة ومحسّنة
              keyboard = [
                  [InlineKeyboardButton("✍️ تداول يدوي", callback_data="tools_manual_trade")],
-                 [InlineKeyboardButton("💰 عرض الرصيد", callback_data="tools_balance")],
-                 [InlineKeyboardButton("📖 دفتر الأوامر", callback_data="tools_orderbook")],
-                 [InlineKeyboardButton("📜 سجل التداول", callback_data="tools_tradehistory")],
+                 [InlineKeyboardButton("💰 عرض رصيدي", callback_data="tools_balance")],
+                 [InlineKeyboardButton("📖 أوامري المفتوحة", callback_data="tools_openorders")],
+                 [InlineKeyboardButton("📜 سجل تداولاتي", callback_data="tools_mytrades")],
                  [InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="dashboard_refresh")]
              ]
              await query.edit_message_text("🛠️ *أدوات التداول والمراقبة*\n\nاختر الأداة التي تريد استخدامها:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
@@ -1544,10 +1544,10 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             await manual_trade_command(update, context)
         elif tool == "balance":
             await balance_command(update, context)
-        elif tool == "orderbook":
-            await orderbook_command(update, context)
-        elif tool == "tradehistory":
-            await tradehistory_command(update, context)
+        elif tool == "openorders":
+            await open_orders_command(update, context)
+        elif tool == "mytrades":
+            await my_trades_command(update, context)
         return
         
     elif data.startswith("preset_"):
@@ -1674,7 +1674,7 @@ async def tools_button_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             user_data.pop(tool_key, None)
         else:
             user_data[tool_key]['state'] = 'awaiting_symbol'
-            await query.edit_message_text(f"اخترت منصة: *{value.capitalize()}*\n\nالآن، أرسل رمز العملة (مثال: `BTC/USDT`).", parse_mode=ParseMode.MARKDOWN)
+            await query.edit_message_text(f"اخترت منصة: *{value.capitalize()}*\n\nالآن، أرسل رمز العملة (مثال: `BTC/USDT`)\nأو أرسل `الكل` لعرض البيانات لجميع العملات.", parse_mode=ParseMode.MARKDOWN)
 
 # [إصلاح] معالج رسائل موحد وذكي
 async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1687,7 +1687,7 @@ async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     # [ميزة جديدة] التعامل مع إدخالات أدوات المراقبة
     active_tool = None
-    for tool_key in ['orderbook_tool', 'tradehistory_tool', 'manual_trade']:
+    for tool_key in ['openorders_tool', 'mytrades_tool', 'manual_trade']:
         if tool_key in user_data:
             active_tool = tool_key
             break
@@ -1695,19 +1695,21 @@ async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_T
     if active_tool:
         state = user_data[active_tool].get('state')
         if state == 'awaiting_symbol':
-            if '/' not in text or len(text.split('/')[0]) < 2:
-                await update.message.reply_text("❌ رمز غير صالح. الرجاء إرسال الرمز بالتنسيق الصحيح (مثال: `BTC/USDT`).")
-                return
-            
             symbol = text.upper()
             exchange_id = user_data[active_tool]['exchange']
-            
-            if active_tool == 'orderbook_tool':
-                await update.message.reply_text(f"📖 جاري جلب دفتر الأوامر لـ *{symbol}*...", parse_mode=ParseMode.MARKDOWN)
-                await fetch_and_display_orderbook(exchange_id, symbol, update.message)
-            elif active_tool == 'tradehistory_tool':
-                await update.message.reply_text(f"📜 جاري جلب سجل التداول لـ *{symbol}*...", parse_mode=ParseMode.MARKDOWN)
-                await fetch_and_display_trade_history(exchange_id, symbol, update.message)
+
+            if symbol.lower() in ["all", "الكل"]:
+                symbol = None # CCXT understands None as "all symbols"
+            elif '/' not in symbol:
+                await update.message.reply_text("❌ رمز غير صالح. الرجاء إرسال الرمز بالتنسيق الصحيح (مثال: `BTC/USDT`) أو كلمة `الكل`.")
+                return
+
+            if active_tool == 'openorders_tool':
+                await update.message.reply_text(f"📖 جاري جلب أوامرك المفتوحة لـ *{symbol or 'الكل'}*...", parse_mode=ParseMode.MARKDOWN)
+                await fetch_and_display_open_orders(exchange_id, symbol, update.message)
+            elif active_tool == 'mytrades_tool':
+                await update.message.reply_text(f"📜 جاري جلب سجل تداولاتك لـ *{symbol or 'الكل'}*...", parse_mode=ParseMode.MARKDOWN)
+                await fetch_and_display_my_trades(exchange_id, symbol, update.message)
             elif active_tool == 'manual_trade':
                  user_data['manual_trade']['symbol'] = symbol
                  user_data['manual_trade']['state'] = 'awaiting_amount'
@@ -1746,7 +1748,7 @@ async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_T
     if text in menu_handlers:
         # الخروج من أي حوار نشط عند الضغط على زر قائمة
         for key in list(user_data.keys()):
-            if key.startswith(('manual_trade', 'orderbook_tool', 'tradehistory_tool', 'balance_tool')) or key == 'awaiting_input_for_param':
+            if key.startswith(('manual_trade', 'openorders_tool', 'mytrades_tool', 'balance_tool')) or key == 'awaiting_input_for_param':
                 user_data.pop(key)
         
         handler = menu_handlers[text]
@@ -1802,23 +1804,23 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.callback_query.edit_message_text("💰 **عرض الرصيد**\n\nاختر المنصة لعرض أرصدتك:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def orderbook_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['orderbook_tool'] = {'state': 'awaiting_exchange'}
+async def open_orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['openorders_tool'] = {'state': 'awaiting_exchange'}
     keyboard = [
-        [InlineKeyboardButton("Binance", callback_data="orderbook_exchange_binance"),
-         InlineKeyboardButton("KuCoin", callback_data="orderbook_exchange_kucoin")],
+        [InlineKeyboardButton("Binance", callback_data="openorders_exchange_binance"),
+         InlineKeyboardButton("KuCoin", callback_data="openorders_exchange_kucoin")],
         [InlineKeyboardButton("🔙 العودة للأدوات", callback_data="dashboard_tools")]
     ]
-    await update.callback_query.edit_message_text("📖 **دفتر الأوامر**\n\nاختر المنصة:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.callback_query.edit_message_text("📖 **أوامري المفتوحة**\n\nاختر المنصة:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def tradehistory_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['tradehistory_tool'] = {'state': 'awaiting_exchange'}
+async def my_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['mytrades_tool'] = {'state': 'awaiting_exchange'}
     keyboard = [
-        [InlineKeyboardButton("Binance", callback_data="tradehistory_exchange_binance"),
-         InlineKeyboardButton("KuCoin", callback_data="tradehistory_exchange_kucoin")],
+        [InlineKeyboardButton("Binance", callback_data="mytrades_exchange_binance"),
+         InlineKeyboardButton("KuCoin", callback_data="mytrades_exchange_kucoin")],
         [InlineKeyboardButton("🔙 العودة للأدوات", callback_data="dashboard_tools")]
     ]
-    await update.callback_query.edit_message_text("📜 **سجل التداول**\n\nاختر المنصة:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.callback_query.edit_message_text("📜 **سجل تداولاتي**\n\nاختر المنصة:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 # [ميزة جديدة] دوال جلب وعرض بيانات الأدوات
 async def fetch_and_display_balance(exchange_id, query):
@@ -1863,49 +1865,64 @@ async def fetch_and_display_balance(exchange_id, query):
         logger.error(f"Error fetching balance for {exchange_id}: {e}")
         await query.edit_message_text(f"❌ حدث خطأ أثناء جلب الرصيد من {exchange_id.capitalize()}.")
 
-async def fetch_and_display_orderbook(exchange_id, symbol, message):
+async def fetch_and_display_open_orders(exchange_id, symbol, message):
     exchange = bot_data["exchanges"].get(exchange_id.lower())
-    if not exchange:
-        await message.reply_text(f"❌ خطأ: المنصة {exchange_id.capitalize()} غير متصلة.")
+    if not exchange or not exchange.apiKey:
+        await message.reply_text(f"❌ خطأ: لم يتم توثيق الاتصال بمنصة {exchange_id.capitalize()}.")
         return
     try:
-        orderbook = await exchange.fetch_order_book(symbol, limit=5)
-        bids = orderbook.get('bids', [])
-        asks = orderbook.get('asks', [])
+        open_orders = await exchange.fetch_open_orders(symbol)
         
-        lines = [f"**📖 دفتر الأوامر لـ `{symbol}`**\n"]
-        lines.append("`-----------------------------`")
-        lines.append("`  Ask (بيع)   |   Bid (شراء)  `")
-        lines.append("`-----------------------------`")
-        
-        for i in range(5):
-            ask_price = f"{asks[i][0]:.4f}" if i < len(asks) else "----"
-            bid_price = f"{bids[i][0]:.4f}" if i < len(bids) else "----"
-            lines.append(f"` {ask_price.ljust(12)}| {bid_price.rjust(12)} `")
-            
-        await message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logger.error(f"Error fetching orderbook for {symbol} on {exchange_id}: {e}")
-        await message.reply_text(f"❌ فشل جلب دفتر الأوامر. تأكد من صحة الرمز: `{symbol}`.")
+        if not open_orders:
+            await message.reply_text(f"✅ لا توجد لديك أوامر مفتوحة لـ `{symbol or 'الكل'}` على {exchange_id.capitalize()}.")
+            return
 
-async def fetch_and_display_trade_history(exchange_id, symbol, message):
+        lines = [f"**📖 أوامرك المفتوحة لـ `{symbol or 'الكل'}` على {exchange_id.capitalize()}**\n"]
+        for order in open_orders:
+            side_emoji = "🔼" if order['side'] == 'buy' else "🔽"
+            lines.append(
+                f"`{order['symbol']}` {side_emoji} `{order['side'].upper()}`\n"
+                f"  - **الكمية:** `{order['amount']}`\n"
+                f"  - **السعر:** `{order['price']}`\n"
+                f"  - **النوع:** `{order['type']}`"
+            )
+        
+        await message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+    except Exception as e:
+        logger.error(f"Error fetching open orders for {symbol} on {exchange_id}: {e}")
+        await message.reply_text(f"❌ فشل جلب الأوامر المفتوحة. تأكد من صحة الرمز: `{symbol or ''}`.")
+
+async def fetch_and_display_my_trades(exchange_id, symbol, message):
     exchange = bot_data["exchanges"].get(exchange_id.lower())
-    if not exchange:
-        await message.reply_text(f"❌ خطأ: المنصة {exchange_id.capitalize()} غير متصلة.")
+    if not exchange or not exchange.apiKey:
+        await message.reply_text(f"❌ خطأ: لم يتم توثيق الاتصال بمنصة {exchange_id.capitalize()}.")
         return
     try:
-        trades = await exchange.fetch_trades(symbol, limit=10)
-        lines = [f"**📜 آخر 10 صفقات في السوق لـ `{symbol}`**\n"]
+        my_trades = await exchange.fetch_my_trades(symbol, limit=20)
         
-        for trade in reversed(trades): # عرض الأحدث أولاً
-            trade_time = datetime.fromtimestamp(trade['timestamp'] / 1000, tz=EGYPT_TZ).strftime('%H:%M:%S')
+        if not my_trades:
+            await message.reply_text(f"✅ لا يوجد لديك سجل تداول لـ `{symbol or 'الكل'}` على {exchange_id.capitalize()}.")
+            return
+
+        lines = [f"**📜 آخر 20 من تداولاتك لـ `{symbol or 'الكل'}` على {exchange_id.capitalize()}**\n"]
+        
+        for trade in reversed(my_trades): # عرض الأحدث أولاً
+            trade_time = datetime.fromtimestamp(trade['timestamp'] / 1000, tz=EGYPT_TZ).strftime('%Y-%m-%d %H:%M')
             side_emoji = "🔼" if trade['side'] == 'buy' else "🔽"
-            lines.append(f"`{trade_time}` {side_emoji} `{trade['price']:.4f}` - `{trade['amount']:.4f}`")
+            fee = trade.get('fee', {})
+            fee_str = f"{fee.get('cost', 0):.4f} {fee.get('currency', '')}"
+            lines.append(
+                f"`{trade_time}` | `{trade['symbol']}` {side_emoji} `{trade['side'].upper()}`\n"
+                f"  - **الكمية:** `{trade['amount']}`\n"
+                f"  - **السعر:** `{trade['price']}`\n"
+                f"  - **الرسوم:** `{fee_str}`"
+            )
             
         await message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
-        logger.error(f"Error fetching trade history for {symbol} on {exchange_id}: {e}")
-        await message.reply_text(f"❌ فشل جلب سجل التداول. تأكد من صحة الرمز: `{symbol}`.")
+        logger.error(f"Error fetching my trades for {symbol} on {exchange_id}: {e}")
+        await message.reply_text(f"❌ فشل جلب سجل تداولاتك. تأكد من صحة الرمز: `{symbol or ''}`.")
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None: logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
@@ -1953,7 +1970,7 @@ def main():
     # [ميزة جديدة] تعديل معالج الأزرار ليشمل محادثة التداول اليدوي
     application.add_handler(CallbackQueryHandler(manual_trade_button_handler, pattern="^manual_trade_"))
     # [ميزة جديدة] إضافة معالجات لأزرار الأدوات الجديدة
-    application.add_handler(CallbackQueryHandler(tools_button_handler, pattern="^(balance|orderbook|tradehistory)_"))
+    application.add_handler(CallbackQueryHandler(tools_button_handler, pattern="^(balance|openorders|mytrades)_"))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     
     # معالج رسائل واحد وموحد
