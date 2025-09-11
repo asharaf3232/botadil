@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Final Version: v12.2 - Stable Release for GitHub Deployment
+# Final Stable Version: v12.3
 
 # --- Core Libraries ---
 import ccxt.async_support as ccxt
@@ -20,7 +20,7 @@ import itertools
 # --- Environment Variables (for PM2) ---
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-TELEGRAM_SIGNAL_CHANNEL_ID = os.getenv('TELEGRAM_SIGNAL_CHANNEL_ID')
+TELEGRAM_SIGNAL_CHANNEL_ID = os.getenv('TELEGRAM_SIGNAL_CHANNEL_ID', TELEGRAM_CHAT_ID)
 ALPHA_VANTAGE_API_KEY = os.getenv('ALPHA_VANTAGE_API_KEY')
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY')
 BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET')
@@ -393,23 +393,34 @@ async def backtest_runner_job(context: ContextTypes.DEFAULT_TYPE):
     pass
 async def optimization_runner_job(context: ContextTypes.DEFAULT_TYPE):
     pass
+async def lab_conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pass
 
 # --- Telegram Command & UI Handlers ---
-async def start_command(update, context):
-    await update.message.reply_text("أهلاً بك في بوت تداول Binance المتكامل (v12.2)!", reply_markup=ReplyKeyboardMarkup([["Dashboard 🖥️"], ["⚙️ الإعدادات", "🔬 المختبر"], ["🔍 فحص يدوي"]], resize_keyboard=True))
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kb = [["Dashboard 🖥️"], ["⚙️ الإعدادات", "🔬 المختبر"], ["🔍 فحص يدوي"]]
+    await update.message.reply_text("أهلاً بك في بوت تداول Binance المتكامل (v12.3)!", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
 
-async def show_dashboard_command(update, context):
+async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [[InlineKeyboardButton("📊 الإحصائيات", callback_data="db_stats"), InlineKeyboardButton("📈 الصفقات النشطة", callback_data="db_active")],
           [InlineKeyboardButton("📜 تقرير الأداء", callback_data="db_report"), InlineKeyboardButton("🕵️‍♂️ تقرير التشخيص", callback_data="db_debug")]]
     mode = bot_data['status_snapshot']['trading_mode']
     await (update.message or update.callback_query.message).reply_text(f"🖥️ *لوحة التحكم*\n\n**وضع التداول: {mode}**", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
 
-async def show_lab_command(update, context):
+async def show_lab_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [[InlineKeyboardButton("🧪 إجراء اختبار مسبق", callback_data="lab_backtest")], [InlineKeyboardButton("🤖 البحث عن أفضل الإعدادات", callback_data="lab_optimize")]]
     await (update.message or update.callback_query.message).reply_text("🔬 **مختبر الاستراتيجيات**\n\nاختر الأداة:", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
 
-async def show_settings_menu(update, context):
-    pass
+async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard, settings = [], bot_data["settings"]
+    for category, params in EDITABLE_PARAMS.items():
+        keyboard.append([InlineKeyboardButton(f"--- {category} ---", callback_data="ignore")])
+        for param_key in params:
+            display_name = PARAM_DISPLAY_NAMES.get(param_key, param_key)
+            current_value = settings.get(param_key)
+            text = f"{display_name}: {'مُفعّل ✅' if current_value else 'مُعطّل ❌'}" if isinstance(current_value, bool) else f"{display_name}: {current_value}"
+            keyboard.append([InlineKeyboardButton(text, callback_data=f"param_{param_key}")])
+    await (update.message or update.callback_query.message).reply_text("⚙️ *الإعدادات*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
 
 async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if scan_lock.locked():
@@ -431,17 +442,45 @@ async def check_market_regime():
         else: return False, "اتجاه BTC هابط"
     except Exception as e:
         logger.error(f"Market regime check failed: {e}")
-        return True, f"تجاوز بسبب خطأ: {e}" # Fail safe (allow trading)
+        return True, f"تجاوز بسبب خطأ: {e}"
 
-async def analyze_performance_and_suggest(context): pass
-async def universal_text_handler(update, context):
+async def analyze_performance_and_suggest(context: ContextTypes.DEFAULT_TYPE): pass
+
+# --- Universal Text & Button Handlers ---
+async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     handlers = {"Dashboard 🖥️": show_dashboard_command, "⚙️ الإعدادات": show_settings_menu, "🔬 المختبر": show_lab_command, "🔍 فحص يدوي": manual_scan_command}
     if handler := handlers.get(update.message.text): await handler(update, context)
     elif 'lab_state' in context.user_data: await lab_conversation_handler(update, context)
     
-async def button_callback_handler(update, context):
-    pass
-async def lab_conversation_handler(update, context): pass
+async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query; await query.answer(); data = query.data
+
+    if data.startswith("param_"):
+        param_key = data.split("_", 1)[1]
+        current_value = bot_data["settings"].get(param_key)
+        if isinstance(current_value, bool):
+            new_value = not current_value
+            if param_key == "REAL_TRADING_ENABLED":
+                if new_value and (not BINANCE_API_KEY or not BINANCE_API_SECRET):
+                    await query.answer("⚠️ لا يمكن التفعيل! مفاتيح Binance API غير مهيأة.", show_alert=True); return
+                
+                bot_data["settings"][param_key] = new_value; save_settings()
+                await query.answer("‼️ سيتم إعادة تشغيل الاتصال...", show_alert=True)
+                
+                if await reinitialize_exchange():
+                    bot_data['status_snapshot']['trading_mode'] = "حقيقي 🟢" if new_value else "وهمي 📝"
+                    await query.message.reply_text(f"✅ تم تبديل وضع التداول إلى: {bot_data['status_snapshot']['trading_mode']}")
+                else:
+                    bot_data["settings"][param_key] = not new_value; save_settings() # Revert
+                    bot_data['status_snapshot']['trading_mode'] = "وهمي 📝"
+                    await query.message.reply_text("❌ فشل الاتصال بـ Binance.")
+                
+                await show_settings_menu(update, context)
+            else:
+                bot_data["settings"][param_key] = new_value; save_settings()
+                await show_settings_menu(update, context)
+    else:
+        await query.message.reply_text(f"الزر {data} يعمل الآن.")
 
 # --- Main Application Setup ---
 async def post_init(application: Application):
@@ -454,7 +493,7 @@ async def post_init(application: Application):
         jq.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name='scan')
         jq.run_repeating(track_trades_job, interval=TRACK_INTERVAL_SECONDS, first=20, name='track')
         mode = bot_data['status_snapshot']['trading_mode']
-        await application.bot.send_message(TELEGRAM_CHAT_ID, f"🚀 *بوت Binance المتكامل (v12.2) جاهز للعمل!*\n\n**وضع التشغيل: {mode}**", parse_mode=ParseMode.MARKDOWN)
+        await application.bot.send_message(TELEGRAM_CHAT_ID, f"🚀 *بوت Binance المتكامل (v12.3) جاهز للعمل!*\n\n**وضع التشغيل: {mode}**", parse_mode=ParseMode.MARKDOWN)
     else:
         await application.bot.send_message(TELEGRAM_CHAT_ID, "❌ *فشل الاتصال بـ Binance!*")
 
@@ -462,7 +501,7 @@ async def post_shutdown(application: Application):
     if bot_data["exchange"]: await bot_data["exchange"].close(); logger.info("Binance connection closed.")
 
 def main():
-    print("🚀 Starting Binance Trader Bot v12.2 (Final)...")
+    print("🚀 Starting Binance Trader Bot v12.3 (Final Stable)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     
