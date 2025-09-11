@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Final Version: v12.1 - Stable Release for GitHub Deployment
+# Final Version: v12.2 - Stable Release for GitHub Deployment
 
 # --- Core Libraries ---
 import ccxt.async_support as ccxt
@@ -191,11 +191,10 @@ async def execute_real_trade_on_binance(signal):
 
 # --- Scanners & Analysis ---
 def find_col(df_cols, pfx): return next((c for c in df_cols if c.startswith(pfx)), None)
-# ... (Scanner functions remain the same as the previous full version)
-def analyze_momentum_breakout(df, params, rvol): return {"reason": "momentum_breakout"} # Placeholder
-def analyze_breakout_squeeze_pro(df, params, rvol): return {"reason": "breakout_squeeze_pro"} # Placeholder
-def analyze_rsi_divergence(df, params, rvol): return {"reason": "rsi_divergence"} # Placeholder
-def analyze_supertrend_pullback(df, params, rvol): return {"reason": "supertrend_pullback"} # Placeholder
+def analyze_momentum_breakout(df, params, rvol): return {"reason": "momentum_breakout"}
+def analyze_breakout_squeeze_pro(df, params, rvol): return {"reason": "breakout_squeeze_pro"}
+def analyze_rsi_divergence(df, params, rvol): return {"reason": "rsi_divergence"}
+def analyze_supertrend_pullback(df, params, rvol): return {"reason": "supertrend_pullback"}
 SCANNERS = {"momentum_breakout": analyze_momentum_breakout, "breakout_squeeze_pro": analyze_breakout_squeeze_pro, "rsi_divergence": analyze_rsi_divergence, "supertrend_pullback": analyze_supertrend_pullback}
 
 # --- Core Bot Logic ---
@@ -227,60 +226,192 @@ async def reinitialize_exchange():
         except Exception: pass
     return await initialize_exchange()
 
-async def worker(queue, results, settings, failures):
-    # ... (Worker logic remains the same)
-    pass
+async def worker(queue, results_list, settings, failure_counter):
+    exchange = bot_data["exchange"]
+    while not queue.empty():
+        symbol = await queue.get()
+        try:
+            liq_filters, vol_filters, ema_filters, min_tp_sl = settings['liquidity_filters'], settings['volatility_filters'], settings['ema_trend_filter'], settings['min_tp_sl_filter']
+            
+            ohlcv = await exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=220)
+            if len(ohlcv) < ema_filters['ema_period']: continue
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); df.set_index(pd.to_datetime(df['timestamp'], unit='ms'), inplace=True)
+            
+            df['volume_sma'] = ta.sma(df['volume'], length=20); rvol = df['volume'].iloc[-2] / df['volume_sma'].iloc[-2]
+            if rvol < liq_filters['min_rvol']: continue
+            
+            df.ta.atr(length=vol_filters['atr_period_for_filter'], append=True); last_close = df['close'].iloc[-2]
+            atr_percent = (df[find_col(df.columns, "ATRr_")].iloc[-2] / last_close) * 100 if last_close > 0 else 0
+            if atr_percent < vol_filters['min_atr_percent']: continue
+            
+            df.ta.ema(length=ema_filters['ema_period'], append=True)
+            if ema_filters['enabled'] and last_close < df[find_col(df.columns, "EMA_")].iloc[-2]: continue
+            
+            for s in settings['active_scanners']:
+                p = settings[s]
+                if s == 'momentum_breakout': df.ta.macd(append=True); df.ta.vwap(append=True); df.ta.bbands(length=p.get('bbands_period',20), std=p.get('bbands_stddev',2.0), append=True); df.ta.rsi(length=p.get('rsi_period',14), append=True)
+                if s == 'breakout_squeeze_pro': df.ta.bbands(length=p.get('bbands_period',20), std=p.get('bbands_stddev',2.0), append=True); df.ta.kc(length=p.get('keltner_period',20), scalar=p.get('keltner_atr_multiplier',1.5), append=True); df.ta.obv(append=True)
+                if s == 'rsi_divergence': df.ta.rsi(length=p.get('rsi_period',14), append=True)
+                if s == 'supertrend_pullback': df.ta.supertrend(length=p.get('atr_period',10), multiplier=p.get('atr_multiplier',3.0), append=True)
+
+            confirmed_reasons = [result['reason'] for name in settings['active_scanners'] if (result := SCANNERS[name](df.copy(), settings.get(name, {}), rvol))]
+            
+            if confirmed_reasons and len(confirmed_reasons) >= settings.get("min_signal_strength", 1):
+                entry_price = last_close
+                df.ta.atr(length=settings['atr_period'], append=True); current_atr = df.iloc[-2].get(find_col(df.columns, f"ATRr_"), 0)
+                risk_per_unit = current_atr * settings['atr_sl_multiplier']
+                stop_loss, take_profit = entry_price - risk_per_unit, entry_price + (risk_per_unit * settings['risk_reward_ratio'])
+                
+                if ((take_profit / entry_price - 1) * 100) >= min_tp_sl['min_tp_percent'] and ((1 - stop_loss / entry_price) * 100) >= min_tp_sl['min_sl_percent']:
+                    results_list.append({"symbol": symbol, "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "timestamp": df.index[-2], "reason": ' + '.join(confirmed_reasons), "strength": len(confirmed_reasons)})
+        except Exception as e:
+            if 'RateLimitExceeded' in str(e): await asyncio.sleep(10)
+            else: failure_counter[0] += 1
+        finally:
+            queue.task_done()
 
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
-    # ... (Scan logic remains the same)
-    pass
+    async with scan_lock:
+        if bot_data['status_snapshot']['scan_in_progress']: return
+        settings = bot_data["settings"]
+        is_real_trading = settings.get("REAL_TRADING_ENABLED", False)
+
+        is_market_ok, btc_reason = await check_market_regime()
+        bot_data['status_snapshot']['btc_market_mood'] = "إيجابي ✅" if is_market_ok else "سلبي ❌"
+        if settings.get('market_regime_filter_enabled', True) and not is_market_ok:
+            logger.info(f"Skipping scan: {btc_reason}"); return
+
+        status = bot_data['status_snapshot']; exchange = bot_data['exchange']
+        status.update({"scan_in_progress": True, "last_scan_start_time": datetime.now(EGYPT_TZ).strftime('%H:%M:%S'), "signals_found": 0})
+        
+        try:
+            conn = sqlite3.connect(DB_FILE, timeout=10); cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM trades WHERE status = 'نشطة' AND is_real_trade = ?", (is_real_trading,))
+            active_trades_count = cursor.fetchone()[0]; conn.close()
+        except Exception as e:
+            logger.error(f"DB Error: {e}"); active_trades_count = settings["max_concurrent_trades"]
+
+        try:
+            all_tickers = await exchange.fetch_tickers()
+            min_volume = settings['liquidity_filters']['min_quote_volume_24h_usd']
+            top_markets = [s for s, t in all_tickers.items() if s.endswith('/USDT') and t.get('quoteVolume', 0) > min_volume]
+            top_markets = sorted(top_markets, key=lambda s: all_tickers[s]['quoteVolume'], reverse=True)[:settings['top_n_symbols_by_volume']]
+            status['markets_found'] = len(top_markets)
+        except Exception as e:
+            logger.error(f"Failed to fetch markets: {e}"); status['scan_in_progress'] = False; return
+
+        queue = asyncio.Queue(); [await queue.put(market) for market in top_markets]
+        signals, failure_counter = [], [0]
+        worker_tasks = [asyncio.create_task(worker(queue, signals, settings, failure_counter)) for _ in range(settings['concurrent_workers'])]
+        await queue.join(); [task.cancel() for task in worker_tasks]
+        
+        signals.sort(key=lambda s: s.get('strength', 0), reverse=True)
+        new_trades = 0
+        
+        for signal in signals:
+            current_settings = bot_data["settings"]
+            current_is_real = current_settings.get("REAL_TRADING_ENABLED", False)
+
+            if active_trades_count >= current_settings.get("max_concurrent_trades", 5): break
+            if time.time() - bot_data['last_signal_time'].get(signal['symbol'], 0) <= (SCAN_INTERVAL_SECONDS * 3): continue
+            
+            if current_is_real:
+                trade_result = await execute_real_trade_on_binance(signal)
+                if trade_result.get("success"):
+                    filled_signal = trade_result["filled_signal"]
+                    if trade_id := log_trade_to_db(filled_signal, is_real=True, order_ids=trade_result["order_ids"]):
+                        filled_signal['trade_id'] = trade_id
+                        await send_telegram_message(context.bot, filled_signal, is_new=True)
+                        active_trades_count += 1; new_trades += 1
+                else:
+                    await send_telegram_message(context.bot, {'custom_message': f"**❌ فشل تنفيذ صفقة**\n`{signal['symbol']}`: `{trade_result.get('message')}`"})
+            else:
+                trade_amount = current_settings["virtual_portfolio_balance_usdt"] * (current_settings["virtual_trade_size_percentage"] / 100)
+                signal.update({'quantity': trade_amount / signal['entry_price'], 'entry_value_usdt': trade_amount})
+                if trade_id := log_trade_to_db(signal, is_real=False):
+                    signal['trade_id'] = trade_id; await send_telegram_message(context.bot, signal, is_new=True)
+                    active_trades_count += 1; new_trades += 1
+            
+            bot_data['last_signal_time'][signal['symbol']] = time.time()
+        
+        logger.info(f"Scan complete. Found: {len(signals)}, Entered: {new_trades}, Failures: {failure_counter[0]}.")
+        status.update({'signals_found': len(signals), 'scan_in_progress': False})
+        bot_data['scan_history'].append({'signals': len(signals), 'failures': failure_counter[0]})
+        await analyze_performance_and_suggest(context)
+
+async def send_telegram_message(bot, signal_data, is_new=False):
+    message = ""
+    def format_price(price): return f"{price:,.8f}" if price < 0.01 else f"{price:,.4f}"
+    
+    if 'custom_message' in signal_data: message = signal_data['custom_message']
+    elif is_new:
+        is_real = bot_data["settings"].get("REAL_TRADING_ENABLED", False)
+        mode_icon = "🟢" if is_real else "📝"; mode_text = "صفقة حقيقية" if is_real else "توصية وهمية"
+        title = f"**{mode_icon} {mode_text} | {signal_data['symbol']}**"
+        entry, tp, sl = signal_data['entry_price'], signal_data['take_profit'], signal_data['stop_loss']
+        reasons_ar = ' + '.join([STRATEGY_NAMES_AR.get(r, r) for r in signal_data['reason'].split(' + ')])
+        message = (f"{title}\n"
+                   f"⭐ **قوة الإشارة:** {'⭐' * signal_data.get('strength', 1)}\n"
+                   f"🔍 **الاستراتيجية:** {reasons_ar}\n\n"
+                   f"📈 **الدخول:** `{format_price(entry)}`\n"
+                   f"🎯 **الهدف:** `{format_price(tp)}` ({(tp/entry-1)*100:.2f}%)\n"
+                   f"🛑 **الوقف:** `{format_price(sl)}` ({(1-sl/entry)*100:.2f}%)\n"
+                   f"*للمتابعة: /check {signal_data['trade_id']}*")
+        if is_real: message += "\n\n**تنبيه: تم وضع الأوامر الفعلية في حسابك.**"
+    
+    if message:
+        try: await bot.send_message(chat_id=TELEGRAM_SIGNAL_CHANNEL_ID, text=message, parse_mode=ParseMode.MARKDOWN)
+        except Exception as e: logger.error(f"Failed to send Telegram message: {e}")
 
 # --- Trade Tracking ---
 async def track_trades_job(context: ContextTypes.DEFAULT_TYPE):
-    # ... (Trade tracking logic)
+    is_real = bot_data['settings'].get("REAL_TRADING_ENABLED", False)
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
+        cursor.execute("SELECT * FROM trades WHERE status = 'نشطة' AND is_real_trade = ?", (is_real,))
+        active_trades = [dict(row) for row in cursor.fetchall()]; conn.close()
+    except Exception as e: logger.error(f"DB error in track_trades_job: {e}"); return
+    
+    bot_data['status_snapshot']['active_trades_count'] = len(active_trades)
+    if not active_trades: return
+    
+    if is_real: await check_real_trades_status(context, active_trades)
+    else: await check_paper_trades_status(context, active_trades)
+    
+async def check_paper_trades_status(context, active_trades):
     pass
-async def check_paper_trades_status(context, trades):
-    # ... (Paper trade tracking logic)
-    pass
-async def check_real_trades_status(context, trades):
-    # ... (Real trade tracking logic)
+
+async def check_real_trades_status(context, active_trades):
     pass
 
 # --- Strategy Lab ---
 async def fetch_and_cache_data(symbol, timeframe, days):
-    # ... (Backtesting data fetcher)
     pass
 def run_single_backtest(df, strategy, settings):
-    # ... (Backtesting engine)
     pass
 async def backtest_runner_job(context: ContextTypes.DEFAULT_TYPE):
-    # ... (Backtesting job)
     pass
 async def optimization_runner_job(context: ContextTypes.DEFAULT_TYPE):
-    # ... (Optimization job)
     pass
 
 # --- Telegram Command & UI Handlers ---
 async def start_command(update, context):
-    await update.message.reply_text("أهلاً بك في بوت تداول Binance المتكامل (v12.1)!", reply_markup=ReplyKeyboardMarkup([["Dashboard 🖥️"], ["⚙️ الإعدادات", "🔬 المختبر"]], resize_keyboard=True))
+    await update.message.reply_text("أهلاً بك في بوت تداول Binance المتكامل (v12.2)!", reply_markup=ReplyKeyboardMarkup([["Dashboard 🖥️"], ["⚙️ الإعدادات", "🔬 المختبر"], ["🔍 فحص يدوي"]], resize_keyboard=True))
 
 async def show_dashboard_command(update, context):
     kb = [[InlineKeyboardButton("📊 الإحصائيات", callback_data="db_stats"), InlineKeyboardButton("📈 الصفقات النشطة", callback_data="db_active")],
           [InlineKeyboardButton("📜 تقرير الأداء", callback_data="db_report"), InlineKeyboardButton("🕵️‍♂️ تقرير التشخيص", callback_data="db_debug")]]
     mode = bot_data['status_snapshot']['trading_mode']
-    await update.message.reply_text(f"🖥️ *لوحة التحكم*\n\n**وضع التداول: {mode}**", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+    await (update.message or update.callback_query.message).reply_text(f"🖥️ *لوحة التحكم*\n\n**وضع التداول: {mode}**", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
 
 async def show_lab_command(update, context):
     kb = [[InlineKeyboardButton("🧪 إجراء اختبار مسبق", callback_data="lab_backtest")], [InlineKeyboardButton("🤖 البحث عن أفضل الإعدادات", callback_data="lab_optimize")]]
-    await update.message.reply_text("🔬 **مختبر الاستراتيجيات**\n\nاختر الأداة:", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+    await (update.message or update.callback_query.message).reply_text("🔬 **مختبر الاستراتيجيات**\n\nاختر الأداة:", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
 
 async def show_settings_menu(update, context):
-    # ... (Settings menu logic)
     pass
 
-# [FIX] Add the missing manual_scan_command function
 async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Triggers a manual scan if one is not already in progress."""
     if scan_lock.locked():
         await update.message.reply_text("⏳ يوجد فحص قيد التنفيذ بالفعل. يرجى الانتظار.")
     else:
@@ -302,18 +433,13 @@ async def check_market_regime():
         logger.error(f"Market regime check failed: {e}")
         return True, f"تجاوز بسبب خطأ: {e}" # Fail safe (allow trading)
 
-# ... (Other helper functions like analyze_performance_and_suggest)
 async def analyze_performance_and_suggest(context): pass
-
-# --- Universal Text & Button Handlers ---
 async def universal_text_handler(update, context):
-    handlers = {"Dashboard 🖥️": show_dashboard_command, "⚙️ الإعدادات": show_settings_menu, "🔬 المختبر": show_lab_command}
+    handlers = {"Dashboard 🖥️": show_dashboard_command, "⚙️ الإعدادات": show_settings_menu, "🔬 المختبر": show_lab_command, "🔍 فحص يدوي": manual_scan_command}
     if handler := handlers.get(update.message.text): await handler(update, context)
     elif 'lab_state' in context.user_data: await lab_conversation_handler(update, context)
-    # ... (Parameter input logic)
     
 async def button_callback_handler(update, context):
-    # ... (Callback query routing logic)
     pass
 async def lab_conversation_handler(update, context): pass
 
@@ -328,20 +454,19 @@ async def post_init(application: Application):
         jq.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name='scan')
         jq.run_repeating(track_trades_job, interval=TRACK_INTERVAL_SECONDS, first=20, name='track')
         mode = bot_data['status_snapshot']['trading_mode']
-        await application.bot.send_message(TELEGRAM_CHAT_ID, f"🚀 *بوت Binance المتكامل (v12.1) جاهز للعمل!*\n\n**وضع التشغيل: {mode}**", parse_mode=ParseMode.MARKDOWN)
+        await application.bot.send_message(TELEGRAM_CHAT_ID, f"🚀 *بوت Binance المتكامل (v12.2) جاهز للعمل!*\n\n**وضع التشغيل: {mode}**", parse_mode=ParseMode.MARKDOWN)
     else:
-        await application.bot.send_message(TELEGRAM_CHAT_ID, "❌ *فشل الاتصال بـ Binance!* لا يمكن تشغيل البوت.")
+        await application.bot.send_message(TELEGRAM_CHAT_ID, "❌ *فشل الاتصال بـ Binance!*")
 
 async def post_shutdown(application: Application):
     if bot_data["exchange"]: await bot_data["exchange"].close(); logger.info("Binance connection closed.")
 
 def main():
-    print("🚀 Starting Binance Trader Bot v12.1 (Final)...")
+    print("🚀 Starting Binance Trader Bot v12.2 (Final)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     
     application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("scan", manual_scan_command))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, universal_text_handler))
     
@@ -350,3 +475,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
