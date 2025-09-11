@@ -18,4 +18,4 @@ jobs:
         script: |
           cd /root/bots/botadil
           git pull
-          pm2 reload botadil
+          pm2 reload BinanceTraderBot
