@@ -33,8 +33,8 @@ import httpx
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
-# [تحسين] إضافة استيراد ChatNotFound للتعامل مع الخطأ بشكل أفضل
-from telegram.error import BadRequest, RetryAfter, TimedOut, ChatNotFound
+# [إصلاح] إزالة استيراد ChatNotFound واستخدام BadRequest الأكثر عمومية وتوافقية
+from telegram.error import BadRequest, RetryAfter, TimedOut
 
 try:
     from scipy.signal import find_peaks
@@ -894,19 +894,21 @@ async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=F
     if not message: return
     try:
         await bot.send_message(chat_id=target_chat, text=message, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
-    # [تحسين] التعامل مع خطأ عدم العثور على القناة وإرسال تنبيه للمستخدم
-    except ChatNotFound as e:
-        logger.critical(f"CRITICAL: Chat not found for target_chat: {target_chat}. The bot might not be an admin or the ID is wrong. Error: {e}")
-        # حاول إرسال تنبيه إلى الدردشة الرئيسية للمسؤول إذا كانت المشكلة في قناة الإشارات
-        if str(target_chat) == str(TELEGRAM_SIGNAL_CHANNEL_ID) and str(target_chat) != str(TELEGRAM_CHAT_ID):
-            try:
-                await bot.send_message(
-                    chat_id=TELEGRAM_CHAT_ID,
-                    text=f"**⚠️ فشل الإرسال إلى القناة ⚠️**\n\nلم أتمكن من إرسال رسالة إلى القناة (`{target_chat}`).\n\n**السبب:** `Chat not found`\n\n**الحل:**\n1. تأكد من أنني (البوت) عضو في القناة.\n2. تأكد من أنني مشرف (Admin) في القناة ولدي صلاحية إرسال الرسائل.\n3. تحقق من أن `TELEGRAM_SIGNAL_CHANNEL_ID` صحيح.",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            except Exception as admin_e:
-                logger.error(f"Failed to send admin warning about ChatNotFound: {admin_e}")
+    # [إصلاح] التعامل مع خطأ عدم العثور على القناة وإرسال تنبيه للمستخدم
+    except BadRequest as e:
+        if 'Chat not found' in str(e):
+            logger.critical(f"CRITICAL: Chat not found for target_chat: {target_chat}. The bot might not be an admin or the ID is wrong. Error: {e}")
+            if str(target_chat) == str(TELEGRAM_SIGNAL_CHANNEL_ID) and str(target_chat) != str(TELEGRAM_CHAT_ID):
+                try:
+                    await bot.send_message(
+                        chat_id=TELEGRAM_CHAT_ID,
+                        text=f"**⚠️ فشل الإرسال إلى القناة ⚠️**\n\nلم أتمكن من إرسال رسالة إلى القناة (`{target_chat}`).\n\n**السبب:** `Chat not found`\n\n**الحل:**\n1. تأكد من أنني (البوت) عضو في القناة.\n2. تأكد من أنني مشرف (Admin) في القناة ولدي صلاحية إرسال الرسائل.\n3. تحقق من أن `TELEGRAM_SIGNAL_CHANNEL_ID` صحيح.",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                except Exception as admin_e:
+                    logger.error(f"Failed to send admin warning about ChatNotFound: {admin_e}")
+        else:
+            logger.error(f"Failed to send Telegram message to {target_chat} (BadRequest): {e}")
     except Exception as e:
         logger.error(f"Failed to send Telegram message to {target_chat}: {e}")
 
