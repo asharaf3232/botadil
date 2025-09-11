@@ -33,7 +33,8 @@ import httpx
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
-from telegram.error import BadRequest, RetryAfter, TimedOut
+# [تحسين] إضافة استيراد ChatNotFound للتعامل مع الخطأ بشكل أفضل
+from telegram.error import BadRequest, RetryAfter, TimedOut, ChatNotFound
 
 try:
     from scipy.signal import find_peaks
@@ -54,6 +55,11 @@ ALPHA_VANTAGE_API_KEY = os.getenv('ALPHA_VANTAGE_API_KEY', 'YOUR_AV_KEY_HERE')
 # أو يمكنك وضعها هنا مباشرة لأغراض الاختبار (غير مستحسن للإنتاج)
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', 'YOUR_BINANCE_API_KEY')
 BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', 'YOUR_BINANCE_API_SECRET')
+
+# [جديد] إضافة متغيرات مفاتيح API الخاصة بمنصة KuCoin
+KUCOIN_API_KEY = os.getenv('KUCOIN_API_KEY', 'YOUR_KUCOIN_API_KEY')
+KUCOIN_API_SECRET = os.getenv('KUCOIN_API_SECRET', 'YOUR_KUCOIN_API_SECRET')
+KUCOIN_API_PASSPHRASE = os.getenv('KUCOIN_API_PASSPHRASE', 'YOUR_KUCOIN_PASSPHRASE')
 
 
 if TELEGRAM_BOT_TOKEN == 'YOUR_BOT_TOKEN_HERE' or TELEGRAM_CHAT_ID == 'YOUR_CHAT_ID_HERE':
@@ -256,7 +262,7 @@ def init_database():
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10)
         cursor = conn.cursor()
-        # [تعديل] إضافة حقول جديدة لتخزين معرفات الأوامر الحقيقية من Binance
+        # [تعديل] تغيير هيكل الجدول ليكون أكثر مرونة مع المنصات المختلفة
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, 
@@ -277,8 +283,8 @@ def init_database():
                 highest_price REAL, 
                 reason TEXT,
                 is_real_trade BOOLEAN DEFAULT FALSE,
-                binance_order_id TEXT,
-                binance_oco_order_id TEXT
+                entry_order_id TEXT,
+                exit_order_ids_json TEXT
             )
         ''')
         conn.commit()
@@ -291,8 +297,8 @@ def log_recommendation_to_db(signal):
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10)
         cursor = conn.cursor()
-        # [تعديل] تحديث جملة الإدخال لتشمل الحقول الجديدة
-        sql = '''INSERT INTO trades (timestamp, exchange, symbol, entry_price, take_profit, stop_loss, quantity, entry_value_usdt, status, trailing_sl_active, highest_price, reason, is_real_trade, binance_order_id, binance_oco_order_id) 
+        # [تعديل] تحديث جملة الإدخال لتطابق الهيكل الجديد
+        sql = '''INSERT INTO trades (timestamp, exchange, symbol, entry_price, take_profit, stop_loss, quantity, entry_value_usdt, status, trailing_sl_active, highest_price, reason, is_real_trade, entry_order_id, exit_order_ids_json) 
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'''
         params = (
             signal['timestamp'].strftime('%Y-%m-%d %H:%M:%S'), 
@@ -308,8 +314,8 @@ def log_recommendation_to_db(signal):
             signal['entry_price'], 
             signal['reason'],
             signal.get('is_real_trade', False),
-            signal.get('binance_order_id'),
-            signal.get('binance_oco_order_id')
+            signal.get('entry_order_id'),
+            signal.get('exit_order_ids_json')
         )
         cursor.execute(sql, params)
         trade_id = cursor.lastrowid
@@ -482,6 +488,13 @@ async def initialize_exchanges():
             params['apiKey'] = BINANCE_API_KEY
             params['secret'] = BINANCE_API_SECRET
         
+        # [جديد] إضافة مفاتيح API عند الاتصال بـ KuCoin
+        if ex_id == 'kucoin' and KUCOIN_API_KEY != 'YOUR_KUCOIN_API_KEY':
+            logger.info("KuCoin API Keys found. Initializing with credentials.")
+            params['apiKey'] = KUCOIN_API_KEY
+            params['secret'] = KUCOIN_API_SECRET
+            params['password'] = KUCOIN_API_PASSPHRASE
+
         exchange = getattr(ccxt_async, ex_id)(params)
         try:
             await exchange.load_markets()
@@ -618,100 +631,116 @@ async def worker(queue, results_list, settings, failure_counter):
         finally:
             queue.task_done()
 
-# [جديد] دالة لجلب الرصيد الحقيقي من Binance
-async def get_binance_balance(currency='USDT'):
-    """Fetches the available balance for a specific currency from Binance."""
+# [تعديل] تعميم الدالة لجلب الرصيد من أي منصة
+async def get_real_balance(exchange_id, currency='USDT'):
+    """Fetches the available balance for a specific currency from a given exchange."""
     try:
-        binance = bot_data["exchanges"].get('binance')
-        if not binance or not binance.apiKey:
-            logger.warning("Cannot fetch balance: Binance client not authenticated.")
+        exchange = bot_data["exchanges"].get(exchange_id.lower())
+        if not exchange or not exchange.apiKey:
+            logger.warning(f"Cannot fetch balance: {exchange_id.capitalize()} client not authenticated.")
             return 0.0
             
-        balance = await binance.fetch_balance()
+        balance = await exchange.fetch_balance()
         return balance['free'][currency]
     except Exception as e:
-        logger.error(f"Error fetching Binance balance for {currency}: {e}")
+        logger.error(f"Error fetching {exchange_id.capitalize()} balance for {currency}: {e}")
         return 0.0
 
-# [جديد] دالة لتنفيذ الصفقات الحقيقية
+# [تعديل جذري] إعادة كتابة الدالة لدعم منصات متعددة (Binance و KuCoin)
 async def place_real_trade(signal, context: ContextTypes.DEFAULT_TYPE):
     """
-    Places a real trade on Binance.
-    1. Fetches real USDT balance.
-    2. Calculates trade size.
-    3. Places a MARKET BUY order.
-    4. If successful, places an OCO SELL order for Take Profit (LIMIT) and Stop Loss (STOP_LOSS_LIMIT).
-    Returns a dictionary with order IDs if successful, else None.
+    Places a real trade on a supported exchange (Binance, KuCoin).
+    - Binance: Uses MARKET BUY + OCO SELL.
+    - KuCoin: Uses MARKET BUY + separate LIMIT SELL (TP) and STOP_LIMIT SELL (SL).
+    Returns a dictionary with order details if successful, else None.
     """
-    logger.info(f"Attempting to place REAL TRADE for {signal['symbol']}")
-    binance = bot_data["exchanges"].get('binance')
-    if not binance or not binance.apiKey:
-        logger.error(f"Cannot place real trade for {signal['symbol']}: Binance client not authenticated.")
+    exchange_id = signal['exchange'].lower()
+    logger.info(f"Attempting to place REAL TRADE for {signal['symbol']} on {exchange_id.capitalize()}")
+    exchange = bot_data["exchanges"].get(exchange_id)
+    if not exchange or not exchange.apiKey:
+        logger.error(f"Cannot place real trade for {signal['symbol']}: {exchange_id.capitalize()} client not authenticated.")
         return None
 
     try:
         # 1. جلب الرصيد وتحديد حجم الصفقة
-        usdt_balance = await get_binance_balance('USDT')
+        usdt_balance = await get_real_balance(exchange_id, 'USDT')
         trade_size_percent = bot_data['settings']['virtual_trade_size_percentage']
         trade_amount_usdt = usdt_balance * (trade_size_percent / 100)
         
-        if trade_amount_usdt < 10: # الحد الأدنى لحجم الصفقة في باينانس عادةً
+        # الحد الأدنى لحجم الصفقة يختلف بين المنصات، 10 دولار هو حد آمن
+        if trade_amount_usdt < 10: 
             logger.warning(f"Skipping real trade for {signal['symbol']}. Trade amount ${trade_amount_usdt:.2f} is below minimum.")
             return None
 
         # 2. الحصول على معلومات السوق لتحديد دقة الكمية والسعر
-        markets = await binance.load_markets()
+        markets = await exchange.load_markets()
         market_info = markets.get(signal['symbol'])
         if not market_info:
-            logger.error(f"Could not find market info for {signal['symbol']}")
+            logger.error(f"Could not find market info for {signal['symbol']} on {exchange_id.capitalize()}")
             return None
         
         # 3. حساب الكمية وتنسيقها حسب دقة السوق
         quantity = trade_amount_usdt / signal['entry_price']
-        formatted_quantity = binance.amount_to_precision(signal['symbol'], quantity)
+        formatted_quantity = exchange.amount_to_precision(signal['symbol'], quantity)
 
         # 4. تنفيذ أمر الشراء (Market Buy)
-        logger.info(f"Placing MARKET BUY order for {formatted_quantity} of {signal['symbol']}")
-        buy_order = await binance.create_market_buy_order(signal['symbol'], float(formatted_quantity))
-        logger.info(f"Market buy order placed successfully for {signal['symbol']}. Order ID: {buy_order['id']}")
+        logger.info(f"Placing MARKET BUY order for {formatted_quantity} of {signal['symbol']} on {exchange_id.capitalize()}")
+        buy_order = await exchange.create_market_buy_order(signal['symbol'], float(formatted_quantity))
+        logger.info(f"Market buy order placed successfully. Order ID: {buy_order['id']}")
         
         await asyncio.sleep(2) # انتظار قصير لضمان تحديث الحساب
 
-        # 5. تنفيذ أمر OCO للهدف والوقف
-        tp_price = binance.price_to_precision(signal['symbol'], signal['take_profit'])
-        sl_price = binance.price_to_precision(signal['symbol'], signal['stop_loss'])
-        sl_trigger_price = binance.price_to_precision(signal['symbol'], signal['stop_loss'] * 1.001) # سعر التفعيل أعلى قليلاً من سعر الوقف
+        # 5. تنفيذ أوامر الخروج (الهدف والوقف) حسب المنصة
+        tp_price = exchange.price_to_precision(signal['symbol'], signal['take_profit'])
+        sl_price = exchange.price_to_precision(signal['symbol'], signal['stop_loss'])
+        exit_order_ids = {}
 
-        logger.info(f"Placing OCO SELL order for {signal['symbol']}. TP: {tp_price}, SL: {sl_price}")
-        oco_params = {'stopLimitPrice': sl_price} # Required for stop loss limit orders
-        oco_order = await binance.create_order(
-            signal['symbol'], 
-            'oco', 
-            'sell', 
-            float(formatted_quantity), 
-            price=tp_price, # سعر الهدف (Limit)
-            stopPrice=sl_trigger_price, # سعر تفعيل الوقف
-            params=oco_params
-        )
-        logger.info(f"OCO order placed successfully for {signal['symbol']}. List Order ID: {oco_order['info']['listClientOrderId']}")
+        if exchange_id == 'binance':
+            logger.info(f"Placing OCO SELL order on Binance. TP: {tp_price}, SL: {sl_price}")
+            sl_trigger_price = exchange.price_to_precision(signal['symbol'], signal['stop_loss'] * 1.001)
+            oco_params = {'stopLimitPrice': sl_price}
+            oco_order = await exchange.create_order(
+                signal['symbol'], 'oco', 'sell', float(formatted_quantity), 
+                price=tp_price, stopPrice=sl_trigger_price, params=oco_params
+            )
+            logger.info(f"Binance OCO order placed successfully. List Order ID: {oco_order['id']}")
+            exit_order_ids = {"oco_id": oco_order['id']}
         
-        await send_telegram_message(context.bot, {'custom_message': f"**🚨 صفقة حقيقية تم تنفيذها 🚨**\n\n- **العملة:** `{signal['symbol']}`\n- **الكمية:** `{formatted_quantity}`\n- **أمر الشراء ID:** `{buy_order['id']}`\n- **أمر OCO ID:** `{oco_order['id']}`"})
+        elif exchange_id == 'kucoin':
+            logger.info(f"Placing separate TP/SL orders on KuCoin. TP: {tp_price}, SL: {sl_price}")
+            # أمر الهدف (Limit Sell)
+            tp_order = await exchange.create_limit_sell_order(signal['symbol'], float(formatted_quantity), float(tp_price))
+            logger.info(f"KuCoin TP order placed successfully. Order ID: {tp_order['id']}")
+            # أمر الوقف (Stop-Limit Sell)
+            sl_trigger_price = exchange.price_to_precision(signal['symbol'], signal['stop_loss'] * 1.002) # سعر تفعيل الوقف
+            sl_order = await exchange.create_order(signal['symbol'], 'stop_limit', 'sell', float(formatted_quantity), float(sl_price), params={'stopPrice': float(sl_trigger_price)})
+            logger.info(f"KuCoin SL order placed successfully. Order ID: {sl_order['id']}")
+            exit_order_ids = {"tp_id": tp_order['id'], "sl_id": sl_order['id']}
+        
+        else:
+            logger.error(f"Real trading logic not implemented for {exchange_id.capitalize()}.")
+            # يجب إلغاء أمر الشراء إذا لم نتمكن من وضع أوامر الخروج
+            await exchange.cancel_order(buy_order['id'], signal['symbol'])
+            logger.info(f"Market buy order {buy_order['id']} was cancelled due to unsupported exit order logic.")
+            return None
+
+        await send_telegram_message(context.bot, {'custom_message': f"**🚨 صفقة حقيقية تم تنفيذها على {exchange_id.capitalize()} 🚨**\n\n- **العملة:** `{signal['symbol']}`\n- **الكمية:** `{formatted_quantity}`\n- **أمر الشراء ID:** `{buy_order['id']}`"})
 
         return {
-            "binance_order_id": buy_order['id'],
-            "binance_oco_order_id": oco_order['id'],
+            "entry_order_id": buy_order['id'],
+            "exit_order_ids_json": json.dumps(exit_order_ids),
             "quantity": float(formatted_quantity),
             "entry_value_usdt": trade_amount_usdt
         }
 
     except ccxt.InsufficientFunds as e:
-        logger.error(f"REAL TRADE FAILED for {signal['symbol']}: Insufficient funds. {e}")
-        await send_telegram_message(context.bot, {'custom_message': f"**❌ فشل التنفيذ: رصيد غير كافٍ**\n\nلم أتمكن من فتح صفقة `{signal['symbol']}` لعدم وجود رصيد USDT كافٍ."})
+        logger.error(f"REAL TRADE FAILED for {signal['symbol']} on {exchange_id.capitalize()}: Insufficient funds. {e}")
+        await send_telegram_message(context.bot, {'custom_message': f"**❌ فشل التنفيذ: رصيد غير كافٍ على {exchange_id.capitalize()}**"})
     except ccxt.ExchangeError as e:
-        logger.error(f"REAL TRADE FAILED for {signal['symbol']}: Exchange error. {e}", exc_info=True)
-        await send_telegram_message(context.bot, {'custom_message': f"**❌ فشل التنفيذ: خطأ من المنصة**\n\nحدث خطأ أثناء محاولة فتح صفقة `{signal['symbol']}`. التفاصيل:\n`{e}`"})
+        logger.error(f"REAL TRADE FAILED for {signal['symbol']} on {exchange_id.capitalize()}: Exchange error. {e}", exc_info=True)
+        await send_telegram_message(context.bot, {'custom_message': f"**❌ فشل التنفيذ: خطأ من منصة {exchange_id.capitalize()}**\n`{e}`"})
     except Exception as e:
-        logger.error(f"CRITICAL REAL TRADE FAILED for {signal['symbol']}: {e}", exc_info=True)
+        logger.error(f"CRITICAL REAL TRADE FAILED for {signal['symbol']} on {exchange_id.capitalize()}: {e}", exc_info=True)
     return None
 
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
@@ -865,6 +894,19 @@ async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=F
     if not message: return
     try:
         await bot.send_message(chat_id=target_chat, text=message, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+    # [تحسين] التعامل مع خطأ عدم العثور على القناة وإرسال تنبيه للمستخدم
+    except ChatNotFound as e:
+        logger.critical(f"CRITICAL: Chat not found for target_chat: {target_chat}. The bot might not be an admin or the ID is wrong. Error: {e}")
+        # حاول إرسال تنبيه إلى الدردشة الرئيسية للمسؤول إذا كانت المشكلة في قناة الإشارات
+        if str(target_chat) == str(TELEGRAM_SIGNAL_CHANNEL_ID) and str(target_chat) != str(TELEGRAM_CHAT_ID):
+            try:
+                await bot.send_message(
+                    chat_id=TELEGRAM_CHAT_ID,
+                    text=f"**⚠️ فشل الإرسال إلى القناة ⚠️**\n\nلم أتمكن من إرسال رسالة إلى القناة (`{target_chat}`).\n\n**السبب:** `Chat not found`\n\n**الحل:**\n1. تأكد من أنني (البوت) عضو في القناة.\n2. تأكد من أنني مشرف (Admin) في القناة ولدي صلاحية إرسال الرسائل.\n3. تحقق من أن `TELEGRAM_SIGNAL_CHANNEL_ID` صحيح.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as admin_e:
+                logger.error(f"Failed to send admin warning about ChatNotFound: {admin_e}")
     except Exception as e:
         logger.error(f"Failed to send Telegram message to {target_chat}: {e}")
 
@@ -882,29 +924,46 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
         if not exchange: return None
         
         # [تعديل] منطق جديد لمتابعة الصفقات الحقيقية
-        if trade.get('is_real_trade') and trade.get('binance_oco_order_id'):
+        if trade.get('is_real_trade'):
             try:
-                # جلب حالة أمر OCO. إذا تم إغلاقه، فهذا يعني أن الهدف أو الوقف قد تم تفعيله
-                oco_order_id = trade['binance_oco_order_id']
-                order_status = await exchange.fetch_order(oco_order_id, trade['symbol'])
+                exit_ids = json.loads(trade.get('exit_order_ids_json', '{}'))
+                symbol = trade['symbol']
                 
-                if order_status['status'] == 'closed':
-                    # تحديد ما إذا كان الهدف أم الوقف هو الذي تم تفعيله
-                    # CCXT لا يوفر هذه المعلومة مباشرة لأوامر OCO، سنعتمد على سعر الإغلاق النهائي
-                    final_price = order_status.get('average', order_status.get('price'))
-                    if final_price >= trade['take_profit']:
-                        return {'id': trade['id'], 'status': 'ناجحة', 'exit_price': final_price, 'highest_price': final_price}
-                    else:
-                        return {'id': trade['id'], 'status': 'فاشلة', 'exit_price': final_price, 'highest_price': trade.get('highest_price', trade['entry_price'])}
-                return None # الأمر لا يزال مفتوحًا
+                # الحالة الأولى: صفقة Binance مع أمر OCO
+                if 'oco_id' in exit_ids:
+                    order_status = await exchange.fetch_order(exit_ids['oco_id'], symbol)
+                    if order_status['status'] == 'closed':
+                        final_price = order_status.get('average', order_status.get('price'))
+                        status = 'ناجحة' if final_price >= trade['take_profit'] else 'فاشلة'
+                        return {'id': trade['id'], 'status': status, 'exit_price': final_price, 'highest_price': trade.get('highest_price', final_price)}
+                
+                # الحالة الثانية: صفقة KuCoin مع أوامر منفصلة
+                elif 'tp_id' in exit_ids:
+                    tp_id, sl_id = exit_ids['tp_id'], exit_ids['sl_id']
+                    # تحقق من أمر الهدف أولاً
+                    tp_order = await exchange.fetch_order(tp_id, symbol)
+                    if tp_order['status'] == 'closed':
+                        logger.info(f"KuCoin TP order {tp_id} for {symbol} is closed. Cancelling SL order {sl_id}.")
+                        try: await exchange.cancel_order(sl_id, symbol)
+                        except ccxt.OrderNotFound: pass # لا مشكلة، المنصة ألغته بالفعل
+                        return {'id': trade['id'], 'status': 'ناجحة', 'exit_price': tp_order.get('average', tp_order.get('price')), 'highest_price': trade.get('highest_price', tp_order.get('price'))}
+                    
+                    # تحقق من أمر الوقف
+                    sl_order = await exchange.fetch_order(sl_id, symbol)
+                    if sl_order['status'] == 'closed':
+                        logger.info(f"KuCoin SL order {sl_id} for {symbol} is closed. Cancelling TP order {tp_id}.")
+                        try: await exchange.cancel_order(tp_id, symbol)
+                        except ccxt.OrderNotFound: pass
+                        return {'id': trade['id'], 'status': 'فاشلة', 'exit_price': sl_order.get('average', sl_order.get('price')), 'highest_price': trade.get('highest_price', trade['entry_price'])}
+
             except ccxt.OrderNotFound:
-                 logger.warning(f"Real trade OCO order {trade['binance_oco_order_id']} for {trade['symbol']} not found. Maybe it was cancelled manually. Closing as failed.")
+                 logger.warning(f"Real trade exit order for {trade['symbol']} (ID: {trade['id']}) not found. Maybe cancelled manually. Closing as failed.")
                  ticker = await exchange.fetch_ticker(trade['symbol'])
                  current_price = ticker.get('last') or ticker.get('close')
                  return {'id': trade['id'], 'status': 'فاشلة', 'exit_price': current_price, 'highest_price': trade.get('highest_price', trade['entry_price'])}
             except Exception as e:
                 logger.error(f"Error tracking real trade {trade['id']} ({trade['symbol']}): {e}")
-                return None
+            return None # إذا لم يتم إغلاق أي من الأوامر، استمر في المتابعة
 
         # --- المنطق الحالي للصفقات التجريبية ---
         try:
@@ -940,7 +999,8 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
         status = result['status']
         if status in ['ناجحة', 'فاشلة']:
             pnl_usdt = (result['exit_price'] - original_trade['entry_price']) * original_trade['quantity']
-            portfolio_pnl += pnl_usdt
+            if not original_trade.get('is_real_trade'):
+                portfolio_pnl += pnl_usdt
             closed_at_str = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')
             
             start_dt = datetime.strptime(original_trade['timestamp'], '%Y-%m-%d %H:%M:%S')
