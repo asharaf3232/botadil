@@ -1007,7 +1007,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
             # [إصلاح] التعامل مع التواريخ بطريقة واعية للمنطقة الزمنية (timezone-aware)
             closed_at_str = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')
             start_dt_naive = datetime.strptime(original_trade['timestamp'], '%Y-%m-%d %H:%M:%S')
-            start_dt = start_dt_naive.replace(tzinfo=EGYPT_TZ)
+            start_dt = EGYPT_TZ.localize(start_dt_naive)
             end_dt = datetime.now(EGYPT_TZ)
             duration = end_dt - start_dt
 
@@ -1411,10 +1411,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE): awa
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.message or update.callback_query.message
+    # [ميزة جديدة] إضافة زر الأدوات
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 الإحصائيات العامة", callback_data="dashboard_stats"), InlineKeyboardButton("📈 الصفقات النشطة", callback_data="dashboard_active_trades")],
         [InlineKeyboardButton("📜 تقرير أداء الاستراتيجيات", callback_data="dashboard_strategy_report")],
-        [InlineKeyboardButton("🔬 مختبر الاستراتيجيات", callback_data="dashboard_lab")], # [جديد]
+        [InlineKeyboardButton("🛠️ أدوات", callback_data="dashboard_tools")],
         [InlineKeyboardButton("🗓️ التقرير اليومي", callback_data="dashboard_daily_report"), InlineKeyboardButton("🕵️‍♂️ تقرير التشخيص", callback_data="dashboard_debug")],
         [InlineKeyboardButton("🔄 تحديث", callback_data="dashboard_refresh")]
     ])
@@ -1478,7 +1479,14 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         if "Message is not modified" not in str(e): logger.error(f"Error editing parameters menu: {e}")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("*مساعدة البوت*\n`/start` - بدء\n`/check <ID>` - متابعة صفقة", parse_mode=ParseMode.MARKDOWN)
+    # [ميزة جديدة] تحديث رسالة المساعدة
+    help_text = (
+        "**🤖 أوامر البوت المتاحة **\n\n"
+        "`/start` - لعرض القائمة الرئيسية وبدء التفاعل.\n"
+        "`/check <ID>` - لمتابعة حالة صفقة معينة باستخدام رقمها.\n"
+        "`/trade` - لبدء عملية تداول يدوية لاختبار الاتصال بالمنصات."
+    )
+    await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.callback_query.message if update.callback_query else update.message
     try:
@@ -1511,7 +1519,7 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
         conn = sqlite3.connect(DB_FILE, timeout=10)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT symbol, status, pnl_usdt, entry_value_usdt, reason, closed_at FROM trades WHERE DATE(closed_at) = ?", (today_str,))
+        cursor.execute("SELECT symbol, status, pnl_usdt, entry_value_usdt, reason, is_real_trade, closed_at FROM trades WHERE DATE(closed_at) = ?", (today_str,))
         closed_today = [dict(row) for row in cursor.fetchall()]
         conn.close()
 
@@ -1671,7 +1679,7 @@ async def check_trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             # [إصلاح] التعامل مع التواريخ بطريقة واعية للمنطقة الزمنية (timezone-aware)
             closed_at_dt_naive = datetime.strptime(trade['closed_at'], '%Y-%m-%d %H:%M:%S')
-            closed_at_dt = closed_at_dt_naive.replace(tzinfo=EGYPT_TZ)
+            closed_at_dt = EGYPT_TZ.localize(closed_at_dt_naive)
             message = f"📋 *ملخص الصفقة #{trade_id}*\n\n*العملة:* `{trade['symbol']}`\n*الحالة:* `{trade['status']}`\n*تاريخ الإغلاق:* `{closed_at_dt.strftime('%Y-%m-%d %I:%M %p')}`\n*الربح/الخسارة:* `${trade.get('pnl_usdt', 0):+.2f} ({pnl_percent:+.2f}%)`"
         else:
             if not (exchange := bot_data["exchanges"].get(trade['exchange'].lower())): await target.reply_text("المنصة غير متصلة."); return
@@ -1698,6 +1706,64 @@ async def show_active_trades_command(update: Update, context: ContextTypes.DEFAU
         await target_message.reply_text("اختر صفقة لمتابعتها:", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e: logger.error(f"Error in show_active_trades: {e}"); await target_message.reply_text("خطأ في جلب الصفقات.")
 
+# [ميزة جديدة] دالة تنفيذ الأوامر اليدوية
+async def execute_manual_trade(exchange_id, symbol, amount_usdt, side, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Attempting MANUAL {side.upper()} for {symbol} on {exchange_id} for ${amount_usdt}")
+    exchange = bot_data["exchanges"].get(exchange_id.lower())
+    if not exchange or not exchange.apiKey:
+        return {"success": False, "error": f"لا يمكن تنفيذ الأمر. لم يتم توثيق الاتصال بمنصة {exchange_id.capitalize()}."}
+
+    try:
+        ticker = await exchange.fetch_ticker(symbol)
+        current_price = ticker.get('last') or ticker.get('close')
+        if not current_price:
+            return {"success": False, "error": f"لم أتمكن من جلب السعر الحالي لـ {symbol}."}
+
+        quantity = float(amount_usdt) / current_price
+        formatted_quantity = exchange.amount_to_precision(symbol, quantity)
+
+        order = None
+        if side == 'buy':
+            order = await exchange.create_market_buy_order(symbol, float(formatted_quantity))
+        elif side == 'sell':
+            order = await exchange.create_market_sell_order(symbol, float(formatted_quantity))
+        
+        logger.info(f"MANUAL ORDER SUCCESS: {order}")
+        
+        filled_quantity = order.get('filled', 0) or order.get('amount', 0)
+        filled_price = order.get('average', 0) or order.get('price', current_price)
+        cost = order.get('cost', filled_quantity * filled_price)
+        
+        success_message = (
+            f"**✅ تم تنفيذ الأمر اليدوي بنجاح**\n\n"
+            f"**المنصة:** `{exchange_id.capitalize()}`\n"
+            f"**العملة:** `{symbol}`\n"
+            f"**النوع:** `{side.upper()}`\n\n"
+            f"--- **تفاصيل الأمر** ---\n"
+            f"**ID:** `{order['id']}`\n"
+            f"**الكمية المنفذة:** `{filled_quantity}`\n"
+            f"**متوسط سعر التنفيذ:** `{filled_price}`\n"
+            f"**التكلفة الإجمالية:** `${cost:.2f}`"
+        )
+        return {"success": True, "message": success_message}
+
+    except ccxt.InsufficientFunds as e:
+        error_msg = f"❌ فشل: رصيد غير كافٍ على {exchange_id.capitalize()}."
+        logger.error(f"MANUAL TRADE FAILED: {error_msg} - {e}")
+        return {"success": False, "error": error_msg}
+    except ccxt.InvalidOrder as e:
+        error_msg = f"❌ فشل: أمر غير صالح. قد يكون المبلغ أقل من الحد الأدنى للمنصة. ({e})"
+        logger.error(f"MANUAL TRADE FAILED: {error_msg} - {e}")
+        return {"success": False, "error": error_msg}
+    except ccxt.ExchangeError as e:
+        error_msg = f"❌ فشل: خطأ من المنصة. ({e})"
+        logger.error(f"MANUAL TRADE FAILED: {error_msg} - {e}")
+        return {"success": False, "error": error_msg}
+    except Exception as e:
+        error_msg = f"❌ فشل: حدث خطأ غير متوقع. ({e})"
+        logger.error(f"MANUAL TRADE FAILED: {error_msg} - {e}", exc_info=True)
+        return {"success": False, "error": error_msg}
+
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); data = query.data
     user_data = context.user_data
@@ -1711,19 +1777,30 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         elif action == "daily_report": await daily_report_command(update, context)
         elif action == "debug": await debug_command(update, context)
         elif action == "refresh": await show_dashboard_command(update, context)
+        elif action == "tools": # [ميزة جديدة] قائمة الأدوات
+             keyboard = [
+                 [InlineKeyboardButton("🔬 مختبر الاستراتيجيات", callback_data="dashboard_lab")],
+                 [InlineKeyboardButton("✍️ تداول يدوي", callback_data="manual_trade_start")],
+                 [InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="dashboard_refresh")]
+             ]
+             await query.edit_message_text("🛠️ *أدوات التداول والاختبار*\n\nاختر الأداة التي تريد استخدامها:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
         elif action == "lab":
             keyboard = [[InlineKeyboardButton("🧪 إجراء اختبار مسبق (Backtest)", callback_data="lab_start_backtest")],
                         [InlineKeyboardButton("🤖 البحث عن أفضل الإعدادات (Optimize)", callback_data="lab_start_optimize")]]
             await query.edit_message_text("🔬 **مختبر الاستراتيجيات**\n\nاختر الأداة التي تريد استخدامها:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
         return
 
+    # [ميزة جديدة] بدء محادثة التداول اليدوي
+    elif data == "manual_trade_start":
+        await manual_trade_command(update, context)
+        return
+        
     # --- Strategy Lab Flow ---
     elif data.startswith("lab_"):
         action = data.split("_", 1)[1]
         if action == "start_backtest" or action == "start_optimize":
-            user_data['lab_mode'] = 'backtest' if action == "start_backtest" else 'optimize'
             user_data['lab_state'] = 'awaiting_symbol'
-            mode_text = "اختبار مسبق" if user_data['lab_mode'] == 'backtest' else "البحث عن أفضل الإعدادات"
+            mode_text = "اختبار مسبق" if action == "start_backtest" else "البحث عن أفضل الإعدادات"
             await query.edit_message_text(f"✍️ **بدء {mode_text}**\n\nالرجاء إرسال رمز العملة (مثال: `BTC/USDT`).", parse_mode=ParseMode.MARKDOWN)
         
         elif action.startswith("strategy"):
@@ -1754,7 +1831,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                     context.job_queue.run_once(job_to_run, 1, data={
                         'chat_id': query.message.chat_id, 'symbol': user_data['lab_symbol'],
                         'strategy_name': user_data['lab_strategy'], 'days': days
-                    }, name=f"lab_{user_data['lab_mode']}_{query.message.chat_id}_{time.time()}")
+                    }, name=f"lab_{user_data.get('lab_mode')}_{query.message.chat_id}_{time.time()}")
                 
                 for key in ['lab_mode', 'lab_state', 'lab_symbol', 'lab_strategy']:
                     user_data.pop(key, None)
@@ -1817,16 +1894,91 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         elif action == "decline":
             await query.edit_message_text("👍 **تم تجاهل الاقتراح.**\n\nسيستمر البوت بالعمل على الإعدادات الحالية.", parse_mode=ParseMode.MARKDOWN)
 
+# [ميزة جديدة] معالج أزرار التداول اليدوي
+async def manual_trade_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query; await query.answer(); data = query.data
+    user_data = context.user_data
+    
+    # التحقق من أننا داخل محادثة تداول يدوي
+    if 'manual_trade' not in user_data:
+        await query.edit_message_text("⚠️ انتهت هذه الجلسة. ابدأ من جديد باستخدام /trade.")
+        return
+
+    state = user_data['manual_trade'].get('state')
+
+    if data == "manual_trade_cancel":
+        user_data.pop('manual_trade', None)
+        await query.edit_message_text("👍 تم إلغاء عملية التداول اليدوي.")
+        return
+
+    if state == 'awaiting_exchange':
+        exchange = data.split("_")[-1]
+        user_data['manual_trade']['exchange'] = exchange
+        user_data['manual_trade']['state'] = 'awaiting_symbol'
+        await query.edit_message_text(f"اخترت منصة: *{exchange.capitalize()}*\n\nالآن، أرسل رمز العملة (مثال: `BTC/USDT`).", parse_mode=ParseMode.MARKDOWN)
+    
+    elif state == 'awaiting_side':
+        side = data.split("_")[-1]
+        user_data['manual_trade']['side'] = side
+        user_data['manual_trade']['state'] = 'confirming'
+        
+        trade_data = user_data['manual_trade']
+        await query.edit_message_text("⏳ جاري تنفيذ الأمر...", reply_markup=None)
+        
+        result = await execute_manual_trade(
+            exchange_id=trade_data['exchange'],
+            symbol=trade_data['symbol'],
+            amount_usdt=trade_data['amount'],
+            side=trade_data['side'],
+            context=context
+        )
+        
+        if result['success']:
+            await query.edit_message_text(result['message'], parse_mode=ParseMode.MARKDOWN)
+        else:
+            await query.edit_message_text(result['error'], parse_mode=ParseMode.MARKDOWN)
+        
+        user_data.pop('manual_trade', None)
+
 
 # [إصلاح] معالج رسائل موحد وذكي
 async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # [إصلاح] التحقق من وجود رسالة قبل معالجتها لتجنب خطأ AttributeError
-    if not update.message:
+    if not update.message or not update.message.text:
         return
         
     user_data = context.user_data
     text = update.message.text
     
+    # [ميزة جديدة] التعامل مع إدخالات محادثة التداول اليدوي
+    if 'manual_trade' in user_data:
+        state = user_data['manual_trade'].get('state')
+        chat_id = update.message.chat_id
+        
+        if state == 'awaiting_symbol':
+            if '/' not in text or len(text.split('/')[0]) < 2:
+                await update.message.reply_text("❌ رمز غير صالح. الرجاء إرسال الرمز بالتنسيق الصحيح (مثال: `BTC/USDT`).", parse_mode=ParseMode.MARKDOWN)
+                return
+            user_data['manual_trade']['symbol'] = text.upper()
+            user_data['manual_trade']['state'] = 'awaiting_amount'
+            await update.message.reply_text(f"رمز العملة: *{text.upper()}*\n\nالآن، أدخل المبلغ بـ USDT (مثال: `15`).", parse_mode=ParseMode.MARKDOWN)
+
+        elif state == 'awaiting_amount':
+            try:
+                amount = float(text)
+                if amount <= 0: raise ValueError("Amount must be positive")
+                user_data['manual_trade']['amount'] = amount
+                user_data['manual_trade']['state'] = 'awaiting_side'
+                keyboard = [
+                    [InlineKeyboardButton("📈 شراء (Buy)", callback_data="manual_trade_side_buy"),
+                     InlineKeyboardButton("📉 بيع (Sell)", callback_data="manual_trade_side_sell")],
+                    [InlineKeyboardButton("❌ إلغاء", callback_data="manual_trade_cancel")]
+                ]
+                await update.message.reply_text(f"المبلغ: *${amount}*\n\nاختر نوع الأمر:", reply_markup=InlineKeyboardMarkup(keyboard))
+            except ValueError:
+                await update.message.reply_text("❌ مبلغ غير صالح. الرجاء إرسال رقم فقط (مثال: `15` أو `20.5`).")
+        return
+
     # الأولوية ١: التعامل مع أزرار القائمة الرئيسية
     menu_handlers = {
         "Dashboard 🖥️": show_dashboard_command,
@@ -1840,7 +1992,7 @@ async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_T
     if text in menu_handlers:
         # الخروج من أي حوار نشط عند الضغط على زر قائمة
         for key in list(user_data.keys()):
-            if key.startswith('lab_') or key == 'awaiting_input_for_param':
+            if key.startswith(('lab_', 'manual_trade')) or key == 'awaiting_input_for_param':
                 user_data.pop(key)
         
         handler = menu_handlers[text]
@@ -1877,6 +2029,21 @@ async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_T
                 context.job_queue.run_once(lambda _: show_parameters_menu(update, context), 3)
         return
 
+# [ميزة جديدة] أمر بدء التداول اليدوي
+async def manual_trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['manual_trade'] = {'state': 'awaiting_exchange'}
+    keyboard = [
+        [InlineKeyboardButton("Binance", callback_data="manual_trade_exchange_binance"),
+         InlineKeyboardButton("KuCoin", callback_data="manual_trade_exchange_kucoin")],
+        [InlineKeyboardButton("❌ إلغاء", callback_data="manual_trade_cancel")]
+    ]
+    
+    message_text = "✍️ **بدء تداول يدوي**\n\nاختر المنصة التي تريد تنفيذ الأمر عليها:"
+    if update.callback_query:
+        await update.callback_query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await update.message.reply_text(message_text, reply_markup=InlineKeyboardMarkup(keyboard))
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None: logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
 async def post_init(application: Application):
     if NLTK_AVAILABLE:
@@ -1887,17 +2054,17 @@ async def post_init(application: Application):
     if not bot_data["exchanges"]: logger.critical("CRITICAL: No exchanges connected. Bot cannot run."); return
     # [تعديل] التحقق من وجود مفاتيح Binance عند تفعيل التداول الحقيقي
     if bot_data['settings'].get('real_trading_enabled'):
-        if BINANCE_API_KEY == 'YOUR_BINANCE_API_KEY' or BINANCE_API_SECRET == 'YOUR_BINANCE_API_SECRET':
-            logger.critical("CRITICAL: Real trading is enabled, but Binance API keys are not set!")
+        if (BINANCE_API_KEY == 'YOUR_BINANCE_API_KEY' or BINANCE_API_SECRET == 'YOUR_BINANCE_API_SECRET') and \
+           (KUCOIN_API_KEY == 'YOUR_KUCOIN_API_KEY' or KUCOIN_API_SECRET == 'YOUR_KUCOIN_API_SECRET'):
+            logger.critical("CRITICAL: Real trading is enabled, but no API keys (Binance or KuCoin) are set!")
             await application.bot.send_message(
                 chat_id=TELEGRAM_CHAT_ID, 
-                text="**🚨 خطأ فادح: مفاتيح التداول مفقودة 🚨**\n\nتم تفعيل التداول الحقيقي، ولكن لم يتم العثور على مفاتيح API الخاصة بمنصة Binance. سيتم تعطيل البوت الآن.",
+                text="**🚨 خطأ فادح: مفاتيح التداول مفقودة 🚨**\n\nتم تفعيل التداول الحقيقي، ولكن لم يتم العثور على أي مفاتيح API. سيتم تعطيل البوت الآن.",
                 parse_mode=ParseMode.MARKDOWN
             )
-            # لا تقم بجدولة المهام إذا كانت الإعدادات خاطئة
             return
         else:
-             logger.info("Real trading is enabled and Binance keys are present.")
+             logger.info("Real trading is enabled and at least one set of API keys is present.")
 
     logger.info("Exchanges initialized. Setting up job queue...")
     job_queue = application.job_queue
@@ -1916,6 +2083,11 @@ def main():
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("check", check_trade_command))
+    # [ميزة جديدة] إضافة معالج أمر التداول اليدوي
+    application.add_handler(CommandHandler("trade", manual_trade_command))
+    
+    # [ميزة جديدة] تعديل معالج الأزرار ليشمل محادثة التداول اليدوي
+    application.add_handler(CallbackQueryHandler(manual_trade_button_handler, pattern="^manual_trade_"))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     
     # معالج رسائل واحد وموحد
