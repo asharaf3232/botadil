@@ -762,11 +762,11 @@ async def place_real_trade(signal):
     if not exchange or not exchange.apiKey:
         return {'success': False, 'data': f"Client not authenticated for {exchange_id.capitalize()}."}
 
+    # --- Pre-flight Checks (Validating trade before execution) ---
     try:
         usdt_balance = await get_real_balance(exchange_id, 'USDT')
         user_trade_amount_usdt = settings.get("real_trade_size_usdt", 15.0)
 
-        # [تحسين] التحقق من الحد الأدنى لحجم الصفقة في المنصة
         markets = await exchange.load_markets()
         market_info = markets.get(symbol)
         if not market_info:
@@ -775,13 +775,13 @@ async def place_real_trade(signal):
         min_notional = 0
         if 'minNotional' in market_info.get('limits', {}).get('cost', {}):
              min_notional = market_info['limits']['cost']['minNotional']
-        elif exchange_id == 'kucoin': # KuCoin has a different structure
+        elif exchange_id == 'kucoin':
             min_notional = float(market_info.get('info', {}).get('minProvideSize', 5.0))
 
+        # Use the exchange's minimum trade size if the user's setting is too low
         trade_amount_usdt = max(user_trade_amount_usdt, min_notional)
         if min_notional > user_trade_amount_usdt:
              logger.warning(f"User trade size ${user_trade_amount_usdt} for {symbol} is below exchange minimum of ${min_notional}. Using exchange minimum.")
-
 
         if usdt_balance < trade_amount_usdt:
             return {'success': False, 'data': f"رصيدك الحالي ${usdt_balance:.2f} غير كافٍ لفتح صفقة بقيمة ${trade_amount_usdt:.2f}."}
@@ -791,6 +791,7 @@ async def place_real_trade(signal):
     except Exception as e:
         return {'success': False, 'data': f"Pre-flight check failed: {e}"}
 
+    # --- Market Buy Execution ---
     buy_order = None
     try:
         logger.info(f"Placing MARKET BUY order for {formatted_quantity} of {symbol} on {exchange_id.capitalize()}")
@@ -800,26 +801,24 @@ async def place_real_trade(signal):
         logger.error(f"Placing BUY order for {symbol} failed immediately: {e}", exc_info=True)
         return {'success': False, 'data': f"حدث خطأ من المنصة عند محاولة الشراء: `{str(e)}`"}
 
-    # --- [CRITICAL FIX] Robust Order Verification Loop ---
+    # --- Robust Order Verification Loop ---
+    verified_order = None
+    verified_price = 0
+    verified_quantity = 0
+    verified_cost = 0
     try:
-        max_attempts = 5  # سنحاول التحقق 5 مرات
-        delay_seconds = 3   # ننتظر 3 ثواني بين كل محاولة
-        verified_order = None
+        max_attempts = 5
+        delay_seconds = 3
         
         for attempt in range(max_attempts):
             logger.info(f"Verifying BUY order {buy_order.get('id', 'N/A')}... (Attempt {attempt + 1}/{max_attempts})")
             try:
                 order_status = await exchange.fetch_order(buy_order['id'], symbol)
-                
-                # إذا تم التنفيذ بنجاح، نخرج من اللوب
                 if order_status and order_status.get('status') == 'closed' and order_status.get('filled', 0) > 0:
                     verified_order = order_status
                     break 
-                
-                # إذا لم ينتهي اللوب، ننتظر للمحاولة التالية
                 if attempt < max_attempts - 1:
                     await asyncio.sleep(delay_seconds)
-
             except ccxt.OrderNotFound:
                 logger.warning(f"Order {buy_order.get('id', 'N/A')} not found on attempt {attempt + 1}. Retrying...")
                 await asyncio.sleep(delay_seconds)
@@ -827,60 +826,61 @@ async def place_real_trade(signal):
                 logger.error(f"An error occurred during order fetch verification: {fetch_e}")
                 await asyncio.sleep(delay_seconds)
 
-        # بعد انتهاء اللوب، نتحقق من النتيجة
         if verified_order:
             verified_price = verified_order.get('average', signal['entry_price'])
             verified_quantity = verified_order.get('filled')
             verified_cost = verified_order.get('cost', verified_price * verified_quantity)
             logger.info(f"BUY order {buy_order['id']} VERIFIED successfully. Filled {verified_quantity} @ {verified_price}")
         else:
-            # إذا فشلت كل المحاولات، نرفع استثناءً
             raise Exception(f"Order {buy_order['id']} could not be confirmed as filled after {max_attempts} attempts.")
-
     except Exception as e:
         logger.error(f"VERIFICATION FAILED for BUY order {buy_order.get('id', 'N/A')}: {e}", exc_info=True)
-        return {'success': False, 'manual_check_required': True, 'data': f"تم إرسال أمر الشراء لكن فشل التحقق منه بعد عدة محاولات. **يرجى التحقق من المنصة يدوياً!** Order ID: `{buy_order.get('id', 'N/A')}`. Error: `{e}`"}
+        return {'success': False, 'manual_check_required': True, 'data': f"تم إرسال أمر الشراء لكن فشل التحقق منه. **يرجى التحقق من المنصة يدوياً!** Order ID: `{buy_order.get('id', 'N/A')}`. Error: `{e}`"}
 
-    # [--- START OF FIX - الجزء الأول ---]
-    # تم تعديل هذا الجزء بالكامل لضمان عدم حدوث انهيار صامت
-    # [ترقية أمان حرجة] منطق الخروج الموحد باستخدام OCO
+    # --- [FINAL CORRECTED LOGIC] Exit Orders (TP/SL) Placement ---
     exit_order_ids = {}
     try:
+        quantity_to_sell = float(verified_quantity)
         tp_price = exchange.price_to_precision(symbol, signal['take_profit'])
         sl_price = exchange.price_to_precision(symbol, signal['stop_loss'])
-        sl_trigger_price = exchange.price_to_precision(symbol, signal['stop_loss'] * (1 - 0.001)) # Trigger just before the limit price
+        sl_trigger_price = exchange.price_to_precision(symbol, signal['stop_loss'])
 
-        # Binance has a dedicated OCO order type
+        # Logic for Binance (Correct - supports OCO)
         if exchange.id == 'binance':
             logger.info(f"Placing OCO for {symbol} on Binance. TP: {tp_price}, SL Trigger: {sl_trigger_price}, SL Limit: {sl_price}")
             oco_params = {'stopLimitPrice': sl_price}
-            oco_order = await exchange.create_order(symbol, 'oco', 'sell', verified_quantity, price=tp_price, stopPrice=sl_trigger_price, params=oco_params)
+            oco_order = await exchange.create_order(symbol, 'oco', 'sell', quantity_to_sell, price=tp_price, stopPrice=sl_trigger_price, params=oco_params)
             exit_order_ids = {"oco_id": oco_order['id']}
-       # # KuCoin supports OCO via params on a stop limit order
+        
+        # CORRECTED Logic for KuCoin (Requires two separate orders for SPOT market)
         elif exchange.id == 'kucoin':
-            logger.info(f"Placing OCO for {symbol} on KuCoin. TP Trigger: {tp_price}, SL Trigger: {sl_trigger_price}, SL Limit: {sl_price}")
-            params = {
-                'stop': 'loss',
-                'takeProfitPrice': tp_price, # سعر الهدف
-                'stopLossPrice': sl_trigger_price # **الإصلاح النهائي: استخدام الاسم الصحيح الذي يطلبه الخطأ**
-            }
-            oco_order = await exchange.create_order(symbol, 'stop_limit', 'sell', verified_quantity, price=sl_price, params=params)
-            exit_order_ids = {"oco_id": oco_order['id']}
-            oco_order = await exchange.create_order(symbol, 'stop_limit', 'sell', verified_quantity, price=sl_price, stopPrice=sl_trigger_price, params=params)
-            exit_order_ids = {"oco_id": oco_order['id']}
+            logger.info(f"KuCoin Spot: Placing separate TP and SL orders for {symbol}.")
+            
+            # 1. Place Take Profit (limit sell order)
+            logger.info(f"Placing Take Profit limit sell for {symbol} at {tp_price}")
+            tp_order = await exchange.create_order(symbol, 'limit', 'sell', quantity_to_sell, price=tp_price)
+            logger.info(f"Take Profit order placed with ID: {tp_order['id']}")
+
+            # 2. Place Stop Loss (stop_limit sell order)
+            logger.info(f"Placing Stop Loss for {symbol}. Trigger: {sl_trigger_price}, Limit: {sl_price}")
+            sl_params = {'triggerPrice': sl_trigger_price}
+            sl_order = await exchange.create_order(symbol, 'stop_limit', 'sell', quantity_to_sell, price=sl_price, params=sl_params)
+            logger.info(f"Stop Loss order placed with ID: {sl_order['id']}")
+            
+            exit_order_ids = {"tp_id": tp_order['id'], "sl_id": sl_order['id']}
+
+        # Fallback for other exchanges
         else:
-            # Fallback for exchanges without unified OCO (less safe)
-            logger.warning(f"Exchange {exchange.id} does not have a supported OCO method in this bot. Placing separate TP/SL orders.")
-            tp_order = await exchange.create_limit_sell_order(symbol, verified_quantity, float(tp_price))
-            sl_order = await exchange.create_stop_loss_order(symbol, 'sell', verified_quantity, float(sl_price)) # Assuming unified method
+            logger.warning(f"Exchange {exchange.id} does not have a supported OCO method. Placing separate TP/SL orders.")
+            tp_order = await exchange.create_limit_sell_order(symbol, quantity_to_sell, float(tp_price))
+            sl_order = await exchange.create_stop_loss_order(symbol, 'sell', quantity_to_sell, float(sl_price))
             exit_order_ids = {"tp_id": tp_order['id'], "sl_id": sl_order['id']}
         
         logger.info(f"Successfully placed exit orders for {symbol} with IDs: {exit_order_ids}")
         
-        # --- هذا هو الشكل النهائي للبيانات عند النجاح الكامل ---
         return {
             'success': True,
-            'exit_orders_failed': False, # نضيف هذا العلم للإشارة للنجاح
+            'exit_orders_failed': False,
             'data': {
                 "entry_order_id": buy_order['id'],
                 "exit_order_ids_json": json.dumps(exit_order_ids),
@@ -892,24 +892,18 @@ async def place_real_trade(signal):
 
     except Exception as e:
         logger.error(f"Failed to place exit orders for {symbol} after successful buy: {e}", exc_info=True)
-        
-        # --- هذا هو الإصلاح الحاسم للمشكلة ---
-        # بدلاً من إرجاع نص، نرجع قاموساً بنفس بنية النجاح
-        # هذا يمنع الخطأ الصامت (TypeError)
         error_data = {
             "entry_order_id": buy_order['id'],
-            "exit_order_ids_json": json.dumps({}), # أوامر خروج فارغة
+            "exit_order_ids_json": json.dumps({}),
             "verified_quantity": verified_quantity,
             "verified_entry_price": verified_price,
             "verified_entry_value": verified_cost
         }
-        
         return {
             'success': True, 
-            'exit_orders_failed': True, # نعلم بأن أوامر الخروج فشلت
-            'data': error_data # نرجع البيانات الأساسية للشراء
+            'exit_orders_failed': True,
+            'data': error_data 
         }
-    # [--- END OF FIX - الجزء الأول ---]
 
 
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
@@ -972,39 +966,41 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
             exchange_is_tradeable = signal_exchange_id in bot_data["exchanges"] and bot_data["exchanges"][signal_exchange_id].apiKey
             attempt_real_trade = is_real_mode_enabled and exchange_is_tradeable
             signal['is_real_trade'] = attempt_real_trade
-
-            # [--- START OF FIX - الجزء الثاني ---]
-            # تم تعديل هذا الجزء بالكامل لضمان عدم حدوث انهيار صامت
-            if attempt_real_trade:
+# [--- START OF FIX - الجزء الثاني ---]
+            # --- هذا هو الجزء الذي يجب تعديله ---
+       if attempt_real_trade:
                 await send_telegram_message(context.bot, {'custom_message': f"**🔎 تم العثور على إشارة حقيقية لـ `{signal['symbol']}`... جاري محاولة التنفيذ على `{signal['exchange']}`.**"})
                 try:
                     trade_result = await place_real_trade(signal)
                     
                     if trade_result.get('success'):
-                        # نضمن أن 'data' هو قاموس قبل التحديث لمنع أي خطأ
                         if isinstance(trade_result.get('data'), dict):
                             signal.update(trade_result['data'])
                         
-                        # الآن نسجل في قاعدة البيانات
+                        # --- START OF LOGIC CORRECTION ---
+                        # هنا تم إصلاح الخلل المنطقي
                         if log_recommendation_to_db(signal):
+                            # هذا الكود يتم تنفيذه فقط عند نجاح التسجيل في قاعدة البيانات
                             await send_telegram_message(context.bot, signal, is_new=True)
                             new_trades += 1
-                            # بعد التسجيل الناجح، نتحقق إذا كانت أوامر الخروج فشلت ونرسل التحذير
+                            
+                            # بعد النجاح، نتحقق إذا كانت أوامر الخروج فشلت ونرسل التحذير
                             if trade_result.get('exit_orders_failed'):
                                 await send_telegram_message(context.bot, {'custom_message': f"**🚨 تحذير:** تم شراء `{signal['symbol']}` بنجاح وتسجيلها، **لكن فشل وضع أوامر الهدف/الوقف تلقائياً.**\n\n**يرجى وضعها يدوياً الآن!**"})
+                        
                         else: 
-                            # إذا فشل التسجيل في قاعدة البيانات
+                            # هذا الكود يتم تنفيذه فقط عند فشل التسجيل في قاعدة البيانات
                             await send_telegram_message(context.bot, {'custom_message': f"**⚠️ خطأ حرج:** تم تنفيذ صفقة `{signal['symbol']}` لكن فشل تسجيلها في قاعدة البيانات. **يرجى المتابعة اليدوية فوراً!**"})
+                        # --- END OF LOGIC CORRECTION ---
+                            
                     else:
-                        # في حالة الفشل المعروف من المنصة (رصيد غير كافٍ مثلاً)
                         await send_telegram_message(context.bot, {'custom_message': f"**❌ فشل تنفيذ صفقة `{signal['symbol']}`**\n\n**السبب:** {trade_result.get('data', 'سبب غير معروف')}"})
                 
                 except Exception as e:
-                    # هذا الجزء سيمسك بأي أخطاء غير متوقعة ويمنع الصمت
                     logger.critical(f"CRITICAL UNHANDLED ERROR during real trade execution for {signal['symbol']}: {e}", exc_info=True)
                     await send_telegram_message(context.bot, {'custom_message': f"**❌ فشل حرج وغير معالج أثناء محاولة تنفيذ صفقة `{signal['symbol']}`.**\n\n**الخطأ:** `{str(e)}`\n\n*يرجى التحقق من المنصة ومن سجلات الأخطاء (logs).*"})
-            # [--- END OF FIX - الجزء الثاني ---]
-            else: 
+            
+            else: # هذا الجزء الخاص بالصفقات الوهمية
                 if active_trades_count < settings.get("max_concurrent_trades", 10):
                     trade_amount_usdt = settings["virtual_portfolio_balance_usdt"] * (settings["virtual_trade_size_percentage"] / 100)
                     signal.update({'quantity': trade_amount_usdt / signal['entry_price'], 'entry_value_usdt': trade_amount_usdt})
@@ -1015,6 +1011,12 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                 else:
                     await send_telegram_message(context.bot, signal, is_opportunity=True)
                     opportunities += 1
+                else:
+                    await send_telegram_message(context.bot, signal, is_opportunity=True)
+                    opportunities += 1
+
+            await asyncio.sleep(0.5)
+            last_signal_time[signal['symbol']] = time.time()
 
             await asyncio.sleep(0.5)
             last_signal_time[signal['symbol']] = time.time()
@@ -2622,4 +2624,5 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error in the main loop: {e}", exc_info=True)
+
 
