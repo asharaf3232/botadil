@@ -123,14 +123,15 @@ STRATEGY_NAMES_AR = {
 
 
 # --- Constants for Interactive Settings menu ---
+# [UPGRADE] إضافة الإعداد الجديد لقائمة التعديل
 EDITABLE_PARAMS = {
     "إعدادات عامة": [
         "max_concurrent_trades", "top_n_symbols_by_volume", "concurrent_workers",
         "min_signal_strength"
     ],
     "إعدادات المخاطر": [
-        "real_trading_enabled", "virtual_trade_size_percentage", "atr_sl_multiplier", "risk_reward_ratio",
-        "trailing_sl_activate_percent", "trailing_sl_percent"
+        "real_trading_enabled", "real_trade_size_usdt", "virtual_trade_size_percentage", 
+        "atr_sl_multiplier", "risk_reward_ratio", "trailing_sl_activate_percent", "trailing_sl_percent"
     ],
     "الفلاتر والاتجاه": [
         "market_regime_filter_enabled", "use_master_trend_filter", "fear_and_greed_filter_enabled",
@@ -140,7 +141,8 @@ EDITABLE_PARAMS = {
 }
 PARAM_DISPLAY_NAMES = {
     "real_trading_enabled": "🚨 تفعيل التداول الحقيقي 🚨",
-    "virtual_trade_size_percentage": "حجم الصفقة (%)",
+    "real_trade_size_usdt": "💵 حجم الصفقة الحقيقية ($)",
+    "virtual_trade_size_percentage": "📊 حجم الصفقة الوهمية (%)",
     "max_concurrent_trades": "أقصى عدد للصفقات",
     "top_n_symbols_by_volume": "عدد العملات للفحص",
     "concurrent_workers": "عمال الفحص المتزامنين",
@@ -176,8 +178,10 @@ bot_data = {
 scan_lock = asyncio.Lock()
 
 # --- Settings Management ---
+# [UPGRADE] إضافة الإعداد الجديد للقيم الافتراضية
 DEFAULT_SETTINGS = {
     "real_trading_enabled": False,
+    "real_trade_size_usdt": 15.0,
     "virtual_portfolio_balance_usdt": 1000.0, "virtual_trade_size_percentage": 5.0, "max_concurrent_trades": 5, "top_n_symbols_by_volume": 250, "concurrent_workers": 10,
     "market_regime_filter_enabled": True, "fundamental_analysis_enabled": True,
     "active_scanners": ["momentum_breakout", "breakout_squeeze_pro", "rsi_divergence", "supertrend_pullback"],
@@ -625,24 +629,28 @@ async def get_real_balance(exchange_id, currency='USDT'):
         logger.error(f"Error fetching {exchange_id.capitalize()} balance for {currency}: {e}")
         return 0.0
 
+# [UPGRADE] تعديل الدالة لتستخدم حجم الصفقة الحقيقي الثابت
 async def place_real_trade(signal):
     """
-    Attempts to place a real trade.
+    Attempts to place a real trade using a fixed USDT amount.
     Returns a dictionary: {'success': bool, 'data': dict_or_error_string}
     """
     exchange_id = signal['exchange'].lower()
     exchange = bot_data["exchanges"].get(exchange_id)
+    settings = bot_data['settings']
+    
     if not exchange or not exchange.apiKey:
         return {'success': False, 'data': f"Cannot place real trade: {exchange_id.capitalize()} client not authenticated."}
 
     try:
         usdt_balance = await get_real_balance(exchange_id, 'USDT')
-        trade_size_percent = bot_data['settings']['virtual_trade_size_percentage']
-        trade_amount_usdt = usdt_balance * (trade_size_percent / 100)
-        
-        if trade_amount_usdt < 10:
-            return {'success': False, 'data': f"Trade amount ${trade_amount_usdt:.2f} is below the $10 minimum."}
+        # [UPGRADE] استخدام حجم الصفقة الحقيقي المحدد مسبقًا
+        trade_amount_usdt = settings.get("real_trade_size_usdt", 15.0)
 
+        # [UPGRADE] فحص ذكي للرصيد قبل أي محاولة
+        if usdt_balance < trade_amount_usdt:
+            return {'success': False, 'data': f"رصيدك الحالي ${usdt_balance:.2f} غير كافٍ لفتح صفقة بقيمة ${trade_amount_usdt}."}
+        
         markets = await exchange.load_markets()
         market_info = markets.get(signal['symbol'])
         if not market_info:
@@ -751,14 +759,11 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
             if time.time() - last_signal_time.get(signal['symbol'], 0) <= (SCAN_INTERVAL_SECONDS * 4):
                 logger.info(f"Signal for {signal['symbol']} skipped due to cooldown."); continue
             
-            # [UPGRADE] الفلتر الذكي: التحقق من إمكانية التداول الحقيقي
             is_real_mode_enabled = settings.get("real_trading_enabled", False)
             signal_exchange_id = signal['exchange'].lower()
             
-            # التحقق مما إذا كانت المنصة لديها مفاتيح API مسجلة
             exchange_is_tradeable = signal_exchange_id in bot_data["exchanges"] and bot_data["exchanges"][signal_exchange_id].apiKey
             
-            # القرار: هل يجب محاولة تنفيذ صفقة حقيقية؟
             attempt_real_trade = is_real_mode_enabled and exchange_is_tradeable
             
             signal['is_real_trade'] = attempt_real_trade
@@ -781,8 +786,6 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                     error_message = real_trade_result['data']
                     await send_telegram_message(context.bot, {'custom_message': f"**❌ فشل تنفيذ صفقة `{signal['symbol']}`**\n\n**السبب:** {error_message}"})
             else:
-                # إذا كان التداول الحقيقي مفعل ولكن هذه المنصة ليست للتداول، أو إذا كان التداول الحقيقي معطل
-                # تعامل معها كصفقة وهمية أو فرصة
                 trade_amount_usdt = settings["virtual_portfolio_balance_usdt"] * (settings["virtual_trade_size_percentage"] / 100)
                 signal.update({'quantity': trade_amount_usdt / signal['entry_price'], 'entry_value_usdt': trade_amount_usdt})
                 if active_trades_count < settings.get("max_concurrent_trades", 5):
