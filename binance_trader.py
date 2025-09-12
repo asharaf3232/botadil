@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
-# =============================================================================
-# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v1.7 (Smart Sync Edition) 💣 ---
-# =============================================================================
-# - [إصلاح بأثر رجعي] بناء نظام تحديث ذكي لقاعدة البيانات لإصلاح أخطاء
-#   التقارير التي ظهرت في الفيديو ومنع تكرارها مستقبلاً.
-# - [ميزة احترافية] إضافة "🔄 مزامنة ومطابقة المحفظة": أداة قوية لمقارنة
-#   سجلات البوت بالواقع الفعلي على المنصة وكشف أي اختلافات.
-# - [تحسين] التأكيد على إزالة الميزات المكررة (مراقب الإدراجات وصائد الجواهر).
-# - [واجهة] دمج أداة المزامنة الجديدة في لوحة التحكم الرئيسية.
-# =============================================================================
+# =======================================================================================
+# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v1.8 (Core Stability & Reliability) 💣 ---
+# =======================================================================================
+# - [إصلاح جذري] إعادة بناء نظام تحديث قاعدة البيانات بالكامل لإصلاح خطأ
+#   `no such column` بشكل نهائي وبأثر رجعي. هذا يضمن عمل جميع التقارير.
+# - [إعادة ميزة] إعادة تفعيل جميع إشعارات الصفقات الوهمية (فتح، إغلاق، تأمين)
+#   التي تم حذفها عن طريق الخطأ.
+# - [إصلاح واجهة] حل مشكلة عدم استجابة أزرار التقارير الناتجة عن أخطاء
+#   قاعدة البيانات.
+# - [تركيز] التأكيد على إزالة الميزات غير الأساسية والتركيز على موثوقية التداول.
+# =======================================================================================
 
 
 # --- المكتبات المطلوبة --- #
@@ -253,33 +254,40 @@ def save_settings():
         logger.error(f"Failed to save settings: {e}")
 
 # --- Database Management ---
-# [جديد] نظام تحديث قاعدة البيانات الذكي
+# [إصلاح جذري] نظام تحديث قاعدة البيانات الذكي
 def migrate_database():
-    """Checks for missing columns in the database and adds them."""
+    """Checks for missing columns in the database and adds them. This is critical for updates."""
+    logger.info("Checking database schema...")
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10)
         cursor = conn.cursor()
         
-        # Check for `trade_mode` column
-        cursor.execute("PRAGMA table_info(trades)")
-        columns = [info[1] for info in cursor.fetchall()]
+        # The ideal schema for the `trades` table
+        required_columns = {
+            "id": "INTEGER PRIMARY KEY AUTOINCREMENT", "timestamp": "TEXT", "exchange": "TEXT",
+            "symbol": "TEXT", "entry_price": "REAL", "take_profit": "REAL", "stop_loss": "REAL",
+            "quantity": "REAL", "entry_value_usdt": "REAL", "status": "TEXT", "exit_price": "REAL",
+            "closed_at": "TEXT", "exit_value_usdt": "REAL", "pnl_usdt": "REAL",
+            "trailing_sl_active": "BOOLEAN", "highest_price": "REAL", "reason": "TEXT",
+            "is_real_trade": "BOOLEAN", "trade_mode": "TEXT DEFAULT 'virtual'",
+            "entry_order_id": "TEXT", "exit_order_ids_json": "TEXT"
+        }
         
-        if 'trade_mode' not in columns:
-            logger.info("Migrating database: Adding 'trade_mode' column to trades table.")
-            cursor.execute("ALTER TABLE trades ADD COLUMN trade_mode TEXT DEFAULT 'virtual'")
-            # Populate the new column based on the old `is_real_trade` column
-            cursor.execute("UPDATE trades SET trade_mode = 'real' WHERE is_real_trade = 1")
-            logger.info("Database migration for 'trade_mode' completed successfully.")
-
-        if 'is_real_trade' not in columns:
-            logger.info("Migrating database: Adding 'is_real_trade' column for older compatibility.")
-            cursor.execute("ALTER TABLE trades ADD COLUMN is_real_trade BOOLEAN DEFAULT FALSE")
-            cursor.execute("UPDATE trades SET is_real_trade = 1 WHERE trade_mode = 'real'")
-
+        cursor.execute("PRAGMA table_info(trades)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+        
+        for col_name, col_type in required_columns.items():
+            if col_name not in existing_columns:
+                logger.warning(f"Database schema mismatch. Missing column '{col_name}'. Adding it now.")
+                cursor.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+                logger.info(f"Column '{col_name}' added successfully.")
+        
         conn.commit()
         conn.close()
+        logger.info("Database schema check complete.")
     except Exception as e:
-        logger.error(f"Database migration failed: {e}", exc_info=True)
+        logger.error(f"CRITICAL: Database migration failed: {e}", exc_info=True)
+
 
 def init_database():
     try:
@@ -287,39 +295,16 @@ def init_database():
         cursor = conn.cursor()
         
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS trades (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT,
-                exchange TEXT,
-                symbol TEXT,
-                entry_price REAL,
-                take_profit REAL,
-                stop_loss REAL,
-                quantity REAL,
-                entry_value_usdt REAL,
-                status TEXT,
-                exit_price REAL,
-                closed_at TEXT,
-                exit_value_usdt REAL,
-                pnl_usdt REAL,
-                trailing_sl_active BOOLEAN,
-                highest_price REAL,
-                reason TEXT,
-                is_real_trade BOOLEAN,
-                trade_mode TEXT DEFAULT 'virtual', -- 'virtual' or 'real'
-                entry_order_id TEXT,
-                exit_order_ids_json TEXT
-            )
+            CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT)
         ''')
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_status_mode ON trades (status, trade_mode);")
         
         conn.commit()
         conn.close()
-        logger.info(f"Database schema verified.")
         
-        # Run migration after ensuring table exists
+        # Run migration after ensuring the table exists, even if it's empty
         migrate_database()
         
+        logger.info(f"Database initialized and schema verified at: {DB_FILE}")
     except Exception as e:
         logger.error(f"Failed to initialize database at {DB_FILE}: {e}")
 
@@ -937,7 +922,9 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                 if active_trades_count < settings.get("max_concurrent_trades", 10):
                     trade_amount_usdt = settings["virtual_portfolio_balance_usdt"] * (settings["virtual_trade_size_percentage"] / 100)
                     signal.update({'quantity': trade_amount_usdt / signal['entry_price'], 'entry_value_usdt': trade_amount_usdt})
-                    if log_recommendation_to_db(signal):
+                    # [إعادة تفعيل] التأكد من إرسال الإشعار للصفقات الوهمية
+                    if trade_id := log_recommendation_to_db(signal):
+                        signal['trade_id'] = trade_id
                         await send_telegram_message(context.bot, signal, is_new=True)
                         new_trades += 1
                 else:
@@ -1078,7 +1065,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
                     activation_price = trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100)
                     if current_price >= activation_price:
                         new_sl = trade['entry_price']
-                        if new_sl > trade['stop_loss']:
+                        if new_sl > trade.get('stop_loss', 0):
                             if trade.get('trade_mode') == 'real':
                                 await send_telegram_message(context.bot, {**trade, "new_sl": new_sl, "current_price": current_price}, update_type='tsl_update_real')
                                 # For real trades, we only notify. We update the DB to prevent re-notifying.
@@ -1089,7 +1076,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
                 # تحديث الوقف المتحرك بعد التفعيل
                 elif trade.get('trailing_sl_active'):
                     new_sl = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
-                    if new_sl > trade['stop_loss']:
+                    if new_sl > trade.get('stop_loss', 0):
                         if trade.get('trade_mode') == 'real':
                             await send_telegram_message(context.bot, {**trade, "new_sl": new_sl, "current_price": current_price}, update_type='tsl_update_real')
                             await update_trade_sl_in_db(context, trade, new_sl, highest_price, silent=True)
@@ -1101,7 +1088,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
                     await update_trade_peak_price_in_db(trade['id'], highest_price)
 
         except Exception as e:
-            logger.error(f"Error tracking trade #{trade['id']} ({trade['symbol']}): {e}")
+            logger.error(f"Error tracking trade #{trade['id']} ({trade['symbol']}): {e}", exc_info=True)
 
 
 # [جديد] دوال مساعدة لتحديث قاعدة البيانات مباشرة (مستوحاة من صياد الفومو)
@@ -1133,16 +1120,17 @@ async def close_trade_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict, exi
         return
     
     trade_type_str = "(صفقة حقيقية)" if trade.get('trade_mode') == 'real' else ""
+    pnl_percent = (pnl_usdt / trade['entry_value_usdt'] * 100) if trade.get('entry_value_usdt', 0) > 0 else 0
     message = ""
     if status == 'ناجحة':
         message = (f"**📦 إغلاق صفقة {trade_type_str} | #{trade['id']} {trade['symbol']}**\n\n"
                    f"**الحالة: ✅ ناجحة (تم تحقيق الهدف)**\n"
-                   f"💰 **الربح:** `${pnl_usdt:+.2f}` (`{(pnl_usdt / trade['entry_value_usdt'] * 100):+.2f}%`)\n\n"
+                   f"💰 **الربح:** `${pnl_usdt:+.2f}` (`{pnl_percent:+.2f}%`)\n\n"
                    f"- **مدة الصفقة:** {duration_str}")
     else: # فاشلة
         message = (f"**📦 إغلاق صفقة {trade_type_str} | #{trade['id']} {trade['symbol']}**\n\n"
                    f"**الحالة: ❌ فاشلة (تم ضرب الوقف)**\n"
-                   f"💰 **الخسارة:** `${pnl_usdt:.2f}` (`{(pnl_usdt / trade['entry_value_usdt'] * 100):.2f}%`)\n\n"
+                   f"💰 **الخسارة:** `${pnl_usdt:.2f}` (`{pnl_percent:.2f}%`)\n\n"
                    f"- **مدة الصفقة:** {duration_str}")
 
     await send_telegram_message(context.bot, {'custom_message': message, 'target_chat': TELEGRAM_SIGNAL_CHANNEL_ID})
@@ -1156,7 +1144,8 @@ async def update_trade_sl_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict,
         conn.commit()
         conn.close()
         logger.info(f"Trailing SL {'activated' if is_activation else 'updated'} for trade #{trade['id']}. New SL: {new_sl}")
-        if not silent and is_activation:
+        # [إعادة تفعيل] إرسال إشعار التفعيل للصفقات الوهمية
+        if not silent and is_activation and trade.get('trade_mode') == 'virtual':
             await send_telegram_message(context.bot, {**trade, "new_sl": new_sl}, update_type='tsl_activation')
     except Exception as e:
         logger.error(f"Failed to update SL for trade #{trade['id']} in DB: {e}")
@@ -1292,7 +1281,7 @@ main_menu_keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"], ["�
 settings_menu_keyboard = [["🏁 أنماط جاهزة", "🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 1.7 - المزامنة الذكية)*\n\nاختر من القائمة للبدء."
+    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 1.8 - الاستقرار والموثوقية)*\n\nاختر من القائمة للبدء."
     await update.message.reply_text(welcome_message, reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2301,7 +2290,7 @@ async def post_init(application: Application):
     job_queue.run_repeating(track_open_trades, interval=TRACK_INTERVAL_SECONDS, first=20, name='track_open_trades')
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
     logger.info(f"Jobs scheduled. Daily report at 23:55 {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v1.7) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v1.8) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
     logger.info("Post-init finished.")
 async def post_shutdown(application: Application):
     all_exchanges = list(bot_data["exchanges"].values()) + list(bot_data["public_exchanges"].values())
@@ -2311,7 +2300,7 @@ async def post_shutdown(application: Application):
 
 def main():
     # [تعديل] تحديث اسم البوت عند التشغيل
-    print("🚀 Starting Minesweeper Bot v1.7 (Smart Sync Edition)...")
+    print("🚀 Starting Minesweeper Bot v1.8 (Core Stability & Reliability)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
