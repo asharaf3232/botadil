@@ -1,28 +1,17 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v3.0 (إصدار الأمان والتحكم) 💣 ---
+# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v3.1 (إصدار صلابة الشبكة) 💣 ---
 # =======================================================================================
 # --- سجل التغييرات الكامل ---
 #
-# 1.  [ترقية أمان حرجة] تم استبدال أوامر الخروج المنفصلة على KuCoin بأمر OCO
-#     (واحد يلغي الآخر) متكامل. هذا يمنع تمامًا خطر ترك أوامر وقف خسارة
-#     معلقة بعد تحقيق الربح.
+# 7.  [إصلاح حرج] حل مشكلة توقف البوت بالكامل عند فشل إرسال رسالة البدء
+#     بسبب انقطاع الشبكة (TimedOut). سيقوم البوت الآن بتسجيل تحذير
+#     والاستمرار في العمل بشكل طبيعي.
 #
-# 2.  [ميزة جديدة] إضافة خاصية أتمتة وقف الخسارة المتحرك للصفقات الحقيقية.
-#     يمكن تفعيلها من الإعدادات لإلغاء وإعادة إنشاء أوامر OCO تلقائيًا.
+# 8.  [تحسين] زيادة المهلة الزمنية لاتصالات تيليجرام لجعل البوت أكثر
+#     تحملاً للشبكات البطيئة أو غير المستقرة.
 #
-# 3.  [ميزة جديدة] إضافة لوحة تحكم لتفعيل/تعطيل التداول الحقيقي لكل منصة
-#     على حدة (Binance, KuCoin, etc.) لمزيد من التحكم الدقيق في المخاطر.
-#
-# 4.  [إصلاح حرج] حل مشكلة تعطل متابعة الصفقات (TypeError: '>' not supported)
-#     الناتجة عن وجود قيم فارغة في وقف الخسارة بقاعدة البيانات.
-#
-# 5.  [إصلاح حرج] حل مشكلة تعطل "تقرير التشخيص" (TypeError: strptime)
-#     وجعله أكثر صلابة وقدرة على التعامل مع الأخطاء الجزئية في جلب البيانات.
-#
-# 6.  [إصلاح واجهة المستخدم] حل مشكلة توقف لوحة التحكم (Dashboard) عند طلب
-#     التقارير. سيتم الآن تعديل الرسالة لإظهار "جاري التحميل..." ثم إرسال
-#     التقرير في رسالة جديدة لضمان الموثوقية.
+# ... (جميع الإصلاحات السابقة من v3.0 موجودة)
 # =======================================================================================
 
 
@@ -58,6 +47,8 @@ except ImportError:
 import httpx
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
+# [جديد] استيراد للتحكم في مهلة الشبكة
+from telegram.request import HTTPXRequest
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 from telegram.error import BadRequest, RetryAfter, TimedOut
 
@@ -2395,7 +2386,13 @@ async def post_init(application: Application):
     job_queue.run_repeating(track_open_trades, interval=TRACK_INTERVAL_SECONDS, first=20, name='track_open_trades')
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
     logger.info(f"Jobs scheduled. Daily report at 23:55 {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v3.0) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    # [إصلاح حرج] التعامل مع أخطاء الشبكة عند بدء التشغيل
+    try:
+        await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v3.1) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    except TimedOut:
+        logger.warning("Failed to send startup message due to a network timeout. The bot is running anyway.")
+    except Exception as e:
+        logger.error(f"An unexpected error occurred while sending the startup message: {e}")
     logger.info("Post-init finished.")
 async def post_shutdown(application: Application):
     all_exchanges = list(bot_data["exchanges"].values()) + list(bot_data["public_exchanges"].values())
@@ -2413,9 +2410,11 @@ def main():
         os.remove(reset_file)
         logger.info("Reset file deleted. Bot will start with a fresh database.")
 
-    print("🚀 Starting Minesweeper Bot v3.0 (Security & Control Release)...")
+    print("🚀 Starting Minesweeper Bot v3.1 (Network Resilience Release)...")
     load_settings(); init_database()
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
+    # [تحسين] زيادة مهلة الاتصال ليكون البوت أكثر تحملاً للشبكات البطيئة
+    request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0, write_timeout=30.0)
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).request(request).post_init(post_init).post_shutdown(post_shutdown).build()
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("check", check_trade_command))
@@ -2437,3 +2436,4 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
+
