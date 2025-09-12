@@ -1,17 +1,17 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v4.3 (إصدار الموثوقية الكاملة) 💣 ---
+# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v4.4 (الإصلاح النهائي للتقارير) 💣 ---
 # =======================================================================================
 # --- سجل التغييرات الكامل ---
 #
-# 17. [إصلاح حاسم] تعديل تقرير الإحصائيات ليعرض قيمة المحفظة الحقيقية
-#      الفعلية عند فلترة "حقيقي فقط"، بدلاً من عرض الرصيد الوهمي.
+# 19. [إصلاح حاسم] حل الخلل البرمجي في تحليل أوامر التقارير (callback data)
+#      مما كان يتسبب في فشل عرض تقارير "الصفقات النشطة" و"أداء الاستراتيجيات".
+#      هذا هو الإصلاح النهائي لمشكلة "فشل إعداد التقرير".
 #
-# 18. [إصلاح استقرار] إضافة نظام "قفل" (Lock) لمعالجة التقارير، مما يمنع
-#      حدوث أخطاء "حالة السباق" عند طلب تقارير متعددة بسرعة ويحل مشكلة
-#      "فشل إعداد التقرير" بشكل نهائي.
+# 20. [تحسين منطقي] تحسين تقرير الإحصائيات لضمان عرض القيمة الحقيقية للمحفظة
+#      بشكل صحيح دائمًا، وإضافة توضيحات للتمييز بين الأرصدة.
 #
-# ... (جميع الإصلاحات السابقة من v4.2 موجودة)
+# ... (جميع الإصلاحات السابقة من v4.3 موجودة)
 # =======================================================================================
 
 
@@ -1369,7 +1369,7 @@ settings_menu_keyboard = [
 ]
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 4.3 - إصدار الموثوقية الكاملة)*\n\nاختر من القائمة للبدء."
+    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 4.4 - الإصلاح النهائي للتقارير)*\n\nاختر من القائمة للبدء."
     await update.message.reply_text(welcome_message, reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1500,16 +1500,21 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trad
         title = mode_title_map.get(trade_mode_filter, '')
 
         # [إصلاح حاسم] عرض الرصيد الحقيقي أو الوهمي بناءً على الفلتر
-        balance_line = ""
+        balance_lines = []
         if trade_mode_filter == 'real':
             real_balance = await get_total_real_portfolio_value_usdt()
-            balance_line = f"💰 *إجمالي قيمة المحفظة الحقيقية:* `${real_balance:.2f}`\n"
-        else:
-            balance_line = f"📈 *الرصيد الافتراضي:* `${bot_data['settings']['virtual_portfolio_balance_usdt']:.2f}`\n"
+            balance_lines.append(f"💰 *إجمالي قيمة المحفظة الحقيقية:* `${real_balance:.2f}`")
+        elif trade_mode_filter == 'virtual':
+            balance_lines.append(f"📈 *الرصيد الافتراضي:* `${bot_data['settings']['virtual_portfolio_balance_usdt']:.2f}`")
+        else: # 'all'
+            real_balance = await get_total_real_portfolio_value_usdt()
+            balance_lines.append(f"💰 *قيمة المحفظة الحقيقية:* `${real_balance:.2f}`")
+            balance_lines.append(f"📈 *الرصيد الافتراضي:* `${bot_data['settings']['virtual_portfolio_balance_usdt']:.2f}`")
 
+        balance_section = "\n".join(balance_lines)
 
         stats_msg = (f"*📊 إحصائيات المحفظة {title}*\n\n"
-                       f"{balance_line}"
+                       f"{balance_section}\n"
                        f"💰 *إجمالي الربح/الخسارة:* `${total_pnl:+.2f}`\n"
                        f"⚙️ *النمط الحالي:* `{preset_name}`\n\n"
                        f"- *إجمالي الصفقات:* `{total}` (`{active}` نشطة)\n"
@@ -1782,17 +1787,17 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     # [إصلاح جذري] إعادة هيكلة كاملة لمعالج التقارير
     if data.startswith("dashboard_") and data.endswith(('_all', '_real', '_virtual')):
-        # [إصلاح استقرار] استخدام قفل لمنع تضارب الطلبات
         if report_lock.locked():
             await query.answer("⏳ تقرير آخر قيد الإعداد، يرجى الانتظار...", show_alert=False)
             return
             
         async with report_lock:
             try:
+                # [إصلاح حاسم] الطريقة الصحيحة لتحليل نص الزر
                 parts = data.split('_')
-                report_type = parts[1]
-                trade_mode_filter = parts[2]
-                
+                trade_mode_filter = parts[-1]
+                report_type = '_'.join(parts[1:-1])
+
                 await query.edit_message_text(f"⏳ جاري إعداد تقرير **{report_type.replace('_', ' ').capitalize()}**...", parse_mode=ParseMode.MARKDOWN)
 
                 report_content, keyboard = None, None
@@ -2551,4 +2556,5 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error in the main loop: {e}", exc_info=True)
+
 
