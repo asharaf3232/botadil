@@ -1,21 +1,20 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v4.0 (إصدار الاستقرار الكامل) 💣 ---
+# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v4.1 (إصدار التحكم بالبيانات) 💣 ---
 # =======================================================================================
 # --- سجل التغييرات الكامل ---
 #
-# 10. [إصلاح حاسم] حل خطأ `AttributeError: 'zoneinfo.ZoneInfo' object has no
-#     attribute 'localize'` الذي كان يمنع إغلاق الصفقات في قاعدة البيانات
-#     ويتسبب في توقف عملية المتابعة.
+# 13. [إصلاح حاسم] تعديل "لقطة المحفظة" لتعرض قائمة تتيح للمستخدم اختيار
+#      المنصة المراد عرض بياناتها، بدلاً من عرض أول منصة متصلة تلقائياً.
 #
-# 11. [إصلاح حاسم] إعادة هيكلة دالة `main` لاستخدام `application.run_polling()`
-#     مما يحل جميع مشاكل بدء التشغيل النادرة مثل `Bad Gateway` و
-#     `ExtBot not properly initialized`.
+# 14. [تحسين واجهة المستخدم] ضمان حذف رسالة "جاري التحميل..." بعد إرسال
+#      التقارير المطلوبة من لوحة التحكم لمنع تداخل الرسائل.
 #
-# 12. [تحسين] جعل عملية الاتصال بالمنصات أكثر قوة. فشل الاتصال بمنصة واحدة
-#     (مثل Mexc) لن يؤثر على باقي المنصات.
+# 15. [تحسين منطق التداول] سيقوم البوت الآن بالتحقق من الحد الأدنى لحجم
+#      الصفقة الذي تفرضه المنصة (`minNotional`) ومقارنته بإعدادات المستخدم
+#      لمنع رفض الأوامر بسبب حجمها.
 #
-# ... (جميع الإصلاحات السابقة من v3.3 موجودة)
+# ... (جميع الإصلاحات السابقة من v4.0 موجودة)
 # =======================================================================================
 
 
@@ -767,15 +766,27 @@ async def place_real_trade(signal):
 
     try:
         usdt_balance = await get_real_balance(exchange_id, 'USDT')
-        trade_amount_usdt = settings.get("real_trade_size_usdt", 15.0)
+        user_trade_amount_usdt = settings.get("real_trade_size_usdt", 15.0)
 
-        if usdt_balance < trade_amount_usdt:
-            return {'success': False, 'data': f"رصيدك الحالي ${usdt_balance:.2f} غير كافٍ لفتح صفقة بقيمة ${trade_amount_usdt}."}
-
+        # [تحسين] التحقق من الحد الأدنى لحجم الصفقة في المنصة
         markets = await exchange.load_markets()
         market_info = markets.get(symbol)
         if not market_info:
             return {'success': False, 'data': f"Could not find market info for {symbol}."}
+
+        min_notional = 0
+        if 'minNotional' in market_info.get('limits', {}).get('cost', {}):
+             min_notional = market_info['limits']['cost']['minNotional']
+        elif exchange_id == 'kucoin': # KuCoin has a different structure
+            min_notional = float(market_info.get('info', {}).get('minProvideSize', 5.0))
+
+        trade_amount_usdt = max(user_trade_amount_usdt, min_notional)
+        if min_notional > user_trade_amount_usdt:
+             logger.warning(f"User trade size ${user_trade_amount_usdt} for {symbol} is below exchange minimum of ${min_notional}. Using exchange minimum.")
+
+
+        if usdt_balance < trade_amount_usdt:
+            return {'success': False, 'data': f"رصيدك الحالي ${usdt_balance:.2f} غير كافٍ لفتح صفقة بقيمة ${trade_amount_usdt:.2f}."}
         
         quantity = trade_amount_usdt / signal['entry_price']
         formatted_quantity = exchange.amount_to_precision(symbol, quantity)
@@ -1765,7 +1776,6 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             report_type = parts[1]
             trade_mode_filter = parts[2]
             
-            # [إصلاح واجهة المستخدم] تعديل الرسالة لإظهار التحميل
             await query.edit_message_text(f"⏳ جاري إعداد تقرير **{report_type.replace('_', ' ').capitalize()}**...", parse_mode=ParseMode.MARKDOWN)
 
             if report_type == "stats":
@@ -1774,6 +1784,9 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 await show_active_trades_command(update, context, trade_mode_filter=trade_mode_filter)
             elif report_type == "strategy_report":
                 await strategy_report_command(update, context, trade_mode_filter=trade_mode_filter)
+
+            # [تحسين واجهة المستخدم] حذف رسالة "جاري التحميل"
+            await query.message.delete()
             
         except Exception as e:
             logger.error(f"Error in dashboard filter handler: {e}", exc_info=True)
@@ -1815,6 +1828,12 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         elif tool == "balance": await balance_command(update, context)
         elif tool == "openorders": await open_orders_command(update, context)
         elif tool == "mytrades": await my_trades_command(update, context)
+        return
+
+    # [جديد] معالج زر اختيار منصة لقطة المحفظة
+    elif data.startswith("snapshot_exchange_"):
+        exchange_id = data.split("_", 2)[2]
+        await process_portfolio_snapshot(update, context, exchange_id)
         return
 
     elif data.startswith("preset_"):
@@ -2199,14 +2218,36 @@ async def fetch_and_display_my_trades(exchange_id, symbol, message):
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None: logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
 
+# [إصلاح حاسم] تعديل دالة لقطة المحفظة
 async def portfolio_snapshot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.callback_query.message
-    await target_message.edit_text("📸 **لقطة للمحفظة**\n\n⏳ جارِ الاتصال بالمنصة وجلب البيانات...")
-
-    exchange = next((ex for ex in bot_data["exchanges"].values() if ex.apiKey), None)
     
-    if not exchange:
+    connected_exchanges = [ex for ex in bot_data["exchanges"].values() if ex.apiKey]
+    
+    if not connected_exchanges:
         await target_message.edit_text("❌ **فشل:** لم يتم العثور على أي منصة متصلة بحساب حقيقي. يرجى التأكد من إعداد مفاتيح API.")
+        return
+
+    if len(connected_exchanges) == 1:
+        await process_portfolio_snapshot(update, context, connected_exchanges[0].id)
+    else:
+        keyboard = []
+        for ex in connected_exchanges:
+            keyboard.append([InlineKeyboardButton(f"📸 {ex.id.capitalize()}", callback_data=f"snapshot_exchange_{ex.id}")])
+        keyboard.append([InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="dashboard_refresh")])
+        
+        await target_message.edit_text(
+            "**📸 لقطة للمحفظة**\n\nلديك أكثر من منصة متصلة. يرجى اختيار المنصة التي تريد عرض لقطة لمحفظتها:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+async def process_portfolio_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE, exchange_id: str):
+    target_message = update.callback_query.message
+    await target_message.edit_text(f"📸 **لقطة للمحفظة**\n\n⏳ جارِ الاتصال بمنصة {exchange_id.capitalize()} وجلب البيانات...")
+
+    exchange = bot_data["exchanges"].get(exchange_id)
+    if not exchange:
+        await target_message.edit_text(f"❌ **فشل:** خطأ في العثور على منصة {exchange_id.capitalize()} المتصلة.")
         return
 
     try:
@@ -2452,4 +2493,5 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error in the main loop: {e}", exc_info=True)
+
 
