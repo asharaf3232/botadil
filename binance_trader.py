@@ -954,7 +954,8 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         signals.sort(key=lambda s: s.get('strength', 0), reverse=True)
         new_trades, opportunities = 0, 0
         last_signal_time = bot_data['last_signal_time']
-for signal in signals:
+# استبدل كل ما بداخل الدالة perform_scan من هذا السطر فما بعد
+    for signal in signals:
         if time.time() - last_signal_time.get(signal['symbol'], 0) <= (SCAN_INTERVAL_SECONDS * 4):
             logger.info(f"Signal for {signal['symbol']} skipped due to cooldown."); continue
 
@@ -966,7 +967,6 @@ for signal in signals:
         attempt_real_trade = is_real_mode_enabled and exchange_is_tradeable
         signal['is_real_trade'] = attempt_real_trade
 
-        # --- تأكد من أن هذه الكتلة تبدأ بنفس مستوى المسافة ---
         if attempt_real_trade:
             await send_telegram_message(context.bot, {'custom_message': f"**🔎 تم العثور على إشارة حقيقية لـ `{signal['symbol']}`... جاري محاولة التنفيذ على `{signal['exchange']}`.**"})
             try:
@@ -2607,6 +2607,7 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error in the main loop: {e}", exc_info=True)
+
 
 
 
