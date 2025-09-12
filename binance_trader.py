@@ -399,13 +399,21 @@ def find_support_resistance(high_prices, low_prices, window=10):
     if not supports and not resistances: return [], []
     def cluster_levels(levels, tolerance_percent=0.5):
         if not levels: return []
-        clustered, levels.sort(), current_cluster = [], [levels[0]]
+        # [FIX] Corrected SyntaxError by separating the sort operation from the assignment
+        levels.sort()
+        clustered = []
+        current_cluster = [levels[0]]
         for level in levels[1:]:
-            if (level - current_cluster[-1]) / current_cluster[-1] * 100 < tolerance_percent: current_cluster.append(level)
-            else: clustered.append(np.mean(current_cluster)); current_cluster = [level]
-        if current_cluster: clustered.append(np.mean(current_cluster))
+            if (level - current_cluster[-1]) / current_cluster[-1] * 100 < tolerance_percent:
+                current_cluster.append(level)
+            else:
+                clustered.append(np.mean(current_cluster))
+                current_cluster = [level]
+        if current_cluster:
+            clustered.append(np.mean(current_cluster))
         return clustered
     return cluster_levels(supports), cluster_levels(resistances)
+
 
 def analyze_sniper_pro(df, params, rvol, adx_value, exchange, symbol):
     try:
@@ -1326,3 +1334,4 @@ def main():
 if __name__ == '__main__':
     try: main()
     except Exception as e: logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
+
