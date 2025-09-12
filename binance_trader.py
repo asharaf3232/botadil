@@ -1,17 +1,16 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v4.4 (الإصلاح النهائي للتقارير) 💣 ---
+# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v4.5 (الإصلاح النهائي للتداول) 💣 ---
 # =======================================================================================
 # --- سجل التغييرات الكامل ---
 #
-# 19. [إصلاح حاسم] حل الخلل البرمجي في تحليل أوامر التقارير (callback data)
-#      مما كان يتسبب في فشل عرض تقارير "الصفقات النشطة" و"أداء الاستراتيجيات".
-#      هذا هو الإصلاح النهائي لمشكلة "فشل إعداد التقرير".
+# 21. [إصلاح حرج جداً] حل مشكلة الانهيار الصامت عند فشل وضع أوامر الخروج (OCO).
+#      - تم تعديل دالة `place_real_trade` لتضمن دائماً إرجاع قاموس بيانات سليم حتى لو فشلت أوامر الخروج.
+#      - تم تحصين دالة `perform_scan` بمعالج أخطاء (try/except) حول عملية التداول الحقيقي بأكملها.
+#      - النتيجة: لن يتم فقدان أي صفقة يتم شراؤها بعد الآن. سيتم تسجيل الصفقة دائماً، وفي حالة فشل وضع
+#        أوامر الخروج، سيصلك تحذير فوري وواضح للتدخل اليدوي. هذا هو الإصلاح النهائي لمشكلة "الصفقات الشبحية".
 #
-# 20. [تحسين منطقي] تحسين تقرير الإحصائيات لضمان عرض القيمة الحقيقية للمحفظة
-#      بشكل صحيح دائمًا، وإضافة توضيحات للتمييز بين الأرصدة.
-#
-# ... (جميع الإصلاحات السابقة من v4.3 موجودة)
+# ... (جميع الإصلاحات السابقة من v4.4 موجودة)
 # =======================================================================================
 
 
@@ -800,7 +799,8 @@ async def place_real_trade(signal):
     except Exception as e:
         logger.error(f"Placing BUY order for {symbol} failed immediately: {e}", exc_info=True)
         return {'success': False, 'data': f"حدث خطأ من المنصة عند محاولة الشراء: `{str(e)}`"}
-# --- [CRITICAL FIX] Robust Order Verification Loop ---
+
+    # --- [CRITICAL FIX] Robust Order Verification Loop ---
     try:
         max_attempts = 5  # سنحاول التحقق 5 مرات
         delay_seconds = 3   # ننتظر 3 ثواني بين كل محاولة
@@ -840,7 +840,10 @@ async def place_real_trade(signal):
     except Exception as e:
         logger.error(f"VERIFICATION FAILED for BUY order {buy_order.get('id', 'N/A')}: {e}", exc_info=True)
         return {'success': False, 'manual_check_required': True, 'data': f"تم إرسال أمر الشراء لكن فشل التحقق منه بعد عدة محاولات. **يرجى التحقق من المنصة يدوياً!** Order ID: `{buy_order.get('id', 'N/A')}`. Error: `{e}`"}
-   # [ترقية أمان حرجة] منطق الخروج الموحد باستخدام OCO
+
+    # [--- START OF FIX - الجزء الأول ---]
+    # تم تعديل هذا الجزء بالكامل لضمان عدم حدوث انهيار صامت
+    # [ترقية أمان حرجة] منطق الخروج الموحد باستخدام OCO
     exit_order_ids = {}
     try:
         tp_price = exchange.price_to_precision(symbol, signal['take_profit'])
@@ -903,6 +906,7 @@ async def place_real_trade(signal):
             'exit_orders_failed': True, # نعلم بأن أوامر الخروج فشلت
             'data': error_data # نرجع البيانات الأساسية للشراء
         }
+    # [--- END OF FIX - الجزء الأول ---]
 
 
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
@@ -965,8 +969,11 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
             exchange_is_tradeable = signal_exchange_id in bot_data["exchanges"] and bot_data["exchanges"][signal_exchange_id].apiKey
             attempt_real_trade = is_real_mode_enabled and exchange_is_tradeable
             signal['is_real_trade'] = attempt_real_trade
-if attempt_real_trade:
-               await send_telegram_message(context.bot, {'custom_message': f"**🔎 تم العثور على إشارة حقيقية لـ `{signal['symbol']}`... جاري محاولة التنفيذ على `{signal['exchange']}`.**"})
+
+            # [--- START OF FIX - الجزء الثاني ---]
+            # تم تعديل هذا الجزء بالكامل لضمان عدم حدوث انهيار صامت
+            if attempt_real_trade:
+                await send_telegram_message(context.bot, {'custom_message': f"**🔎 تم العثور على إشارة حقيقية لـ `{signal['symbol']}`... جاري محاولة التنفيذ على `{signal['exchange']}`.**"})
                 try:
                     trade_result = await place_real_trade(signal)
                     
@@ -993,6 +1000,29 @@ if attempt_real_trade:
                     # هذا الجزء سيمسك بأي أخطاء غير متوقعة ويمنع الصمت
                     logger.critical(f"CRITICAL UNHANDLED ERROR during real trade execution for {signal['symbol']}: {e}", exc_info=True)
                     await send_telegram_message(context.bot, {'custom_message': f"**❌ فشل حرج وغير معالج أثناء محاولة تنفيذ صفقة `{signal['symbol']}`.**\n\n**الخطأ:** `{str(e)}`\n\n*يرجى التحقق من المنصة ومن سجلات الأخطاء (logs).*"})
+            # [--- END OF FIX - الجزء الثاني ---]
+            else: 
+                if active_trades_count < settings.get("max_concurrent_trades", 10):
+                    trade_amount_usdt = settings["virtual_portfolio_balance_usdt"] * (settings["virtual_trade_size_percentage"] / 100)
+                    signal.update({'quantity': trade_amount_usdt / signal['entry_price'], 'entry_value_usdt': trade_amount_usdt})
+                    if trade_id := log_recommendation_to_db(signal):
+                        signal['trade_id'] = trade_id
+                        await send_telegram_message(context.bot, signal, is_new=True)
+                        new_trades += 1
+                else:
+                    await send_telegram_message(context.bot, signal, is_opportunity=True)
+                    opportunities += 1
+
+            await asyncio.sleep(0.5)
+            last_signal_time[signal['symbol']] = time.time()
+
+        failures = failure_counter[0]
+        logger.info(f"Scan complete. Found: {total_signals_found}, Entered: {new_trades}, Opportunities: {opportunities}, Failures: {failures}.")
+        
+        status['last_scan_end_time'] = datetime.now(EGYPT_TZ)
+        scan_start_time = status.get('last_scan_start_time')
+        scan_duration = (status['last_scan_end_time'] - scan_start_time).total_seconds() if isinstance(scan_start_time, datetime) else 0
+
         summary_message = (f"**🔬 ملخص الفحص الأخير**\n\n"
                            f"- **الحالة:** اكتمل بنجاح\n"
                            f"- **وضع السوق (BTC):** {status['btc_market_mood']}\n"
@@ -1402,7 +1432,7 @@ settings_menu_keyboard = [
 ]
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 4.4 - الإصلاح النهائي للتقارير)*\n\nاختر من القائمة للبدء."
+    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 4.5 - الإصلاح النهائي للتداول)*\n\nاختر من القائمة للبدء."
     await update.message.reply_text(welcome_message, reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2535,7 +2565,7 @@ async def post_init(application: Application):
     logger.info(f"Jobs scheduled. Daily report at 23:55 {EGYPT_TZ}.")
     # [إصلاح حرج] التعامل مع أخطاء الشبكة عند بدء التشغيل
     try:
-        await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v3.1) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+        await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v4.5) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
     except TimedOut:
         logger.warning("Failed to send startup message due to a network timeout. The bot is running anyway.")
     except Exception as e:
@@ -2584,10 +2614,8 @@ def main():
 
 
 if __name__ == '__main__':
-    print("🚀 Starting Mineseper Bot v4.3 (Full Reliability Release)...")
+    print("🚀 Starting Mineseper Bot v4.5 (Full Reliability Release)...")
     try:
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error in the main loop: {e}", exc_info=True)
-
-
