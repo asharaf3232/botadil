@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
 # =============================================================================
-# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v1.5 (Robust Trading) 💣 ---
+# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v1.6 (Professional Edition) 💣 ---
 # =============================================================================
-# - [أولوية قصوى] إصلاح منطق التداول الحقيقي: التحقق الإلزامي من المنصة بعد
-#   كل عملية شراء لتجنب الصفقات "الشبحية" وضمان التسجيل الدقيق.
-# - [شفافية] فصل كامل بين تقارير التداول الحقيقي والوهمي في جميع أنحاء البوت.
-# - [تحسين الواجهة] إعادة أدوات "الأوامر المفتوحة" و "سجل التداولات" إلى
-#   لوحة التحكم.
-# - [أمان] تحسينات عامة لزيادة الموثوقية في بيئة التداول الحقيقي.
+# - [إصلاح جذري] إصلاح منطق أزرار التقارير ومنع الأخطاء عند طلب الإحصائيات.
+# - [ميزة جديدة] إضافة "📸 لقطة للمحفظة": تقرير ذكي يعرض كل أرصدتك
+#   وسجل تداولاتك الحقيقي من المنصة مباشرة.
+# - [ميزة جديدة] إضافة "ρίск تقرير المخاطر": تحليل فوري لرأس المال المعرض
+#   للخطر وأقصى الخسائر المحتملة.
+# - [تحسين] إزالة أدوات "مراقب الإدراجات" و "صائد الجواهر" للتركيز على
+#   الوظائف الأساسية.
+# - [واجهة] إعادة تصميم لوحة التحكم الرئيسية لتضمين الميزات الجديدة.
 # =============================================================================
 
 
@@ -211,8 +213,6 @@ DEFAULT_SETTINGS = {
     # [جديد] إضافة إعدادات الاستراتيجيات الجديدة
     "sniper_pro": {"compression_hours": 6, "max_volatility_percent": 12.0},
     "whale_radar": {"wall_threshold_usdt": 30000},
-    # [جديد] إضافة إعدادات صائد الجواهر
-    "gem_hunter": {"min_correction_percent": -70.0, "min_24h_volume_usdt": 200000, "min_rise_from_atl_percent": 50.0, "listing_since_days": 365},
     "liquidity_filters": {"min_quote_volume_24h_usd": 1_000_000, "max_spread_percent": 0.5, "rvol_period": 20, "min_rvol": 1.5},
     "volatility_filters": {"atr_period_for_filter": 14, "min_atr_percent": 0.8},
     "stablecoin_filter": {"exclude_bases": ["USDT","USDC","DAI","FDUSD","TUSD","USDE","PYUSD","GUSD","EURT","USDJ"]},
@@ -283,15 +283,6 @@ def init_database():
                 trade_mode TEXT DEFAULT 'virtual', -- 'virtual' or 'real'
                 entry_order_id TEXT,
                 exit_order_ids_json TEXT
-            )
-        ''')
-        # [جديد] إضافة جدول لمراقبة الإدراجات الجديدة
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS known_symbols (
-                exchange TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                discovered_at TEXT NOT NULL,
-                PRIMARY KEY (exchange, symbol)
             )
         ''')
         # Add Indexes for faster queries
@@ -1271,7 +1262,7 @@ main_menu_keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"], ["�
 settings_menu_keyboard = [["🏁 أنماط جاهزة", "🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 1.5 - تداول موثوق)*\n\nاختر من القائمة للبدء."
+    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 1.6 - إصدار المحترفين)*\n\nاختر من القائمة للبدء."
     await update.message.reply_text(welcome_message, reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1279,22 +1270,28 @@ async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_T
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 الإحصائيات العامة", callback_data="dashboard_stats"), InlineKeyboardButton("📈 الصفقات النشطة", callback_data="dashboard_active_trades")],
         [InlineKeyboardButton("📜 تقرير أداء الاستراتيجيات", callback_data="dashboard_strategy_report")],
-        [InlineKeyboardButton("🛠️ أدوات متقدمة", callback_data="dashboard_tools")],
-        [InlineKeyboardButton("🗓️ التقرير اليومي", callback_data="dashboard_daily_report"), InlineKeyboardButton("🕵️‍♂️ تقرير التشخيص", callback_data="dashboard_debug")],
+        [InlineKeyboardButton("📸 لقطة للمحفظة", callback_data="dashboard_snapshot"), InlineKeyboardButton("ρίск تقرير المخاطر", callback_data="dashboard_risk")],
+        [InlineKeyboardButton("🛠️ أدوات التداول", callback_data="dashboard_tools")],
+        [InlineKeyboardButton("🕵️‍♂️ تقرير التشخيص", callback_data="dashboard_debug")],
         [InlineKeyboardButton("🔄 تحديث", callback_data="dashboard_refresh")]
     ])
     message_text = "🖥️ *لوحة التحكم الرئيسية*\n\nاختر التقرير أو البيانات التي تريد عرضها:"
 
+    # [إصلاح] التأكد من أن التفاعل يتم عبر تعديل الرسالة إذا كان مصدره زر، أو إرسال رسالة جديدة.
     try:
-        if update.callback_query and update.callback_query.data == "dashboard_refresh":
-            await target_message.edit_text(message_text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+        if update.callback_query:
+             await target_message.edit_text(message_text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
         else:
             await target_message.reply_text(message_text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
     except BadRequest as e:
         if "Message is not modified" in str(e):
-            pass
+            pass # Ignore this error, it's harmless.
         else:
             logger.error(f"Error in show_dashboard_command: {e}")
+            # If editing fails, try sending a new message as a fallback.
+            if update.callback_query:
+                await context.bot.send_message(chat_id=target_message.chat_id, text=message_text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+
 
 async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE): await (update.message or update.callback_query.message).reply_text("اختر الإعداد:", reply_markup=ReplyKeyboardMarkup(settings_menu_keyboard, resize_keyboard=True))
 
@@ -1346,9 +1343,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "**💣 أوامر بوت كاسحة الألغام 💣**\n\n"
         "`/start` - لعرض القائمة الرئيسية وبدء التفاعل.\n"
         "`/check <ID>` - لمتابعة حالة صفقة معينة باستخدام رقمها.\n"
-        "`/trade` - لبدء عملية تداول يدوية لاختبار الاتصال بالمنصات.\n"
-        "`/gemhunter` - لتشغيل أداة صائد الجواهر يدوياً.\n"
-        "`/newlistings` - لفحص الإدراجات الجديدة يدوياً."
+        "`/trade` - لبدء عملية تداول يدوية لاختبار الاتصال بالمنصات."
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trade_mode_filter='all'):
@@ -1646,13 +1641,19 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     # --- Dashboard Report Filtering ---
     if data.startswith("dashboard_") and data.endswith(('_all', '_real', '_virtual')):
-        parts = data.split('_')
-        report_type = parts[1]
-        trade_mode_filter = parts[2]
-        
-        if report_type == "stats": await stats_command(update, context, trade_mode_filter)
-        elif report_type == "active_trades": await show_active_trades_command(update, context, trade_mode_filter)
-        elif report_type == "strategy_report": await strategy_report_command(update, context, trade_mode_filter)
+        try:
+            parts = data.split('_')
+            report_type = parts[1]
+            trade_mode_filter = parts[2]
+            
+            if report_type == "stats": await stats_command(update, context, trade_mode_filter)
+            elif report_type == "active_trades": await show_active_trades_command(update, context, trade_mode_filter)
+            elif report_type == "strategy_report": await strategy_report_command(update, context, trade_mode_filter)
+            # Remove the filter menu after selection
+            await query.message.delete()
+        except Exception as e:
+            logger.error(f"Error in dashboard filter handler: {e}")
+            await context.bot.send_message(chat_id=query.message.chat_id, text="حدث خطأ. يرجى المحاولة مرة أخرى.")
         return
 
     # --- Dashboard Main Actions ---
@@ -1670,17 +1671,17 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             return
 
         # Handle direct actions
-        if action == "daily_report": await daily_report_command(update, context)
-        elif action == "debug": await debug_command(update, context)
+        if action == "debug": await debug_command(update, context)
         elif action == "refresh": await show_dashboard_command(update, context)
+        elif action == "snapshot": await portfolio_snapshot_command(update, context)
+        elif action == "risk": await risk_report_command(update, context)
         elif action == "tools":
              keyboard = [
                  [InlineKeyboardButton("✍️ تداول يدوي", callback_data="tools_manual_trade"), InlineKeyboardButton("💰 عرض رصيدي", callback_data="tools_balance")],
                  [InlineKeyboardButton("📖 أوامري المفتوحة", callback_data="tools_openorders"), InlineKeyboardButton("📜 سجل تداولاتي", callback_data="tools_mytrades")],
-                 [InlineKeyboardButton("💎 صائد الجواهر", callback_data="tools_gem_hunter"), InlineKeyboardButton("📢 فحص الإدراجات", callback_data="tools_new_listings")],
                  [InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="dashboard_refresh")]
              ]
-             await query.edit_message_text("🛠️ *أدوات متقدمة*\n\nاختر الأداة التي تريد استخدامها:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+             await query.edit_message_text("🛠️ *أدوات التداول*\n\nاختر الأداة التي تريد استخدامها:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
         return
 
     elif data.startswith("tools_"):
@@ -1689,8 +1690,6 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         elif tool == "balance": await balance_command(update, context)
         elif tool == "openorders": await open_orders_command(update, context)
         elif tool == "mytrades": await my_trades_command(update, context)
-        elif tool == "gem_hunter": await run_gem_hunter_scan(update, context)
-        elif tool == "new_listings": await manual_check_listings_command(update, context)
         return
 
     elif data.startswith("preset_"):
@@ -2061,153 +2060,125 @@ async def fetch_and_display_my_trades(exchange_id, symbol, message):
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None: logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
 
-# [جديد] إضافة وظائف الميزات الخاصة من "صياد الفومو"
-async def scan_for_new_listings(context: ContextTypes.DEFAULT_TYPE):
-    """Scans all exchanges and returns a dictionary of new listings."""
-    logger.info("Scanning for new listings...")
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=10)
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM known_symbols")
-        is_initial_run = cursor.fetchone()[0] == 0
-        if is_initial_run: logger.info("Initial run: populating known_symbols table.")
+# [جديد] الدالة الخاصة بلقطة المحفظة
+async def portfolio_snapshot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_message = update.callback_query.message
+    await target_message.edit_text("📸 **لقطة للمحفظة**\n\n⏳ جارِ الاتصال بالمنصة وجلب البيانات...")
 
-        all_new_listings = {}
-        for ex_id, exchange in bot_data["public_exchanges"].items():
-            try:
-                await exchange.load_markets(True) # Force refresh
-                current_symbols = {s for s in exchange.symbols if s.endswith('/USDT')}
-                
-                cursor.execute("SELECT symbol FROM known_symbols WHERE exchange = ?", (ex_id,))
-                known_symbols = {row[0] for row in cursor.fetchall()}
-                
-                if is_initial_run:
-                    symbols_to_add = [(ex_id, s, datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')) for s in current_symbols]
-                    if symbols_to_add:
-                        cursor.executemany("INSERT OR IGNORE INTO known_symbols (exchange, symbol, discovered_at) VALUES (?, ?, ?)", symbols_to_add)
-                else:
-                    newly_listed = current_symbols - known_symbols
-                    if newly_listed:
-                        all_new_listings[ex_id] = sorted(list(newly_listed))
-                        symbols_to_add = [(ex_id, s, datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')) for s in newly_listed]
-                        if symbols_to_add:
-                            cursor.executemany("INSERT OR IGNORE INTO known_symbols (exchange, symbol, discovered_at) VALUES (?, ?, ?)", symbols_to_add)
-            except Exception as e:
-                logger.error(f"Could not check listings for {ex_id}: {e}")
-        
-        conn.commit()
-        conn.close()
-        
-        if is_initial_run:
-            logger.info("Finished populating known symbols database.")
-            return {}
-        
-        return all_new_listings
-    except Exception as e:
-        logger.error(f"DB error in scan_for_new_listings: {e}")
-        return {}
-
-async def periodic_listings_check(context: ContextTypes.DEFAULT_TYPE):
-    """Job function to periodically check for new listings and send alerts."""
-    new_listings = await scan_for_new_listings(context)
-    if new_listings:
-        message_parts = ["🚨 **تنبيه إدراجات جديدة!** 🚨\n"]
-        for ex_id, symbols in new_listings.items():
-            message_parts.append(f"\n--- **منصة {ex_id.capitalize()}** ---")
-            for symbol in symbols:
-                message_parts.append(f"  - `{symbol}`")
-        message = "\n".join(message_parts)
-        await send_telegram_message(context.bot, {'custom_message': message})
-
-async def manual_check_listings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Command to manually check for new listings."""
-    target_message = update.callback_query.message if update.callback_query else update.message
-    await target_message.reply_text("🔍 جارِ البحث يدوياً عن أي إدراجات جديدة...")
-    new_listings = await scan_for_new_listings(context)
-
-    if new_listings:
-        message_parts = ["🚨 **تنبيه إدراجات جديدة!** 🚨\n"]
-        for ex_id, symbols in new_listings.items():
-            message_parts.append(f"\n--- **منصة {ex_id.capitalize()}** ---")
-            for symbol in symbols:
-                message_parts.append(f"  - `{symbol}`")
-        message = "\n".join(message_parts)
-        await target_message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
-    else:
-        await target_message.reply_text("✅ لم يتم العثور على أي إدراجات جديدة منذ آخر فحص.")
-
-async def run_gem_hunter_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Scans exchanges for potential gems based on specific criteria."""
-    target_message = update.callback_query.message if update.callback_query else update.message
-    await target_message.reply_text(f"💎 **صائد الجواهر**\n\n🔍 جارِ تنفيذ مسح عميق...")
-
-    settings = bot_data["settings"]["gem_hunter"]
-    listing_since = datetime.now(timezone.utc) - timedelta(days=settings["listing_since_days"])
-    all_gems = []
-
-    async def scan_exchange(ex_id, exchange):
-        try:
-            tickers = await exchange.fetch_tickers()
-            if not tickers: return []
-            
-            # Filter symbols first
-            symbols_to_check = [
-                s for s, t in tickers.items() 
-                if s.endswith('/USDT') and 
-                t.get('quoteVolume') and t['quoteVolume'] > settings["min_24h_volume_usdt"]
-            ]
-
-            platform_gems = []
-            for symbol in symbols_to_check:
-                await asyncio.sleep(exchange.rateLimit / 1000) # Respect rate limits
-                ohlcv = await exchange.fetch_ohlcv(symbol, '1d', limit=1000)
-                if not ohlcv or len(ohlcv) < 30: continue
-
-                first_candle_time = datetime.fromtimestamp(ohlcv[0][0] / 1000, timezone.utc)
-                if first_candle_time < listing_since: continue
-
-                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                ath, atl, current = df['high'].max(), df['low'].min(), df['close'].iloc[-1]
-
-                if not all([ath, atl, current]) or ath <= 0 or atl <= 0 or current <= 0: continue
-                
-                correction = ((current - ath) / ath) * 100
-                rise_from_atl = ((current - atl) / atl) * 100
-
-                if correction <= settings["min_correction_percent"] and rise_from_atl >= settings["min_rise_from_atl_percent"]:
-                    potential_x = ath / current
-                    if potential_x < 1_000_000: # Sanity check
-                        platform_gems.append({
-                            'symbol': symbol, 'potential_x': potential_x, 'exchange': ex_id.capitalize(),
-                            'correction_percent': correction, 'current_price': current, 'ath': ath
-                        })
-            return platform_gems
-        except Exception as e:
-            logger.error(f"Error scanning gems on {ex_id}: {e}")
-            return []
-
-    scan_tasks = [scan_exchange(ex_id, ex) for ex_id, ex in bot_data["public_exchanges"].items()]
-    results = await asyncio.gather(*scan_tasks)
-    for res in results: all_gems.extend(res)
-
-    if not all_gems:
-        await target_message.reply_text("✅ **بحث الجواهر اكتمل:** لم يتم العثور على عملات تتوافق مع الشروط.")
+    # For simplicity, this tool will use the first available authenticated exchange.
+    # A more advanced version could let the user choose.
+    exchange = next((ex for ex in bot_data["exchanges"].values() if ex.apiKey), None)
+    
+    if not exchange:
+        await target_message.edit_text("❌ **فشل:** لم يتم العثور على أي منصة متصلة بحساب حقيقي. يرجى التأكد من إعداد مفاتيح API.")
         return
 
-    sorted_gems = sorted(all_gems, key=lambda x: x['potential_x'], reverse=True)[:15]
-    message = (
-        f"💎 **تقرير الجواهر المخفية** 💎\n\n"
-        "--- **أفضل المرشحين** ---\n"
-    )
-    def format_price(price): return f"{price:,.8f}" if price < 0.01 else f"{price:,.4f}"
-    for gem in sorted_gems:
-        message += (
-            f"**${gem['symbol'].replace('/USDT', '')}** ({gem['exchange']})\n"
-            f"  - 🚀 **العودة للقمة:** `{gem['potential_x']:.1f}X`\n"
-            f"  - 🩸 **مصححة بنسبة:** `{gem['correction_percent']:.1f}%`\n"
-            f"  - 📈 **السعر الحالي:** `${format_price(gem['current_price'])}`\n\n"
-        )
-    await target_message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+    try:
+        # --- 1. Fetch Balances ---
+        balance = await exchange.fetch_balance()
+        all_assets = balance.get('total', {})
+        
+        # --- 2. Fetch Tickers to get current prices ---
+        tickers = await exchange.fetch_tickers()
+        
+        # --- 3. Process assets and calculate USDT value ---
+        portfolio_assets = []
+        total_usdt_value = 0
+        for currency, amount in all_assets.items():
+            if amount > 0:
+                usdt_value = 0
+                if currency == 'USDT':
+                    usdt_value = amount
+                elif f"{currency}/USDT" in tickers and tickers[f"{currency}/USDT"].get('last'):
+                    usdt_value = amount * tickers[f"{currency}/USDT"]['last']
+                
+                if usdt_value > 1: # Only show assets worth more than $1
+                    portfolio_assets.append({'currency': currency, 'amount': amount, 'usdt_value': usdt_value})
+                    total_usdt_value += usdt_value
+        
+        portfolio_assets.sort(key=lambda x: x['usdt_value'], reverse=True)
+
+        # --- 4. Fetch Recent Trades ---
+        recent_trades = await exchange.fetch_my_trades(limit=20)
+        recent_trades.reverse() # Show newest last
+
+        # --- 5. Build the Report ---
+        parts = [f"**📸 لقطة لمحفظة {exchange.id.capitalize()}**\n"]
+        parts.append(f"__**إجمالي القيمة التقديرية:**__ `${total_usdt_value:,.2f}`\n")
+
+        parts.append("--- **الأرصدة الحالية (> $1)** ---")
+        for asset in portfolio_assets[:15]: # Show top 15 assets
+            parts.append(f"- **{asset['currency']}**: `{asset['amount']:.4f}` *~`${asset['usdt_value']:.2f}`*")
+        
+        parts.append("\n--- **آخر 20 عملية تداول** ---")
+        if not recent_trades:
+            parts.append("لا يوجد سجل تداولات حديث.")
+        else:
+            for trade in recent_trades:
+                side_emoji = "🟢" if trade['side'] == 'buy' else "🔴"
+                parts.append(f"`{trade['symbol']}` {side_emoji} `{trade['side'].upper()}` | الكمية: `{trade['amount']}` | السعر: `{trade['price']}`")
+        
+        await target_message.edit_text("\n".join(parts), parse_mode=ParseMode.MARKDOWN)
+
+    except Exception as e:
+        logger.error(f"Error generating portfolio snapshot: {e}", exc_info=True)
+        await target_message.edit_text(f"❌ **فشل:** حدث خطأ أثناء جلب بيانات المحفظة.\n`{e}`")
+
+# [جديد] الدالة الخاصة بتقرير المخاطر
+async def risk_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_message = update.callback_query.message
+    await target_message.edit_text("ρίск **تقرير المخاطر**\n\n⏳ جارِ تحليل الصفقات النشطة...")
+
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        conn.row_factory = sqlite3.Row
+        
+        # --- 1. Fetch Active Real Trades ---
+        real_trades = conn.cursor().execute("SELECT * FROM trades WHERE status = 'نشطة' AND trade_mode = 'real'").fetchall()
+        
+        # --- 2. Fetch Active Virtual Trades ---
+        virtual_trades = conn.cursor().execute("SELECT * FROM trades WHERE status = 'نشطة' AND trade_mode = 'virtual'").fetchall()
+        conn.close()
+
+        parts = ["**ρίск تقرير المخاطر الحالي**\n"]
+
+        def generate_risk_section(title, trades, portfolio_value):
+            if not trades:
+                return [f"\n--- **{title}** ---\n✅ لا توجد صفقات نشطة حالياً."]
+            
+            total_at_risk = sum(t['entry_value_usdt'] for t in trades)
+            potential_loss = sum((t['entry_price'] - t['stop_loss']) * t['quantity'] for t in trades)
+            symbol_concentration = Counter(t['symbol'] for t in trades)
+
+            section_parts = [f"\n--- **{title}** ---"]
+            section_parts.append(f"- **عدد الصفقات:** {len(trades)}")
+            section_parts.append(f"- **إجمالي رأس المال بالصفقات:** `${total_at_risk:,.2f}`")
+            if portfolio_value > 0:
+                section_parts.append(f"- **نسبة التعرض:** `{(total_at_risk / portfolio_value) * 100:.2f}%` من المحفظة")
+            section_parts.append(f"- **أقصى خسارة محتملة:** `$-{potential_loss:,.2f}` (إذا ضُرب كل الوقف)")
+            
+            if symbol_concentration:
+                most_common = symbol_concentration.most_common(1)[0]
+                section_parts.append(f"- **العملة الأكثر تركيزاً:** `{most_common[0]}` ({most_common[1]} صفقات)")
+            
+            return section_parts
+
+        # Process Real Trades
+        exchange = next((ex for ex in bot_data["exchanges"].values() if ex.apiKey), None)
+        real_portfolio_value = 0
+        if exchange:
+            real_portfolio_value = await get_real_balance(exchange.id, 'USDT') # Simplified total value
+        parts.extend(generate_risk_section("🚨 المخاطر الحقيقية", real_trades, real_portfolio_value))
+        
+        # Process Virtual Trades
+        virtual_portfolio_value = bot_data['settings']['virtual_portfolio_balance_usdt']
+        parts.extend(generate_risk_section("📊 المخاطر الوهمية", virtual_trades, virtual_portfolio_value))
+
+        await target_message.edit_text("\n".join(parts), parse_mode=ParseMode.MARKDOWN)
+
+    except Exception as e:
+        logger.error(f"Error generating risk report: {e}", exc_info=True)
+        await target_message.edit_text(f"❌ **فشل:** حدث خطأ أثناء إعداد تقرير المخاطر.\n`{e}`")
 
 
 async def post_init(application: Application):
@@ -2236,10 +2207,8 @@ async def post_init(application: Application):
     job_queue.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name='perform_scan')
     job_queue.run_repeating(track_open_trades, interval=TRACK_INTERVAL_SECONDS, first=20, name='track_open_trades')
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
-    # [جديد] إضافة المهمة الدورية لفحص الإدراجات الجديدة
-    job_queue.run_repeating(periodic_listings_check, interval=1800, first=300, name='listings_check')
     logger.info(f"Jobs scheduled. Daily report at 23:55 {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v1.5) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v1.6) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
     logger.info("Post-init finished.")
 async def post_shutdown(application: Application):
     all_exchanges = list(bot_data["exchanges"].values()) + list(bot_data["public_exchanges"].values())
@@ -2249,17 +2218,14 @@ async def post_shutdown(application: Application):
 
 def main():
     # [تعديل] تحديث اسم البوت عند التشغيل
-    print("🚀 Starting Minesweeper Bot v1.5 (Robust Trading)...")
+    print("🚀 Starting Minesweeper Bot v1.6 (Professional Edition)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("check", check_trade_command))
     application.add_handler(CommandHandler("trade", manual_trade_command))
-    # [جديد] إضافة الأوامر المباشرة للأدوات الجديدة
-    application.add_handler(CommandHandler("gemhunter", run_gem_hunter_scan))
-    application.add_handler(CommandHandler("newlistings", manual_check_listings_command))
-
+    
     application.add_handler(CallbackQueryHandler(manual_trade_button_handler, pattern="^manual_trade_"))
     application.add_handler(CallbackQueryHandler(tools_button_handler, pattern="^(balance|openorders|mytrades)_"))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
