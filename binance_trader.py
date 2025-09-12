@@ -123,7 +123,6 @@ STRATEGY_NAMES_AR = {
 
 
 # --- Constants for Interactive Settings menu ---
-# [UPGRADE] إضافة الإعداد الجديد لقائمة التعديل
 EDITABLE_PARAMS = {
     "إعدادات عامة": [
         "max_concurrent_trades", "top_n_symbols_by_volume", "concurrent_workers",
@@ -178,7 +177,6 @@ bot_data = {
 scan_lock = asyncio.Lock()
 
 # --- Settings Management ---
-# [UPGRADE] إضافة الإعداد الجديد للقيم الافتراضية
 DEFAULT_SETTINGS = {
     "real_trading_enabled": False,
     "real_trade_size_usdt": 15.0,
@@ -847,6 +845,16 @@ async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=F
         reasons_en = signal_data['reason'].split(' + ')
         reasons_ar = ' + '.join([STRATEGY_NAMES_AR.get(r, r) for r in reasons_en])
 
+        # [UPGRADE] إضافة تفاصيل أوامر البيع في رسالة الصفقة الحقيقية
+        details_line = ""
+        if signal_data.get('is_real_trade'):
+            exit_ids = json.loads(signal_data.get('exit_order_ids_json', '{}'))
+            if 'oco_id' in exit_ids:
+                details_line = f"\n*أمر البيع (OCO) ID:* `{exit_ids['oco_id']}`"
+            elif 'tp_id' in exit_ids:
+                details_line = f"\n*أمر الهدف ID:* `{exit_ids['tp_id']}`\n*أمر الوقف ID:* `{exit_ids['sl_id']}`"
+
+
         message = (f"**Signal Alert | تنبيه إشارة**\n"
                    f"------------------------------------\n"
                    f"{title}\n"
@@ -857,7 +865,9 @@ async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=F
                    f"📈 **نقطة الدخول:** `{format_price(entry)}`\n"
                    f"🎯 **الهدف:** `{format_price(tp)}` (+{tp_percent:.2f}%)\n"
                    f"🛑 **الوقف:** `{format_price(sl)}` (-{sl_percent:.2f}%)"
+                   f"{details_line}"
                    f"{id_line}")
+                   
     elif update_type == 'tsl_activation':
         message = (f"**🚀 تأمين الأرباح! | #{signal_data['id']} {signal_data['symbol']}**\n\n"
                    f"تم رفع وقف الخسارة إلى نقطة الدخول.\n"
