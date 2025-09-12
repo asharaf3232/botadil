@@ -625,7 +625,6 @@ async def get_real_balance(exchange_id, currency='USDT'):
         logger.error(f"Error fetching {exchange_id.capitalize()} balance for {currency}: {e}")
         return 0.0
 
-# [UPGRADE] تعديل الدالة لترجع نتيجة واضحة للنجاح أو الفشل
 async def place_real_trade(signal):
     """
     Attempts to place a real trade.
@@ -704,7 +703,6 @@ async def place_real_trade(signal):
         return {'success': False, 'data': f"حدث خطأ من المنصة: `{str(e)}`"}
 
 
-# [UPGRADE] تعديل الدالة لتطبيق منطق الشفافية الجديد
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
     async with scan_lock:
         if bot_data['status_snapshot']['scan_in_progress']:
@@ -743,8 +741,6 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         worker_tasks = [asyncio.create_task(worker(queue, signals, settings, failure_counter)) for _ in range(settings['concurrent_workers'])]
         await queue.join(); [task.cancel() for task in worker_tasks]
         
-        # [UPGRADE] هنا يتم تحديث متغير "إجمالي الإشارات المكتشفة" في التقرير
-        # هذا يحدث قبل فلتر "فترة التهدئة"
         total_signals_found = len(signals)
 
         signals.sort(key=lambda s: s.get('strength', 0), reverse=True)
@@ -755,12 +751,20 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
             if time.time() - last_signal_time.get(signal['symbol'], 0) <= (SCAN_INTERVAL_SECONDS * 4):
                 logger.info(f"Signal for {signal['symbol']} skipped due to cooldown."); continue
             
-            is_real_trade = settings.get("real_trading_enabled", False)
-            signal['is_real_trade'] = is_real_trade
+            # [UPGRADE] الفلتر الذكي: التحقق من إمكانية التداول الحقيقي
+            is_real_mode_enabled = settings.get("real_trading_enabled", False)
+            signal_exchange_id = signal['exchange'].lower()
             
-            if is_real_trade:
-                # [UPGRADE] إرسال إشعار "محاولة التنفيذ"
-                await send_telegram_message(context.bot, {'custom_message': f"**🔎 تم العثور على إشارة حقيقية لـ `{signal['symbol']}`... جاري محاولة التنفيذ الآن.**"})
+            # التحقق مما إذا كانت المنصة لديها مفاتيح API مسجلة
+            exchange_is_tradeable = signal_exchange_id in bot_data["exchanges"] and bot_data["exchanges"][signal_exchange_id].apiKey
+            
+            # القرار: هل يجب محاولة تنفيذ صفقة حقيقية؟
+            attempt_real_trade = is_real_mode_enabled and exchange_is_tradeable
+            
+            signal['is_real_trade'] = attempt_real_trade
+            
+            if attempt_real_trade:
+                await send_telegram_message(context.bot, {'custom_message': f"**🔎 تم العثور على إشارة حقيقية لـ `{signal['symbol']}`... جاري محاولة التنفيذ على `{signal['exchange']}`.**"})
                 
                 real_trade_result = await place_real_trade(signal)
                 
@@ -768,17 +772,17 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                     signal.update(real_trade_result['data'])
                     if trade_id := log_recommendation_to_db(signal):
                         signal['trade_id'] = trade_id
-                        # إشعار النجاح المفصل
                         await send_telegram_message(context.bot, signal, is_new=True)
                         active_trades_count += 1; new_trades += 1
                     else:
                         logger.error(f"CRITICAL: Real trade for {signal['symbol']} was placed but failed to log to DB.")
                         await send_telegram_message(context.bot, {'custom_message': f"**⚠️ خطأ حرج:** تم تنفيذ صفقة `{signal['symbol']}` لكن فشل تسجيلها. يرجى المتابعة اليدوية!"})
                 else:
-                    # [UPGRADE] إرسال إشعار الفشل المفصل
                     error_message = real_trade_result['data']
                     await send_telegram_message(context.bot, {'custom_message': f"**❌ فشل تنفيذ صفقة `{signal['symbol']}`**\n\n**السبب:** {error_message}"})
             else:
+                # إذا كان التداول الحقيقي مفعل ولكن هذه المنصة ليست للتداول، أو إذا كان التداول الحقيقي معطل
+                # تعامل معها كصفقة وهمية أو فرصة
                 trade_amount_usdt = settings["virtual_portfolio_balance_usdt"] * (settings["virtual_trade_size_percentage"] / 100)
                 signal.update({'quantity': trade_amount_usdt / signal['entry_price'], 'entry_value_usdt': trade_amount_usdt})
                 if active_trades_count < settings.get("max_concurrent_trades", 5):
@@ -804,7 +808,6 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                            f"- **المدة:** {scan_duration:.0f} ثانية\n"
                            f"- **العملات المفحوصة:** {len(top_markets)}\n\n"
                            f"- - - - - - - - - - - - - - - - - -\n"
-                           # [UPGRADE] استخدام المتغير الجديد هنا
                            f"- **إجمالي الإشارات المكتشفة:** {total_signals_found}\n"
                            f"- **✅ صفقات جديدة فُتحت:** {new_trades}\n"
                            f"- **💡 فرص للمراقبة:** {opportunities}\n"
