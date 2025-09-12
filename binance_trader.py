@@ -25,7 +25,9 @@ except ImportError:
     logging.warning("Library 'nltk' not found. Sentiment analysis will be disabled.")
 
 import httpx
-from telegram import Update, ParseMode
+# --- تعديل مهم هنا --- #
+from telegram import Update
+from telegram.constants import ParseMode # تم نقل ParseMode إلى هنا في الإصدارات الجديدة
 from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram.error import BadRequest, RetryAfter, TimedOut
 
@@ -752,4 +754,5 @@ if __name__ == '__main__':
         logger.info("Bot stopped manually.")
     except Exception as e:
         logger.critical(f"Unhandled exception in main: {e}", exc_info=True)
+
 
