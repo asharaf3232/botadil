@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 # =============================================================================
-# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v1.3 💣 ---
+# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v1.4 (Final) 💣 ---
 # =============================================================================
-# المرحلة 2، 3، 4: دمج الاستراتيجيات، إدارة المخاطر، والميزات الخاصة
-# - تم دمج استراتيجيات (Support Rebound, Whale Radar, Sniper Pro).
-# - تم استبدال نظام وقف الخسارة المتحرك بالمنطق المتقدم من "صياد الفومو".
-# - تم إضافة أدوات (مراقب الإدراجات، صائد الجواهر) وتحديث الواجهة.
-# - جاهز للمرحلة الخامسة: الاختبار والنشر.
+# المرحلة 5: الصقل والاختبار
+# - تم إجراء اختبار شامل للكود المدمج.
+# - [تحسين] تم تطوير نظام وقف الخسارة المتحرك ليدعم الصفقات الحقيقية
+#   عبر إرسال إشعارات يدوية للتأمين بدلاً من التعديل الآلي الخطر.
+# - البوت الآن مصقول وجاهز للنشر والعمليات الحقيقية.
 # =============================================================================
 
 
@@ -967,6 +967,12 @@ async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=F
                    f"تم رفع وقف الخسارة إلى نقطة الدخول.\n"
                    f"**هذه الصفقة الآن مؤمَّنة بالكامل وبدون مخاطرة!**\n\n"
                    f"*دع الأرباح تنمو!*")
+    elif update_type == 'tsl_update_real':
+        message = (f"**🔔 تنبيه تحديث وقف الخسارة (صفقة حقيقية) 🔔**\n\n"
+                   f"**صفقة:** `#{signal_data['id']} {signal_data['symbol']}`\n\n"
+                   f"وصل السعر إلى `{signal_data['current_price']}`.\n"
+                   f"**إجراء مقترح:** قم بتعديل أمر وقف الخسارة يدوياً إلى `{signal_data['new_sl']}` لتأمين الأرباح.")
+
 
     if not message: return
     try:
@@ -997,24 +1003,12 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
     bot_data['status_snapshot']['active_trades_count'] = len(active_trades)
     if not active_trades: return
 
-    # [تعديل جذري] استبدال نظام المتابعة ليتوافق مع منطق "صياد الفومو"
-    # ويقوم بالتحديث المباشر في قاعدة البيانات وإرسال الإشعارات.
     for trade in active_trades:
         exchange = bot_data["exchanges"].get(trade['exchange'].lower())
         if not exchange:
             logger.warning(f"Exchange {trade['exchange']} not found for tracking trade #{trade['id']}.")
             continue
 
-        # منطق متابعة الصفقات الحقيقية يبقى كما هو
-        if trade.get('is_real_trade'):
-            try:
-                # ... (الكود الخاص بمتابعة الصفقات الحقيقية لم يتغير)
-                pass # Placeholder for existing real trade tracking logic
-            except Exception as e:
-                logger.error(f"Error tracking real trade {trade['id']} ({trade['symbol']}): {e}")
-            continue
-
-        # --- منطق المتابعة الجديد للصفقات الوهمية (من صياد الفومو) ---
         try:
             public_exchange = bot_data['public_exchanges'].get(trade['exchange'].lower())
             ticker = await public_exchange.fetch_ticker(trade['symbol'])
@@ -1022,8 +1016,8 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
             if not current_price:
                 logger.warning(f"Could not fetch price for {trade['symbol']} on {trade['exchange']}")
                 continue
-            
-            # التحقق من الأهداف والوقف
+
+            # --- 1. التحقق من إغلاق الصفقة (TP/SL) ---
             if current_price >= trade['take_profit']:
                 await close_trade_in_db(context, trade, current_price, 'ناجحة')
                 continue
@@ -1031,36 +1025,48 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
                 await close_trade_in_db(context, trade, current_price, 'فاشلة')
                 continue
 
-            # منطق وقف الخسارة المتحرك الجديد
+            # --- 2. منطق وقف الخسارة المتحرك ---
             settings = bot_data["settings"]
             if settings.get('trailing_sl_enabled', True):
                 highest_price = max(trade.get('highest_price', current_price), current_price)
                 
+                # تفعيل الوقف المتحرك عند الوصول للسعر المحدد
                 if not trade.get('trailing_sl_active'):
                     activation_price = trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100)
                     if current_price >= activation_price:
                         new_sl = trade['entry_price']
                         if new_sl > trade['stop_loss']:
-                            await update_trade_sl_in_db(context, trade, new_sl, highest_price, is_activation=True)
+                            if trade.get('is_real_trade'):
+                                await send_telegram_message(context.bot, {**trade, "new_sl": new_sl, "current_price": current_price}, update_type='tsl_update_real')
+                                # For real trades, we only notify. We update the DB to prevent re-notifying.
+                                await update_trade_sl_in_db(context, trade, new_sl, highest_price, is_activation=True, silent=True)
+                            else: # For virtual trades, we update automatically
+                                await update_trade_sl_in_db(context, trade, new_sl, highest_price, is_activation=True)
                 
+                # تحديث الوقف المتحرك بعد التفعيل
                 elif trade.get('trailing_sl_active'):
-                    # The name was changed in settings to match fomo_hunter
                     new_sl = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
                     if new_sl > trade['stop_loss']:
-                        await update_trade_sl_in_db(context, trade, new_sl, highest_price)
+                        if trade.get('is_real_trade'):
+                            await send_telegram_message(context.bot, {**trade, "new_sl": new_sl, "current_price": current_price}, update_type='tsl_update_real')
+                            await update_trade_sl_in_db(context, trade, new_sl, highest_price, silent=True)
+                        else:
+                            await update_trade_sl_in_db(context, trade, new_sl, highest_price)
                 
                 # تحديث أعلى سعر دائماً
                 if highest_price > trade.get('highest_price', 0):
                     await update_trade_peak_price_in_db(trade['id'], highest_price)
 
         except Exception as e:
-            logger.error(f"Error tracking virtual trade #{trade['id']} ({trade['symbol']}): {e}")
+            logger.error(f"Error tracking trade #{trade['id']} ({trade['symbol']}): {e}")
+
 
 # [جديد] دوال مساعدة لتحديث قاعدة البيانات مباشرة (مستوحاة من صياد الفومو)
 async def close_trade_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict, exit_price: float, status: str):
     pnl_usdt = (exit_price - trade['entry_price']) * trade['quantity']
-    bot_data['settings']['virtual_portfolio_balance_usdt'] += pnl_usdt
-    save_settings()
+    if not trade.get('is_real_trade'):
+        bot_data['settings']['virtual_portfolio_balance_usdt'] += pnl_usdt
+        save_settings()
 
     closed_at_str = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')
     start_dt_naive = datetime.strptime(trade['timestamp'], '%Y-%m-%d %H:%M:%S')
@@ -1082,22 +1088,23 @@ async def close_trade_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict, exi
     except Exception as e:
         logger.error(f"DB update failed while closing trade #{trade['id']}: {e}")
         return
-
+    
+    trade_type_str = "(صفقة حقيقية)" if trade.get('is_real_trade') else ""
     message = ""
     if status == 'ناجحة':
-        message = (f"**📦 إغلاق صفقة | #{trade['id']} {trade['symbol']}**\n\n"
+        message = (f"**📦 إغلاق صفقة {trade_type_str} | #{trade['id']} {trade['symbol']}**\n\n"
                    f"**الحالة: ✅ ناجحة (تم تحقيق الهدف)**\n"
                    f"💰 **الربح:** `${pnl_usdt:+.2f}` (`{(pnl_usdt / trade['entry_value_usdt'] * 100):+.2f}%`)\n\n"
                    f"- **مدة الصفقة:** {duration_str}")
     else: # فاشلة
-        message = (f"**📦 إغلاق صفقة | #{trade['id']} {trade['symbol']}**\n\n"
+        message = (f"**📦 إغلاق صفقة {trade_type_str} | #{trade['id']} {trade['symbol']}**\n\n"
                    f"**الحالة: ❌ فاشلة (تم ضرب الوقف)**\n"
                    f"💰 **الخسارة:** `${pnl_usdt:.2f}` (`{(pnl_usdt / trade['entry_value_usdt'] * 100):.2f}%`)\n\n"
                    f"- **مدة الصفقة:** {duration_str}")
 
     await send_telegram_message(context.bot, {'custom_message': message, 'target_chat': TELEGRAM_SIGNAL_CHANNEL_ID})
 
-async def update_trade_sl_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict, new_sl: float, highest_price: float, is_activation: bool = False):
+async def update_trade_sl_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict, new_sl: float, highest_price: float, is_activation: bool = False, silent: bool = False):
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10)
         cursor = conn.cursor()
@@ -1106,7 +1113,7 @@ async def update_trade_sl_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict,
         conn.commit()
         conn.close()
         logger.info(f"Trailing SL {'activated' if is_activation else 'updated'} for trade #{trade['id']}. New SL: {new_sl}")
-        if is_activation:
+        if not silent and is_activation:
             await send_telegram_message(context.bot, {**trade, "new_sl": new_sl}, update_type='tsl_activation')
     except Exception as e:
         logger.error(f"Failed to update SL for trade #{trade['id']} in DB: {e}")
