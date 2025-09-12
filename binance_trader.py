@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v4.2 (إصلاح جذري للتقارير) 💣 ---
+# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v4.3 (إصدار الموثوقية الكاملة) 💣 ---
 # =======================================================================================
 # --- سجل التغييرات الكامل ---
 #
-# 16. [إصلاح جذري] إعادة هيكلة كاملة لطريقة عمل تقارير لوحة التحكم.
-#     أصبحت جميع دوال التقارير تُرجع المحتوى بدلاً من إرساله مباشرةً.
-#     يقوم المعالج الرئيسي الآن بتحديث رسالة "جاري التحميل" بالتقرير
-#     النهائي، مما يحل مشكلة توقف البوت وفشل عرض التقارير بشكل نهائي.
+# 17. [إصلاح حاسم] تعديل تقرير الإحصائيات ليعرض قيمة المحفظة الحقيقية
+#      الفعلية عند فلترة "حقيقي فقط"، بدلاً من عرض الرصيد الوهمي.
 #
-# ... (جميع الإصلاحات السابقة من v4.1 موجودة)
+# 18. [إصلاح استقرار] إضافة نظام "قفل" (Lock) لمعالجة التقارير، مما يمنع
+#      حدوث أخطاء "حالة السباق" عند طلب تقارير متعددة بسرعة ويحل مشكلة
+#      "فشل إعداد التقرير" بشكل نهائي.
+#
+# ... (جميع الإصلاحات السابقة من v4.2 موجودة)
 # =======================================================================================
 
 
@@ -195,6 +197,8 @@ bot_data = {
     "scan_history": deque(maxlen=10)
 }
 scan_lock = asyncio.Lock()
+# [إصلاح استقرار] إضافة قفل لمنع تضارب طلبات التقارير
+report_lock = asyncio.Lock()
 
 # --- Settings Management ---
 DEFAULT_SETTINGS = {
@@ -1365,7 +1369,7 @@ settings_menu_keyboard = [
 ]
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 3.0 - إصدار الأمان والتحكم)*\n\nاختر من القائمة للبدء."
+    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 4.3 - إصدار الموثوقية الكاملة)*\n\nاختر من القائمة للبدء."
     await update.message.reply_text(welcome_message, reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1467,7 +1471,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
-# [إصلاح جذري] تعديل دوال التقارير لترجع المحتوى
+# [إصلاح حاسم] تعديل دوال التقارير لترجع المحتوى
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trade_mode_filter='all'):
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10); cursor = conn.cursor();
@@ -1495,8 +1499,17 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trad
         mode_title_map = {'all': '(الكل)', 'real': '(حقيقي فقط)', 'virtual': '(وهمي فقط)'}
         title = mode_title_map.get(trade_mode_filter, '')
 
+        # [إصلاح حاسم] عرض الرصيد الحقيقي أو الوهمي بناءً على الفلتر
+        balance_line = ""
+        if trade_mode_filter == 'real':
+            real_balance = await get_total_real_portfolio_value_usdt()
+            balance_line = f"💰 *إجمالي قيمة المحفظة الحقيقية:* `${real_balance:.2f}`\n"
+        else:
+            balance_line = f"📈 *الرصيد الافتراضي:* `${bot_data['settings']['virtual_portfolio_balance_usdt']:.2f}`\n"
+
+
         stats_msg = (f"*📊 إحصائيات المحفظة {title}*\n\n"
-                       f"📈 *الرصيد الافتراضي:* `${bot_data['settings']['virtual_portfolio_balance_usdt']:.2f}`\n"
+                       f"{balance_line}"
                        f"💰 *إجمالي الربح/الخسارة:* `${total_pnl:+.2f}`\n"
                        f"⚙️ *النمط الحالي:* `{preset_name}`\n\n"
                        f"- *إجمالي الصفقات:* `{total}` (`{active}` نشطة)\n"
@@ -1769,38 +1782,43 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     # [إصلاح جذري] إعادة هيكلة كاملة لمعالج التقارير
     if data.startswith("dashboard_") and data.endswith(('_all', '_real', '_virtual')):
-        try:
-            parts = data.split('_')
-            report_type = parts[1]
-            trade_mode_filter = parts[2]
+        # [إصلاح استقرار] استخدام قفل لمنع تضارب الطلبات
+        if report_lock.locked():
+            await query.answer("⏳ تقرير آخر قيد الإعداد، يرجى الانتظار...", show_alert=False)
+            return
             
-            await query.edit_message_text(f"⏳ جاري إعداد تقرير **{report_type.replace('_', ' ').capitalize()}**...", parse_mode=ParseMode.MARKDOWN)
-
-            report_content, keyboard = None, None
-
-            if report_type == "stats":
-                report_content, keyboard = await stats_command(update, context, trade_mode_filter=trade_mode_filter)
-            elif report_type == "active_trades":
-                report_content, keyboard = await show_active_trades_command(update, context, trade_mode_filter=trade_mode_filter)
-            elif report_type == "strategy_report":
-                report_content, keyboard = await strategy_report_command(update, context, trade_mode_filter=trade_mode_filter)
-
-            if report_content:
-                # [إصلاح] تعديل الرسالة بالتقرير النهائي بدلاً من إرسال رسالة جديدة
-                await query.edit_message_text(
-                    text=report_content, 
-                    reply_markup=keyboard, 
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            else:
-                await query.edit_message_text("❌ فشل إعداد التقرير.")
-
-        except Exception as e:
-            logger.error(f"Error in dashboard filter handler: {e}", exc_info=True)
+        async with report_lock:
             try:
-                await query.edit_message_text("❌ حدث خطأ غير متوقع أثناء إعداد التقرير.")
-            except Exception:
-                pass # Ignore if message context is lost
+                parts = data.split('_')
+                report_type = parts[1]
+                trade_mode_filter = parts[2]
+                
+                await query.edit_message_text(f"⏳ جاري إعداد تقرير **{report_type.replace('_', ' ').capitalize()}**...", parse_mode=ParseMode.MARKDOWN)
+
+                report_content, keyboard = None, None
+
+                if report_type == "stats":
+                    report_content, keyboard = await stats_command(update, context, trade_mode_filter=trade_mode_filter)
+                elif report_type == "active_trades":
+                    report_content, keyboard = await show_active_trades_command(update, context, trade_mode_filter=trade_mode_filter)
+                elif report_type == "strategy_report":
+                    report_content, keyboard = await strategy_report_command(update, context, trade_mode_filter=trade_mode_filter)
+
+                if report_content:
+                    await query.edit_message_text(
+                        text=report_content, 
+                        reply_markup=keyboard, 
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                else:
+                    await query.edit_message_text("❌ فشل إعداد التقرير.")
+
+            except Exception as e:
+                logger.error(f"Error in dashboard filter handler: {e}", exc_info=True)
+                try:
+                    await query.edit_message_text("❌ حدث خطأ غير متوقع أثناء إعداد التقرير.")
+                except Exception:
+                    pass
         return
 
     # --- Dashboard Main Actions ---
@@ -2228,6 +2246,36 @@ async def fetch_and_display_my_trades(exchange_id, symbol, message):
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None: logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
 
+# [جديد] دالة مساعدة لحساب إجمالي قيمة المحفظة الحقيقية
+async def get_total_real_portfolio_value_usdt():
+    total_usdt_value = 0
+    # Loop through all connected private exchanges
+    for exchange in bot_data["exchanges"].values():
+        if not exchange.apiKey:
+            continue
+        try:
+            balance = await exchange.fetch_balance()
+            # Use a cached version of tickers if available to speed up, otherwise fetch
+            if not hasattr(exchange, '_tickers_cache') or (time.time() - exchange._tickers_cache_time > 60):
+                 exchange._tickers_cache = await exchange.fetch_tickers()
+                 exchange._tickers_cache_time = time.time()
+            
+            tickers = exchange._tickers_cache
+
+            for currency, amount in balance.get('total', {}).items():
+                if amount > 0:
+                    usdt_value = 0
+                    if currency == 'USDT':
+                        usdt_value = amount
+                    elif f"{currency}/USDT" in tickers and tickers[f"{currency}/USDT"].get('last'):
+                        usdt_value = amount * tickers[f"{currency}/USDT"]['last']
+                    
+                    if usdt_value > 0.1: # Count smaller amounts too for total value
+                        total_usdt_value += usdt_value
+        except Exception as e:
+            logger.error(f"Could not calculate real portfolio value for {exchange.id}: {e}")
+    return total_usdt_value
+
 # [إصلاح حاسم] تعديل دالة لقطة المحفظة
 async def portfolio_snapshot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.callback_query.message
@@ -2498,11 +2546,9 @@ def main():
 
 
 if __name__ == '__main__':
-    print("🚀 Starting Mineseper Bot v4.0 (Full Stability Release)...")
+    print("🚀 Starting Mineseper Bot v4.3 (Full Reliability Release)...")
     try:
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error in the main loop: {e}", exc_info=True)
-
-
 
