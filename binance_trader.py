@@ -1,15 +1,13 @@
 # -*- coding: utf-8 -*-
 # =============================================================================
-# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v1.6 (Professional Edition) 💣 ---
+# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v1.7 (Smart Sync Edition) 💣 ---
 # =============================================================================
-# - [إصلاح جذري] إصلاح منطق أزرار التقارير ومنع الأخطاء عند طلب الإحصائيات.
-# - [ميزة جديدة] إضافة "📸 لقطة للمحفظة": تقرير ذكي يعرض كل أرصدتك
-#   وسجل تداولاتك الحقيقي من المنصة مباشرة.
-# - [ميزة جديدة] إضافة "ρίск تقرير المخاطر": تحليل فوري لرأس المال المعرض
-#   للخطر وأقصى الخسائر المحتملة.
-# - [تحسين] إزالة أدوات "مراقب الإدراجات" و "صائد الجواهر" للتركيز على
-#   الوظائف الأساسية.
-# - [واجهة] إعادة تصميم لوحة التحكم الرئيسية لتضمين الميزات الجديدة.
+# - [إصلاح بأثر رجعي] بناء نظام تحديث ذكي لقاعدة البيانات لإصلاح أخطاء
+#   التقارير التي ظهرت في الفيديو ومنع تكرارها مستقبلاً.
+# - [ميزة احترافية] إضافة "🔄 مزامنة ومطابقة المحفظة": أداة قوية لمقارنة
+#   سجلات البوت بالواقع الفعلي على المنصة وكشف أي اختلافات.
+# - [تحسين] التأكيد على إزالة الميزات المكررة (مراقب الإدراجات وصائد الجواهر).
+# - [واجهة] دمج أداة المزامنة الجديدة في لوحة التحكم الرئيسية.
 # =============================================================================
 
 
@@ -69,7 +67,7 @@ BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', 'YOUR_BINANCE_API_SECRET')
 # [جديد] إضافة متغيرات مفاتيح API الخاصة بمنصة KuCoin
 KUCOIN_API_KEY = os.getenv('KUCOIN_API_KEY', 'YOUR_KUCOIN_API_KEY')
 KUCOIN_API_SECRET = os.getenv('KUCOIN_API_SECRET', 'YOUR_KUCOIN_API_SECRET')
-KUCOIN_API_PASSPHRASE = os.getenv('KUCOIN_API_PASSPHRASE', 'YOUR_KUCOIN_PASSPHRASE')
+KUCOIN_API_PASSPHRASE = os.getenv('KUCOIN_API_PASSPHRASE', 'YOUR_KUCOIN_API_PASSPHRASE')
 
 
 if TELEGRAM_BOT_TOKEN == 'YOUR_BOT_TOKEN_HERE' or TELEGRAM_CHAT_ID == 'YOUR_CHAT_ID_HERE':
@@ -255,11 +253,39 @@ def save_settings():
         logger.error(f"Failed to save settings: {e}")
 
 # --- Database Management ---
+# [جديد] نظام تحديث قاعدة البيانات الذكي
+def migrate_database():
+    """Checks for missing columns in the database and adds them."""
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        cursor = conn.cursor()
+        
+        # Check for `trade_mode` column
+        cursor.execute("PRAGMA table_info(trades)")
+        columns = [info[1] for info in cursor.fetchall()]
+        
+        if 'trade_mode' not in columns:
+            logger.info("Migrating database: Adding 'trade_mode' column to trades table.")
+            cursor.execute("ALTER TABLE trades ADD COLUMN trade_mode TEXT DEFAULT 'virtual'")
+            # Populate the new column based on the old `is_real_trade` column
+            cursor.execute("UPDATE trades SET trade_mode = 'real' WHERE is_real_trade = 1")
+            logger.info("Database migration for 'trade_mode' completed successfully.")
+
+        if 'is_real_trade' not in columns:
+            logger.info("Migrating database: Adding 'is_real_trade' column for older compatibility.")
+            cursor.execute("ALTER TABLE trades ADD COLUMN is_real_trade BOOLEAN DEFAULT FALSE")
+            cursor.execute("UPDATE trades SET is_real_trade = 1 WHERE trade_mode = 'real'")
+
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Database migration failed: {e}", exc_info=True)
+
 def init_database():
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10)
         cursor = conn.cursor()
-        # [تعديل] إضافة حقل `trade_mode` للفصل بين الصفقات
+        
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -285,11 +311,15 @@ def init_database():
                 exit_order_ids_json TEXT
             )
         ''')
-        # Add Indexes for faster queries
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_status_mode ON trades (status, trade_mode);")
+        
         conn.commit()
         conn.close()
-        logger.info(f"Database initialized successfully at: {DB_FILE}")
+        logger.info(f"Database schema verified.")
+        
+        # Run migration after ensuring table exists
+        migrate_database()
+        
     except Exception as e:
         logger.error(f"Failed to initialize database at {DB_FILE}: {e}")
 
@@ -1262,7 +1292,7 @@ main_menu_keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"], ["�
 settings_menu_keyboard = [["🏁 أنماط جاهزة", "🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 1.6 - إصدار المحترفين)*\n\nاختر من القائمة للبدء."
+    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 1.7 - المزامنة الذكية)*\n\nاختر من القائمة للبدء."
     await update.message.reply_text(welcome_message, reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1271,8 +1301,8 @@ async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_T
         [InlineKeyboardButton("📊 الإحصائيات العامة", callback_data="dashboard_stats"), InlineKeyboardButton("📈 الصفقات النشطة", callback_data="dashboard_active_trades")],
         [InlineKeyboardButton("📜 تقرير أداء الاستراتيجيات", callback_data="dashboard_strategy_report")],
         [InlineKeyboardButton("📸 لقطة للمحفظة", callback_data="dashboard_snapshot"), InlineKeyboardButton("ρίск تقرير المخاطر", callback_data="dashboard_risk")],
-        [InlineKeyboardButton("🛠️ أدوات التداول", callback_data="dashboard_tools")],
-        [InlineKeyboardButton("🕵️‍♂️ تقرير التشخيص", callback_data="dashboard_debug")],
+        [InlineKeyboardButton("🔄 مزامنة ومطابقة المحفظة", callback_data="dashboard_sync")],
+        [InlineKeyboardButton("🛠️ أدوات التداول", callback_data="dashboard_tools"), InlineKeyboardButton("🕵️‍♂️ تقرير التشخيص", callback_data="dashboard_debug")],
         [InlineKeyboardButton("🔄 تحديث", callback_data="dashboard_refresh")]
     ])
     message_text = "🖥️ *لوحة التحكم الرئيسية*\n\nاختر التقرير أو البيانات التي تريد عرضها:"
@@ -1382,13 +1412,14 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trad
                        f"- *الناجحة:* `{successful}` | *الربح:* `${pnl.get('ناجحة', 0):.2f}`\n"
                        f"- *الفاشلة:* `{failed}` | *الخسارة:* `${abs(pnl.get('فاشلة', 0)):.2f}`\n"
                        f"- *معدل النجاح:* `{win_rate:.2f}%`")
-        await target_message.reply_text(stats_msg, parse_mode=ParseMode.MARKDOWN)
+        # [إصلاح] استخدام .reply_text بدلاً من .edit_text بعد حذف الرسالة القديمة
+        await context.bot.send_message(chat_id=target_message.chat_id, text=stats_msg, parse_mode=ParseMode.MARKDOWN)
     except Exception as e: logger.error(f"Error in stats_command: {e}", exc_info=True); await target_message.reply_text("خطأ في جلب الإحصائيات.")
 async def strategy_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trade_mode_filter='all'):
     target_message = update.callback_query.message if update.callback_query else update.message
-    await target_message.reply_text("⏳ جاري إعداد تقرير أداء الاستراتيجيات...");
+    await context.bot.send_message(chat_id=target_message.chat_id, text="⏳ جاري إعداد تقرير أداء الاستراتيجيات...");
     report_string = generate_performance_report_string(trade_mode_filter)
-    await target_message.reply_text(report_string, parse_mode=ParseMode.MARKDOWN)
+    await context.bot.send_message(chat_id=target_message.chat_id, text=report_string, parse_mode=ParseMode.MARKDOWN)
 
 async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
     today_str = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d')
@@ -1566,11 +1597,12 @@ async def show_active_trades_command(update: Update, context: ContextTypes.DEFAU
         active_trades = cursor.fetchall(); conn.close()
         
         if not active_trades:
-            await target_message.reply_text("لا توجد صفقات نشطة حالياً لهذا الفلتر."); return
+            await context.bot.send_message(chat_id=target_message.chat_id, text="لا توجد صفقات نشطة حالياً لهذا الفلتر.")
+            return
             
         keyboard = [[InlineKeyboardButton(f"#{t['id']} | {t['symbol']} | ${t['entry_value_usdt']:.2f} | {t['exchange']}", callback_data=f"check_{t['id']}")] for t in active_trades]
-        await target_message.reply_text("اختر صفقة لمتابعتها:", reply_markup=InlineKeyboardMarkup(keyboard))
-    except Exception as e: logger.error(f"Error in show_active_trades: {e}"); await target_message.reply_text("خطأ في جلب الصفقات.")
+        await context.bot.send_message(chat_id=target_message.chat_id, text="اختر صفقة لمتابعتها:", reply_markup=InlineKeyboardMarkup(keyboard))
+    except Exception as e: logger.error(f"Error in show_active_trades: {e}"); await context.bot.send_message(chat_id=target_message.chat_id, text="خطأ في جلب الصفقات.")
 
 async def execute_manual_trade(exchange_id, symbol, amount_usdt, side, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Attempting MANUAL {side.upper()} for {symbol} on {exchange_id} for ${amount_usdt}")
@@ -1646,14 +1678,16 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             report_type = parts[1]
             trade_mode_filter = parts[2]
             
+            # Delete the filter menu before processing
+            await query.message.delete()
+
             if report_type == "stats": await stats_command(update, context, trade_mode_filter)
             elif report_type == "active_trades": await show_active_trades_command(update, context, trade_mode_filter)
             elif report_type == "strategy_report": await strategy_report_command(update, context, trade_mode_filter)
-            # Remove the filter menu after selection
-            await query.message.delete()
+            
         except Exception as e:
             logger.error(f"Error in dashboard filter handler: {e}")
-            await context.bot.send_message(chat_id=query.message.chat_id, text="حدث خطأ. يرجى المحاولة مرة أخرى.")
+            await context.bot.send_message(chat_id=query.message.chat_id, text="حدث خطأ. يرجى المحاولة مرة أخرى بالضغط على Dashboard.")
         return
 
     # --- Dashboard Main Actions ---
@@ -1675,6 +1709,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         elif action == "refresh": await show_dashboard_command(update, context)
         elif action == "snapshot": await portfolio_snapshot_command(update, context)
         elif action == "risk": await risk_report_command(update, context)
+        elif action == "sync": await sync_portfolio_command(update, context)
         elif action == "tools":
              keyboard = [
                  [InlineKeyboardButton("✍️ تداول يدوي", callback_data="tools_manual_trade"), InlineKeyboardButton("💰 عرض رصيدي", callback_data="tools_balance")],
@@ -2180,6 +2215,64 @@ async def risk_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.error(f"Error generating risk report: {e}", exc_info=True)
         await target_message.edit_text(f"❌ **فشل:** حدث خطأ أثناء إعداد تقرير المخاطر.\n`{e}`")
 
+# [جديد] الدالة الخاصة بمزامنة المحفظة
+async def sync_portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_message = update.callback_query.message
+    await target_message.edit_text("🔄 **مزامنة ومطابقة المحفظة**\n\n⏳ جارِ الاتصال بالمنصة ومقارنة البيانات...")
+
+    exchange = next((ex for ex in bot_data["exchanges"].values() if ex.apiKey), None)
+    if not exchange:
+        await target_message.edit_text("❌ **فشل:** لم يتم العثور على أي منصة متصلة بحساب حقيقي.")
+        return
+        
+    try:
+        # 1. Get bot's active real trades
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        bot_trades_raw = conn.cursor().execute("SELECT symbol FROM trades WHERE status = 'نشطة' AND trade_mode = 'real'").fetchall()
+        bot_symbols = {item[0] for item in bot_trades_raw}
+        conn.close()
+
+        # 2. Get exchange's current positions (by checking balances)
+        balance = await exchange.fetch_balance()
+        exchange_symbols = set()
+        for currency, amount in balance.get('total', {}).items():
+            if amount > 0 and f"{currency}/USDT" in exchange.markets:
+                exchange_symbols.add(f"{currency}/USDT")
+
+        # 3. Compare and build report
+        matched_symbols = bot_symbols.intersection(exchange_symbols)
+        bot_only_symbols = bot_symbols.difference(exchange_symbols)
+        exchange_only_symbols = exchange_symbols.difference(bot_symbols)
+
+        parts = [f"**🔄 تقرير مزامنة المحفظة ({exchange.id.capitalize()})**\n"]
+        parts.append(f"تمت مقارنة `{len(bot_symbols)}` صفقة مسجلة في البوت مع `{len(exchange_symbols)}` عملة مملوكة في المنصة.\n")
+
+        parts.append(f"--- **✅ صفقات متطابقة ({len(matched_symbols)})** ---")
+        if matched_symbols:
+            parts.extend([f"- `{s}`" for s in matched_symbols])
+        else:
+            parts.append("لا توجد صفقات متطابقة حالياً.")
+
+        parts.append(f"\n--- **⚠️ صفقات في المنصة فقط ({len(exchange_only_symbols)})** ---")
+        parts.append("*هذه هي الصفقات الشبحية القديمة أو التي تم شراؤها يدوياً.*")
+        if exchange_only_symbols:
+            parts.extend([f"- `{s}`" for s in exchange_only_symbols])
+        else:
+            parts.append("لا توجد صفقات غير مسجلة في البوت.")
+
+        parts.append(f"\n--- **❓ صفقات في البوت فقط ({len(bot_only_symbols)})** ---")
+        parts.append("*هذه الصفقات قد تكون أُغلقت يدوياً. يجب التحقق منها.*")
+        if bot_only_symbols:
+            parts.extend([f"- `{s}`" for s in bot_only_symbols])
+        else:
+            parts.append("لا توجد صفقات غير متطابقة.")
+
+        await target_message.edit_text("\n".join(parts), parse_mode=ParseMode.MARKDOWN)
+
+    except Exception as e:
+        logger.error(f"Error during portfolio sync: {e}", exc_info=True)
+        await target_message.edit_text(f"❌ **فشل:** حدث خطأ أثناء مزامنة المحفظة.\n`{e}`")
+
 
 async def post_init(application: Application):
     if NLTK_AVAILABLE:
@@ -2208,7 +2301,7 @@ async def post_init(application: Application):
     job_queue.run_repeating(track_open_trades, interval=TRACK_INTERVAL_SECONDS, first=20, name='track_open_trades')
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
     logger.info(f"Jobs scheduled. Daily report at 23:55 {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v1.6) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v1.7) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
     logger.info("Post-init finished.")
 async def post_shutdown(application: Application):
     all_exchanges = list(bot_data["exchanges"].values()) + list(bot_data["public_exchanges"].values())
@@ -2218,7 +2311,7 @@ async def post_shutdown(application: Application):
 
 def main():
     # [تعديل] تحديث اسم البوت عند التشغيل
-    print("🚀 Starting Minesweeper Bot v1.6 (Professional Edition)...")
+    print("🚀 Starting Minesweeper Bot v1.7 (Smart Sync Edition)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
