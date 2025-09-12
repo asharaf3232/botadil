@@ -161,10 +161,9 @@ PARAM_DISPLAY_NAMES = {
 
 
 # --- Global Bot State ---
-# [تعديل جوهري] فصل الاتصالات العامة (للفحص) عن الخاصة (للتداول)
 bot_data = {
-    "exchanges": {},          # سيحتفظ بالاتصالات الموثّقة (الخاصة)
-    "public_exchanges": {},   # سيحتفظ بالاتصالات العامة (للفحص السريع)
+    "exchanges": {},          
+    "public_exchanges": {},   
     "last_signal_time": {},
     "settings": {},
     "status_snapshot": {
@@ -236,7 +235,6 @@ def init_database():
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10)
         cursor = conn.cursor()
-        # [تعديل] تغيير هيكل الجدول ليكون أكثر مرونة مع المنصات المختلفة
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, 
@@ -271,7 +269,6 @@ def log_recommendation_to_db(signal):
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10)
         cursor = conn.cursor()
-        # [تعديل] تحديث جملة الإدخال لتطابق الهيكل الجديد
         sql = '''INSERT INTO trades (timestamp, exchange, symbol, entry_price, take_profit, stop_loss, quantity, entry_value_usdt, status, trailing_sl_active, highest_price, reason, is_real_trade, entry_order_id, exit_order_ids_json) 
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'''
         params = (
@@ -300,8 +297,7 @@ def log_recommendation_to_db(signal):
         logger.error(f"Failed to log recommendation to DB: {e}")
         return None
 
-# --- [API UPGRADE] Fundamental & News Analysis Section ---
-# [تعديل] تحديث الدوال لاستخدام httpx بدلاً من requests
+# --- Fundamental & News Analysis Section ---
 async def get_alpha_vantage_economic_events():
     if ALPHA_VANTAGE_API_KEY == 'YOUR_AV_KEY_HERE':
         logger.warning("Alpha Vantage API key is not set. Skipping economic calendar check.")
@@ -453,15 +449,8 @@ SCANNERS = {
 }
 
 # --- Core Bot Functions ---
-# [تعديل جوهري] إعادة كتابة الدالة لفصل الاتصالات العامة عن الخاصة
 async def initialize_exchanges():
-    """
-    Initializes two sets of exchange clients:
-    1. PUBLIC: Anonymous clients for high-rate data fetching (scanning).
-    2. PRIVATE: Authenticated clients for trading and account management.
-    """
     async def connect(ex_id):
-        # 1. إنشاء الاتصال العام (بدون مفاتيح) دائمًا
         try:
             public_exchange = getattr(ccxt_async, ex_id)({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
             await public_exchange.load_markets()
@@ -471,7 +460,6 @@ async def initialize_exchanges():
             logger.error(f"Failed to connect PUBLIC client for {ex_id}: {e}")
             if 'public_exchange' in locals(): await public_exchange.close()
 
-        # 2. إنشاء الاتصال الخاص (بالمفاتيح) فقط إذا كانت موجودة
         params = {'enableRateLimit': True, 'options': {'defaultType': 'spot'}}
         authenticated = False
         if ex_id == 'binance' and BINANCE_API_KEY != 'YOUR_BINANCE_API_KEY':
@@ -487,15 +475,12 @@ async def initialize_exchanges():
         if authenticated:
             try:
                 private_exchange = getattr(ccxt_async, ex_id)(params)
-                # لا نحتاج لـ load_markets مرة أخرى إذا تم تحميلها في العام
-                # await private_exchange.load_markets() 
                 bot_data["exchanges"][ex_id] = private_exchange
                 logger.info(f"Connected to {ex_id} with PRIVATE (authenticated) client.")
             except Exception as e:
                 logger.error(f"Failed to connect PRIVATE client for {ex_id}: {e}")
                 if 'private_exchange' in locals(): await private_exchange.close()
         else:
-             # إذا لم تكن هناك مفاتيح، نضع نسخة من الاتصال العام في الخاص لضمان عمل باقي الدوال
              if ex_id in bot_data["public_exchanges"]:
                  bot_data["exchanges"][ex_id] = bot_data["public_exchanges"][ex_id]
 
@@ -507,7 +492,6 @@ async def aggregate_top_movers():
     async def fetch(ex_id, ex):
         try: return [dict(t, exchange=ex_id) for t in (await ex.fetch_tickers()).values()]
         except Exception: return []
-    # [تعديل جوهري] استخدام الاتصالات العامة لتجميع البيانات لتجنب حدود الطلبات
     results = await asyncio.gather(*[fetch(ex_id, ex) for ex_id, ex in bot_data["public_exchanges"].items()])
     for res in results: all_tickers.extend(res)
     settings = bot_data['settings']
@@ -537,7 +521,6 @@ async def worker(queue, results_list, settings, failure_counter):
     while not queue.empty():
         market_info = await queue.get()
         symbol = market_info.get('symbol', 'N/A')
-        # [تعديل جوهري] استخدام الاتصال العام دائمًا للفحص لتجنب مشاكل الـ Rate Limit
         exchange = bot_data["public_exchanges"].get(market_info['exchange'])
         if not exchange or not settings.get('active_scanners'):
             queue.task_done()
@@ -630,9 +613,7 @@ async def worker(queue, results_list, settings, failure_counter):
             queue.task_done()
 
 async def get_real_balance(exchange_id, currency='USDT'):
-    """Fetches the available balance for a specific currency from a given exchange."""
     try:
-        # هذه الدالة تستخدم الاتصال الخاص بشكل صحيح
         exchange = bot_data["exchanges"].get(exchange_id.lower())
         if not exchange or not exchange.apiKey:
             logger.warning(f"Cannot fetch balance: {exchange_id.capitalize()} client not authenticated.")
@@ -644,35 +625,29 @@ async def get_real_balance(exchange_id, currency='USDT'):
         logger.error(f"Error fetching {exchange_id.capitalize()} balance for {currency}: {e}")
         return 0.0
 
-async def place_real_trade(signal, context: ContextTypes.DEFAULT_TYPE):
+# [UPGRADE] تعديل الدالة لترجع نتيجة واضحة للنجاح أو الفشل
+async def place_real_trade(signal):
     """
-    Places a real trade on a supported exchange (Binance, KuCoin).
-    - Binance: Uses MARKET BUY + OCO SELL.
-    - KuCoin: Uses MARKET BUY + separate LIMIT SELL (TP) and STOP_LIMIT SELL (SL).
-    Returns a dictionary with order details if successful, else None.
+    Attempts to place a real trade.
+    Returns a dictionary: {'success': bool, 'data': dict_or_error_string}
     """
     exchange_id = signal['exchange'].lower()
-    logger.info(f"Attempting to place REAL TRADE for {signal['symbol']} on {exchange_id.capitalize()}")
-    # تستخدم الاتصال الخاص بشكل صحيح
     exchange = bot_data["exchanges"].get(exchange_id)
     if not exchange or not exchange.apiKey:
-        logger.error(f"Cannot place real trade for {signal['symbol']}: {exchange_id.capitalize()} client not authenticated.")
-        return None
+        return {'success': False, 'data': f"Cannot place real trade: {exchange_id.capitalize()} client not authenticated."}
 
     try:
         usdt_balance = await get_real_balance(exchange_id, 'USDT')
         trade_size_percent = bot_data['settings']['virtual_trade_size_percentage']
         trade_amount_usdt = usdt_balance * (trade_size_percent / 100)
         
-        if trade_amount_usdt < 10: 
-            logger.warning(f"Skipping real trade for {signal['symbol']}. Trade amount ${trade_amount_usdt:.2f} is below minimum.")
-            return None
+        if trade_amount_usdt < 10:
+            return {'success': False, 'data': f"Trade amount ${trade_amount_usdt:.2f} is below the $10 minimum."}
 
         markets = await exchange.load_markets()
         market_info = markets.get(signal['symbol'])
         if not market_info:
-            logger.error(f"Could not find market info for {signal['symbol']} on {exchange_id.capitalize()}")
-            return None
+            return {'success': False, 'data': f"Could not find market info for {signal['symbol']}."}
         
         quantity = trade_amount_usdt / signal['entry_price']
         formatted_quantity = exchange.amount_to_precision(signal['symbol'], quantity)
@@ -708,30 +683,28 @@ async def place_real_trade(signal, context: ContextTypes.DEFAULT_TYPE):
             exit_order_ids = {"tp_id": tp_order['id'], "sl_id": sl_order['id']}
         
         else:
-            logger.error(f"Real trading logic not implemented for {exchange_id.capitalize()}.")
             await exchange.cancel_order(buy_order['id'], signal['symbol'])
-            logger.info(f"Market buy order {buy_order['id']} was cancelled due to unsupported exit order logic.")
-            return None
-
-        await send_telegram_message(context.bot, {'custom_message': f"**🚨 صفقة حقيقية تم تنفيذها على {exchange_id.capitalize()} 🚨**\n\n- **العملة:** `{signal['symbol']}`\n- **الكمية:** `{formatted_quantity}`\n- **أمر الشراء ID:** `{buy_order['id']}`"})
+            logger.info(f"Market buy order {buy_order['id']} was cancelled.")
+            return {'success': False, 'data': f"Real trading logic not implemented for {exchange_id.capitalize()}."}
 
         return {
-            "entry_order_id": buy_order['id'],
-            "exit_order_ids_json": json.dumps(exit_order_ids),
-            "quantity": float(formatted_quantity),
-            "entry_value_usdt": trade_amount_usdt
+            'success': True,
+            'data': {
+                "entry_order_id": buy_order['id'],
+                "exit_order_ids_json": json.dumps(exit_order_ids),
+                "quantity": float(formatted_quantity),
+                "entry_value_usdt": trade_amount_usdt
+            }
         }
-
     except ccxt.InsufficientFunds as e:
-        logger.error(f"REAL TRADE FAILED for {signal['symbol']} on {exchange_id.capitalize()}: Insufficient funds. {e}")
-        await send_telegram_message(context.bot, {'custom_message': f"**❌ فشل التنفيذ: رصيد غير كافٍ على {exchange_id.capitalize()}**"})
-    except ccxt.ExchangeError as e:
-        logger.error(f"REAL TRADE FAILED for {signal['symbol']} on {exchange_id.capitalize()}: Exchange error. {e}", exc_info=True)
-        await send_telegram_message(context.bot, {'custom_message': f"**❌ فشل التنفيذ: خطأ من منصة {exchange_id.capitalize()}**\n`{e}`"})
+        logger.error(f"REAL TRADE FAILED for {signal['symbol']}: {e}")
+        return {'success': False, 'data': f"رصيد غير كافٍ على {exchange_id.capitalize()}."}
     except Exception as e:
-        logger.error(f"CRITICAL REAL TRADE FAILED for {signal['symbol']} on {exchange_id.capitalize()}: {e}", exc_info=True)
-    return None
+        logger.error(f"CRITICAL REAL TRADE FAILED for {signal['symbol']}: {e}", exc_info=True)
+        return {'success': False, 'data': f"حدث خطأ من المنصة: `{str(e)}`"}
 
+
+# [UPGRADE] تعديل الدالة لتطبيق منطق الشفافية الجديد
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
     async with scan_lock:
         if bot_data['status_snapshot']['scan_in_progress']:
@@ -770,6 +743,10 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         worker_tasks = [asyncio.create_task(worker(queue, signals, settings, failure_counter)) for _ in range(settings['concurrent_workers'])]
         await queue.join(); [task.cancel() for task in worker_tasks]
         
+        # [UPGRADE] هنا يتم تحديث متغير "إجمالي الإشارات المكتشفة" في التقرير
+        # هذا يحدث قبل فلتر "فترة التهدئة"
+        total_signals_found = len(signals)
+
         signals.sort(key=lambda s: s.get('strength', 0), reverse=True)
         new_trades, opportunities = 0, 0
         last_signal_time = bot_data['last_signal_time']
@@ -782,18 +759,25 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
             signal['is_real_trade'] = is_real_trade
             
             if is_real_trade:
-                logger.info(f"Real trading is ENABLED. Attempting to execute signal for {signal['symbol']}.")
-                real_trade_result = await place_real_trade(signal, context)
-                if real_trade_result:
-                    signal.update(real_trade_result)
+                # [UPGRADE] إرسال إشعار "محاولة التنفيذ"
+                await send_telegram_message(context.bot, {'custom_message': f"**🔎 تم العثور على إشارة حقيقية لـ `{signal['symbol']}`... جاري محاولة التنفيذ الآن.**"})
+                
+                real_trade_result = await place_real_trade(signal)
+                
+                if real_trade_result['success']:
+                    signal.update(real_trade_result['data'])
                     if trade_id := log_recommendation_to_db(signal):
                         signal['trade_id'] = trade_id
+                        # إشعار النجاح المفصل
                         await send_telegram_message(context.bot, signal, is_new=True)
                         active_trades_count += 1; new_trades += 1
                     else:
                         logger.error(f"CRITICAL: Real trade for {signal['symbol']} was placed but failed to log to DB.")
+                        await send_telegram_message(context.bot, {'custom_message': f"**⚠️ خطأ حرج:** تم تنفيذ صفقة `{signal['symbol']}` لكن فشل تسجيلها. يرجى المتابعة اليدوية!"})
                 else:
-                    logger.warning(f"Real trade for {signal['symbol']} failed to execute. Not logging to DB.")
+                    # [UPGRADE] إرسال إشعار الفشل المفصل
+                    error_message = real_trade_result['data']
+                    await send_telegram_message(context.bot, {'custom_message': f"**❌ فشل تنفيذ صفقة `{signal['symbol']}`**\n\n**السبب:** {error_message}"})
             else:
                 trade_amount_usdt = settings["virtual_portfolio_balance_usdt"] * (settings["virtual_trade_size_percentage"] / 100)
                 signal.update({'quantity': trade_amount_usdt / signal['entry_price'], 'entry_value_usdt': trade_amount_usdt})
@@ -810,7 +794,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
             last_signal_time[signal['symbol']] = time.time()
         
         failures = failure_counter[0]
-        logger.info(f"Scan complete. Found: {len(signals)}, Entered: {new_trades}, Opportunities: {opportunities}, Failures: {failures}.")
+        logger.info(f"Scan complete. Found: {total_signals_found}, Entered: {new_trades}, Opportunities: {opportunities}, Failures: {failures}.")
         
         scan_duration_str = status['last_scan_start_time']
         scan_duration = (datetime.strptime(datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'), '%Y-%m-%d %H:%M:%S') - datetime.strptime(scan_duration_str, '%Y-%m-%d %H:%M:%S')).total_seconds() if scan_duration_str != 'N/A' else 0
@@ -820,7 +804,8 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                            f"- **المدة:** {scan_duration:.0f} ثانية\n"
                            f"- **العملات المفحوصة:** {len(top_markets)}\n\n"
                            f"- - - - - - - - - - - - - - - - - -\n"
-                           f"- **إجمالي الإشارات المكتشفة:** {len(signals)}\n"
+                           # [UPGRADE] استخدام المتغير الجديد هنا
+                           f"- **إجمالي الإشارات المكتشفة:** {total_signals_found}\n"
                            f"- **✅ صفقات جديدة فُتحت:** {new_trades}\n"
                            f"- **💡 فرص للمراقبة:** {opportunities}\n"
                            f"- **⚠️ أخطاء في التحليل:** {failures}\n"
@@ -831,7 +816,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         
         status['signals_found'] = new_trades + opportunities; status['last_scan_end_time'] = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'); status['scan_in_progress'] = False
         
-        bot_data['scan_history'].append({'signals': len(signals), 'failures': failures})
+        bot_data['scan_history'].append({'signals': total_signals_found, 'failures': failures})
         await analyze_performance_and_suggest(context)
 
 async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=False, update_type=None):
@@ -903,7 +888,6 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
     if not active_trades: return
 
     async def check_trade(trade):
-        # تستخدم الاتصال الخاص بشكل صحيح عند الحاجة
         exchange = bot_data["exchanges"].get(trade['exchange'].lower())
         if not exchange: return None
         
@@ -944,9 +928,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Error tracking real trade {trade['id']} ({trade['symbol']}): {e}")
             return None 
 
-        # --- المنطق الحالي للصفقات التجريبية ---
         try:
-            # استخدام الاتصال العام لجلب السعر بسرعة
             public_exchange = bot_data['public_exchanges'].get(trade['exchange'].lower())
             ticker = await public_exchange.fetch_ticker(trade['symbol']); current_price = ticker.get('last') or ticker.get('close')
             if not current_price: return None
@@ -1053,7 +1035,6 @@ async def check_market_regime():
     settings = bot_data['settings']
     is_technically_bullish, is_sentiment_bullish, fng_index = True, True, "N/A"
     try:
-        # [تعديل] استخدام الاتصال العام لجلب بيانات BTC
         if binance := bot_data["public_exchanges"].get('binance'):
             ohlcv = await binance.fetch_ohlcv('BTC/USDT', '4h', limit=55)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -1071,7 +1052,6 @@ async def check_market_regime():
         return False, f"مشاعر خوف شديد (مؤشر F&G: {fng_index} تحت الحد {settings.get('fear_and_greed_threshold')})."
     return True, "وضع السوق مناسب لصفقات الشراء."
 
-# --- [ميزة جديدة] الاقتراحات الذكية ---
 async def analyze_performance_and_suggest(context: ContextTypes.DEFAULT_TYPE):
     settings = bot_data['settings']
     history = bot_data['scan_history']
@@ -1942,14 +1922,13 @@ async def post_init(application: Application):
     await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *المحلل الآلي جاهز للعمل! (v11 - مُحسَّن)*", parse_mode=ParseMode.MARKDOWN)
     logger.info("Post-init finished.")
 async def post_shutdown(application: Application): 
-    # إغلاق جميع أنواع الاتصالات
     all_exchanges = list(bot_data["exchanges"].values()) + list(bot_data["public_exchanges"].values())
-    unique_exchanges = list({id(ex): ex for ex in all_exchanges}.values()) # إزالة أي تكرار
+    unique_exchanges = list({id(ex): ex for ex in all_exchanges}.values()) 
     await asyncio.gather(*[ex.close() for ex in unique_exchanges])
     logger.info("All exchange connections closed.")
 
 def main():
-    print("🚀 Starting Pro Trading Analyzer Bot v11 (Optimized)...")
+    print("🚀 Starting Pro Trading Analyzer Bot v11 (Optimized & Transparent)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
@@ -1973,4 +1952,3 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
-
