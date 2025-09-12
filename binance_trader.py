@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v1.8 (Core Stability & Reliability) 💣 ---
+# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v1.9 (Stability & Hotfix) 💣 ---
 # =======================================================================================
-# - [إصلاح جذري] إعادة بناء نظام تحديث قاعدة البيانات بالكامل لإصلاح خطأ
-#   `no such column` بشكل نهائي وبأثر رجعي. هذا يضمن عمل جميع التقارير.
-# - [إعادة ميزة] إعادة تفعيل جميع إشعارات الصفقات الوهمية (فتح، إغلاق، تأمين)
-#   التي تم حذفها عن طريق الخطأ.
-# - [إصلاح واجهة] حل مشكلة عدم استجابة أزرار التقارير الناتجة عن أخطاء
-#   قاعدة البيانات.
-# - [تركيز] التأكيد على إزالة الميزات غير الأساسية والتركيز على موثوقية التداول.
+# - [إصلاح حرج] إضافة طبقات حماية للتعامل مع قيم `None` في حقل `stop_loss`
+#   في قاعدة البيانات القديمة، مما يمنع انهيار وظائف التتبع والتقارير.
+# - [إصلاح حرج] إعادة هيكلة وظيفة "لقطة للمحفظة" لتجنب الانهيار بسبب
+#   العملات المحذوفة من المنصة.
+# - [إعادة ميزة] التأكيد على إعادة تفعيل جميع إشعارات الصفقات الوهمية.
+# - [استقرار] مراجعة نظام تحديث قاعدة البيانات لضمان الموثوقية.
 # =======================================================================================
 
 
@@ -1048,10 +1047,11 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
                 continue
 
             # --- 1. التحقق من إغلاق الصفقة (TP/SL) ---
-            if current_price >= trade['take_profit']:
+            # [إصلاح حرج] التحقق من أن وقف الخسارة ليس None قبل المقارنة
+            if trade.get('take_profit') is not None and current_price >= trade['take_profit']:
                 await close_trade_in_db(context, trade, current_price, 'ناجحة')
                 continue
-            if current_price <= trade['stop_loss']:
+            if trade.get('stop_loss') is not None and current_price <= trade['stop_loss']:
                 await close_trade_in_db(context, trade, current_price, 'فاشلة')
                 continue
 
@@ -1145,7 +1145,7 @@ async def update_trade_sl_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict,
         conn.close()
         logger.info(f"Trailing SL {'activated' if is_activation else 'updated'} for trade #{trade['id']}. New SL: {new_sl}")
         # [إعادة تفعيل] إرسال إشعار التفعيل للصفقات الوهمية
-        if not silent and is_activation and trade.get('trade_mode') == 'virtual':
+        if not silent and is_activation:
             await send_telegram_message(context.bot, {**trade, "new_sl": new_sl}, update_type='tsl_activation')
     except Exception as e:
         logger.error(f"Failed to update SL for trade #{trade['id']} in DB: {e}")
@@ -2089,8 +2089,6 @@ async def portfolio_snapshot_command(update: Update, context: ContextTypes.DEFAU
     target_message = update.callback_query.message
     await target_message.edit_text("📸 **لقطة للمحفظة**\n\n⏳ جارِ الاتصال بالمنصة وجلب البيانات...")
 
-    # For simplicity, this tool will use the first available authenticated exchange.
-    # A more advanced version could let the user choose.
     exchange = next((ex for ex in bot_data["exchanges"].values() if ex.apiKey), None)
     
     if not exchange:
@@ -2098,14 +2096,10 @@ async def portfolio_snapshot_command(update: Update, context: ContextTypes.DEFAU
         return
 
     try:
-        # --- 1. Fetch Balances ---
         balance = await exchange.fetch_balance()
         all_assets = balance.get('total', {})
-        
-        # --- 2. Fetch Tickers to get current prices ---
         tickers = await exchange.fetch_tickers()
         
-        # --- 3. Process assets and calculate USDT value ---
         portfolio_assets = []
         total_usdt_value = 0
         for currency, amount in all_assets.items():
@@ -2116,29 +2110,39 @@ async def portfolio_snapshot_command(update: Update, context: ContextTypes.DEFAU
                 elif f"{currency}/USDT" in tickers and tickers[f"{currency}/USDT"].get('last'):
                     usdt_value = amount * tickers[f"{currency}/USDT"]['last']
                 
-                if usdt_value > 1: # Only show assets worth more than $1
+                if usdt_value > 1:
                     portfolio_assets.append({'currency': currency, 'amount': amount, 'usdt_value': usdt_value})
                     total_usdt_value += usdt_value
         
         portfolio_assets.sort(key=lambda x: x['usdt_value'], reverse=True)
+        
+        # [إصلاح حرج] جلب الصفقات لكل عملة على حدة لتجنب الأخطاء
+        all_recent_trades = []
+        for asset in portfolio_assets:
+            try:
+                symbol = f"{asset['currency']}/USDT"
+                if symbol in exchange.markets:
+                    trades = await exchange.fetch_my_trades(symbol=symbol, limit=5)
+                    all_recent_trades.extend(trades)
+            except Exception as e:
+                logger.warning(f"Could not fetch trades for {asset['currency']}: {e}")
+        
+        # Sort all collected trades by timestamp
+        all_recent_trades.sort(key=lambda x: x['timestamp'], reverse=True)
+        recent_trades = all_recent_trades[:20]
 
-        # --- 4. Fetch Recent Trades ---
-        recent_trades = await exchange.fetch_my_trades(limit=20)
-        recent_trades.reverse() # Show newest last
-
-        # --- 5. Build the Report ---
         parts = [f"**📸 لقطة لمحفظة {exchange.id.capitalize()}**\n"]
         parts.append(f"__**إجمالي القيمة التقديرية:**__ `${total_usdt_value:,.2f}`\n")
 
         parts.append("--- **الأرصدة الحالية (> $1)** ---")
-        for asset in portfolio_assets[:15]: # Show top 15 assets
+        for asset in portfolio_assets[:15]:
             parts.append(f"- **{asset['currency']}**: `{asset['amount']:.4f}` *~`${asset['usdt_value']:.2f}`*")
         
         parts.append("\n--- **آخر 20 عملية تداول** ---")
         if not recent_trades:
             parts.append("لا يوجد سجل تداولات حديث.")
         else:
-            for trade in recent_trades:
+            for trade in reversed(recent_trades): # Show oldest of the recent 20 first
                 side_emoji = "🟢" if trade['side'] == 'buy' else "🔴"
                 parts.append(f"`{trade['symbol']}` {side_emoji} `{trade['side'].upper()}` | الكمية: `{trade['amount']}` | السعر: `{trade['price']}`")
         
@@ -2157,10 +2161,7 @@ async def risk_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         conn = sqlite3.connect(DB_FILE, timeout=10)
         conn.row_factory = sqlite3.Row
         
-        # --- 1. Fetch Active Real Trades ---
         real_trades = conn.cursor().execute("SELECT * FROM trades WHERE status = 'نشطة' AND trade_mode = 'real'").fetchall()
-        
-        # --- 2. Fetch Active Virtual Trades ---
         virtual_trades = conn.cursor().execute("SELECT * FROM trades WHERE status = 'نشطة' AND trade_mode = 'virtual'").fetchall()
         conn.close()
 
@@ -2170,12 +2171,15 @@ async def risk_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             if not trades:
                 return [f"\n--- **{title}** ---\n✅ لا توجد صفقات نشطة حالياً."]
             
-            total_at_risk = sum(t['entry_value_usdt'] for t in trades)
-            potential_loss = sum((t['entry_price'] - t['stop_loss']) * t['quantity'] for t in trades)
-            symbol_concentration = Counter(t['symbol'] for t in trades)
+            # [إصلاح حرج] تجاهل الصفقات ذات البيانات المفقودة
+            valid_trades = [t for t in trades if all(t.get(k) is not None for k in ['entry_value_usdt', 'entry_price', 'stop_loss', 'quantity'])]
+            
+            total_at_risk = sum(t['entry_value_usdt'] for t in valid_trades)
+            potential_loss = sum((t['entry_price'] - t['stop_loss']) * t['quantity'] for t in valid_trades)
+            symbol_concentration = Counter(t['symbol'] for t in valid_trades)
 
             section_parts = [f"\n--- **{title}** ---"]
-            section_parts.append(f"- **عدد الصفقات:** {len(trades)}")
+            section_parts.append(f"- **عدد الصفقات:** {len(valid_trades)}")
             section_parts.append(f"- **إجمالي رأس المال بالصفقات:** `${total_at_risk:,.2f}`")
             if portfolio_value > 0:
                 section_parts.append(f"- **نسبة التعرض:** `{(total_at_risk / portfolio_value) * 100:.2f}%` من المحفظة")
@@ -2187,14 +2191,12 @@ async def risk_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             return section_parts
 
-        # Process Real Trades
         exchange = next((ex for ex in bot_data["exchanges"].values() if ex.apiKey), None)
         real_portfolio_value = 0
         if exchange:
-            real_portfolio_value = await get_real_balance(exchange.id, 'USDT') # Simplified total value
+            real_portfolio_value = await get_real_balance(exchange.id, 'USDT')
         parts.extend(generate_risk_section("🚨 المخاطر الحقيقية", real_trades, real_portfolio_value))
         
-        # Process Virtual Trades
         virtual_portfolio_value = bot_data['settings']['virtual_portfolio_balance_usdt']
         parts.extend(generate_risk_section("📊 المخاطر الوهمية", virtual_trades, virtual_portfolio_value))
 
@@ -2225,6 +2227,7 @@ async def sync_portfolio_command(update: Update, context: ContextTypes.DEFAULT_T
         balance = await exchange.fetch_balance()
         exchange_symbols = set()
         for currency, amount in balance.get('total', {}).items():
+            # A more robust check for minimum tradeable amount can be added here
             if amount > 0 and f"{currency}/USDT" in exchange.markets:
                 exchange_symbols.add(f"{currency}/USDT")
 
