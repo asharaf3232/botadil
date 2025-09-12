@@ -1160,7 +1160,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 # --- [IMPROVEMENT] Trade Tracking Function ---
 async def track_active_trades(context: ContextTypes.DEFAULT_TYPE):
     """مراقبة الصفقات النشطة وإدارة الوقف المتحرك وإغلاق الصفقات"""
-    logger.info(" periodically checking active trades...")
+    logger.info("...periodically checking active trades...")
 
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10)
@@ -1209,15 +1209,18 @@ async def track_active_trades(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"💥 Error in track_active_trades job: {e}", exc_info=True)
 
-# --- Simplified Scan Function ---
+# --- Simplified Scan Function (CORRECTED) ---
 async def perform_scan_simplified(context: ContextTypes.DEFAULT_TYPE):
-    """فحص مبسط للاستقرار"""
-    if await scan_lock.acquire(timeout=0.1):
+    """فحص مبسط للاستقرار مع معالجة صحيحة للقفل"""
+    
+    # [FIX] الطريقة الصحيحة للتحقق من القفل قبل استخدامه
+    if not scan_lock.locked():
+        await scan_lock.acquire()
         try:
             bot_data['status_snapshot']['scan_in_progress'] = True
             bot_data['status_snapshot']['last_scan_start_time'] = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')
             logger.info("🔍 Starting simplified market scan...")
-
+            
             # (هنا يمكن وضع منطق الفحص الحقيقي)
             all_tickers = []
             for ex_id, exchange in list(bot_data["exchanges"].items())[:2]:
@@ -1229,16 +1232,16 @@ async def perform_scan_simplified(context: ContextTypes.DEFAULT_TYPE):
                     if len(all_tickers) >= 10: break
                 except Exception as e:
                     logger.warning(f"Failed to fetch from {ex_id}: {e}")
-
+            
             signals_found = min(len(all_tickers) // 5, 3)
-
+            
             bot_data['status_snapshot'].update({
                 'markets_found': len(all_tickers),
                 'signals_found': signals_found,
                 'scan_in_progress': False,
                 'last_scan_end_time': datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')
             })
-
+            
             summary_text = (
                 f"**🔍 انتهى الفحص الفوري**\n\n"
                 f"**الأسواق المفحوصة:** {len(all_tickers)}\n"
@@ -1247,14 +1250,14 @@ async def perform_scan_simplified(context: ContextTypes.DEFAULT_TYPE):
             )
             await send_telegram_message(context.bot, {'custom_message': summary_text})
             logger.info(f"✅ Simplified scan complete: {len(all_tickers)} markets, {signals_found} signals")
-
+            
         except Exception as e:
             logger.error(f"💥 Error in simplified scan: {e}")
             bot_data['status_snapshot']['scan_in_progress'] = False
         finally:
             scan_lock.release()
     else:
-        logger.info("Scan already in progress. Skipping.")
+        logger.info("Scan already in progress. Skipping this run.")
 
 
 # --- Main Function (FIXED & HARDENED) ---
@@ -1289,7 +1292,7 @@ async def main():
     job_queue.run_repeating(track_active_trades, interval=TRACK_INTERVAL_SECONDS, first=30, name="trade_tracker")
     logger.info("⏰ Scheduled jobs configured successfully")
 
-    # [FIX] الطريقة الجديدة للتشغيل والإيقاف النظيف
+    # الطريقة الجديدة للتشغيل والإيقاف النظيف
     try:
         # 1. تهيئة التطبيق
         await application.initialize()
