@@ -1,17 +1,15 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v3.1 (إصدار صلابة الشبكة) 💣 ---
+# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v3.3 (إصلاح حلقة الأحداث) 💣 ---
 # =======================================================================================
 # --- سجل التغييرات الكامل ---
 #
-# 7.  [إصلاح حرج] حل مشكلة توقف البوت بالكامل عند فشل إرسال رسالة البدء
-#     بسبب انقطاع الشبكة (TimedOut). سيقوم البوت الآن بتسجيل تحذير
-#     والاستمرار في العمل بشكل طبيعي.
+# 9.  [إصلاح جذري] إعادة هيكلة طريقة تشغيل البوت باستخدام `asyncio.run()`
+#     لحل مشكلة `RuntimeError: no running event loop` النادرة التي تحدث
+#     عند فشل الاتصال الأولي بالشبكة. هذا يضمن إدارة سليمة ومنضبطة
+#     لجميع العمليات غير المتزامنة.
 #
-# 8.  [تحسين] زيادة المهلة الزمنية لاتصالات تيليجرام لجعل البوت أكثر
-#     تحملاً للشبكات البطيئة أو غير المستقرة.
-#
-# ... (جميع الإصلاحات السابقة من v3.0 موجودة)
+# ... (جميع الإصلاحات السابقة من v3.0 و v3.1 موجودة)
 # =======================================================================================
 
 
@@ -2400,7 +2398,9 @@ async def post_shutdown(application: Application):
     await asyncio.gather(*[ex.close() for ex in unique_exchanges])
     logger.info("All exchange connections closed.")
 
-def main():
+# [إصلاح جذري] إعادة هيكلة طريقة التشغيل
+async def async_main():
+    """Sets up and runs the bot application."""
     reset_file = os.path.join(APP_ROOT, '_reset_db_please.txt')
     if os.path.exists(reset_file):
         logger.warning("Reset file found! Deleting database and resetting.")
@@ -2410,12 +2410,14 @@ def main():
         os.remove(reset_file)
         logger.info("Reset file deleted. Bot will start with a fresh database.")
 
-    print("🚀 Starting Mineseper Bot v3.2 (Increased Timeout Release)...")
-    load_settings(); init_database()
+    load_settings()
+    init_database()
+
     # [تحسين] زيادة مهلة الاتصال بشكل كبير لتجنب أخطاء بدء التشغيل
     request = HTTPXRequest(connect_timeout=60.0, read_timeout=60.0, pool_timeout=60.0)
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).request(request).post_init(post_init).post_shutdown(post_shutdown).build()
 
+    # إضافة الأوامر ومعالجات الرسائل
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("check", check_trade_command))
     application.add_handler(CommandHandler("trade", manual_trade_command))
@@ -2425,16 +2427,33 @@ def main():
     application.add_handler(CallbackQueryHandler(button_callback_handler))
 
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, universal_text_handler))
-
     application.add_error_handler(error_handler)
 
-    print("✅ Bot is now running...")
-    application.run_polling()
+    logger.info("Application configured. Starting polling...")
+    
+    # التشغيل غير المتزامن وإدارة الإغلاق النظيف
+    try:
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling()
+        # إبقاء البرنامج يعمل
+        while True:
+            await asyncio.sleep(3600) 
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot shutting down gracefully...")
+    finally:
+        if application.updater.running:
+            await application.updater.stop()
+        if application.running:
+            await application.stop()
+        await application.shutdown()
+        logger.info("Bot has been shut down.")
+
 
 if __name__ == '__main__':
+    print("🚀 Starting Mineseper Bot v3.3 (Event Loop Fix Release)...")
     try:
-        main()
+        asyncio.run(async_main())
     except Exception as e:
-        logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
-
+        logging.critical(f"Bot stopped due to a critical unhandled error in the main loop: {e}", exc_info=True)
 
