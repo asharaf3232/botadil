@@ -856,15 +856,14 @@ async def place_real_trade(signal):
             oco_params = {'stopLimitPrice': sl_price}
             oco_order = await exchange.create_order(symbol, 'oco', 'sell', verified_quantity, price=tp_price, stopPrice=sl_trigger_price, params=oco_params)
             exit_order_ids = {"oco_id": oco_order['id']}
-       # KuCoin supports OCO via params on a stop limit order
+       # # KuCoin supports OCO via params on a stop limit order
         elif exchange.id == 'kucoin':
             logger.info(f"Placing OCO for {symbol} on KuCoin. TP Trigger: {tp_price}, SL Trigger: {sl_trigger_price}, SL Limit: {sl_price}")
             params = {
-                'stop': 'loss',             # Specify stop loss
-                'stopPrice': sl_trigger_price, # **الإصلاح: السعر هنا داخل الـ params**
-                'takeProfitPrice': tp_price # Add take profit trigger
+                'stop': 'loss',
+                'takeProfitPrice': tp_price, # سعر الهدف
+                'stopLossPrice': sl_trigger_price # **الإصلاح النهائي: استخدام الاسم الصحيح الذي يطلبه الخطأ**
             }
-            # **الإصلاح: تم حذف 'stopPrice' من هنا**
             oco_order = await exchange.create_order(symbol, 'stop_limit', 'sell', verified_quantity, price=sl_price, params=params)
             exit_order_ids = {"oco_id": oco_order['id']}
             oco_order = await exchange.create_order(symbol, 'stop_limit', 'sell', verified_quantity, price=sl_price, stopPrice=sl_trigger_price, params=params)
@@ -2623,3 +2622,4 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error in the main loop: {e}", exc_info=True)
+
