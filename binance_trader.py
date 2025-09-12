@@ -800,23 +800,46 @@ async def place_real_trade(signal):
     except Exception as e:
         logger.error(f"Placing BUY order for {symbol} failed immediately: {e}", exc_info=True)
         return {'success': False, 'data': f"حدث خطأ من المنصة عند محاولة الشراء: `{str(e)}`"}
-
+# --- [CRITICAL FIX] Robust Order Verification Loop ---
     try:
-        await asyncio.sleep(2) 
-        verified_order = await exchange.fetch_order(buy_order['id'], symbol)
+        max_attempts = 5  # سنحاول التحقق 5 مرات
+        delay_seconds = 3   # ننتظر 3 ثواني بين كل محاولة
+        verified_order = None
         
-        if verified_order and verified_order.get('status') == 'closed' and verified_order.get('filled', 0) > 0:
+        for attempt in range(max_attempts):
+            logger.info(f"Verifying BUY order {buy_order.get('id', 'N/A')}... (Attempt {attempt + 1}/{max_attempts})")
+            try:
+                order_status = await exchange.fetch_order(buy_order['id'], symbol)
+                
+                # إذا تم التنفيذ بنجاح، نخرج من اللوب
+                if order_status and order_status.get('status') == 'closed' and order_status.get('filled', 0) > 0:
+                    verified_order = order_status
+                    break 
+                
+                # إذا لم ينتهي اللوب، ننتظر للمحاولة التالية
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(delay_seconds)
+
+            except ccxt.OrderNotFound:
+                logger.warning(f"Order {buy_order.get('id', 'N/A')} not found on attempt {attempt + 1}. Retrying...")
+                await asyncio.sleep(delay_seconds)
+            except Exception as fetch_e:
+                logger.error(f"An error occurred during order fetch verification: {fetch_e}")
+                await asyncio.sleep(delay_seconds)
+
+        # بعد انتهاء اللوب، نتحقق من النتيجة
+        if verified_order:
             verified_price = verified_order.get('average', signal['entry_price'])
             verified_quantity = verified_order.get('filled')
             verified_cost = verified_order.get('cost', verified_price * verified_quantity)
-            logger.info(f"BUY order {buy_order['id']} VERIFIED. Filled {verified_quantity} @ {verified_price}")
+            logger.info(f"BUY order {buy_order['id']} VERIFIED successfully. Filled {verified_quantity} @ {verified_price}")
         else:
-            raise Exception(f"Order {buy_order['id']} not confirmed as filled. Status: {verified_order.get('status')}")
+            # إذا فشلت كل المحاولات، نرفع استثناءً
+            raise Exception(f"Order {buy_order['id']} could not be confirmed as filled after {max_attempts} attempts.")
 
     except Exception as e:
         logger.error(f"VERIFICATION FAILED for BUY order {buy_order.get('id', 'N/A')}: {e}", exc_info=True)
-        return {'success': False, 'manual_check_required': True, 'data': f"تم إرسال أمر الشراء لكن فشل التحقق منه. **يرجى التحقق من المنصة يدوياً!** Order ID: `{buy_order.get('id', 'N/A')}`. Error: `{e}`"}
-
+        return {'success': False, 'manual_check_required': True, 'data': f"تم إرسال أمر الشراء لكن فشل التحقق منه بعد عدة محاولات. **يرجى التحقق من المنصة يدوياً!** Order ID: `{buy_order.get('id', 'N/A')}`. Error: `{e}`"}
     # [ترقية أمان حرجة] منطق الخروج الموحد باستخدام OCO
     exit_order_ids = {}
     try:
