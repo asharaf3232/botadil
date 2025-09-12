@@ -840,7 +840,7 @@ async def place_real_trade(signal):
     except Exception as e:
         logger.error(f"VERIFICATION FAILED for BUY order {buy_order.get('id', 'N/A')}: {e}", exc_info=True)
         return {'success': False, 'manual_check_required': True, 'data': f"تم إرسال أمر الشراء لكن فشل التحقق منه بعد عدة محاولات. **يرجى التحقق من المنصة يدوياً!** Order ID: `{buy_order.get('id', 'N/A')}`. Error: `{e}`"}
-    # [ترقية أمان حرجة] منطق الخروج الموحد باستخدام OCO
+   # [ترقية أمان حرجة] منطق الخروج الموحد باستخدام OCO
     exit_order_ids = {}
     try:
         tp_price = exchange.price_to_precision(symbol, signal['take_profit'])
@@ -870,20 +870,39 @@ async def place_real_trade(signal):
             exit_order_ids = {"tp_id": tp_order['id'], "sl_id": sl_order['id']}
         
         logger.info(f"Successfully placed exit orders for {symbol} with IDs: {exit_order_ids}")
+        
+        # --- هذا هو الشكل النهائي للبيانات عند النجاح الكامل ---
+        return {
+            'success': True,
+            'exit_orders_failed': False, # نضيف هذا العلم للإشارة للنجاح
+            'data': {
+                "entry_order_id": buy_order['id'],
+                "exit_order_ids_json": json.dumps(exit_order_ids),
+                "verified_quantity": verified_quantity,
+                "verified_entry_price": verified_price,
+                "verified_entry_value": verified_cost
+            }
+        }
+
     except Exception as e:
         logger.error(f"Failed to place exit orders for {symbol} after successful buy: {e}", exc_info=True)
-        return {'success': True, 'exit_orders_failed': True, 'data': f"تم شراء {symbol} بنجاح، **لكن فشل وضع أوامر الخروج**. يرجى وضع الوقف والهدف يدوياً!"}
-
-    return {
-        'success': True,
-        'data': {
+        
+        # --- هذا هو الإصلاح الحاسم للمشكلة ---
+        # بدلاً من إرجاع نص، نرجع قاموساً بنفس بنية النجاح
+        # هذا يمنع الخطأ الصامت (TypeError)
+        error_data = {
             "entry_order_id": buy_order['id'],
-            "exit_order_ids_json": json.dumps(exit_order_ids),
+            "exit_order_ids_json": json.dumps({}), # أوامر خروج فارغة
             "verified_quantity": verified_quantity,
             "verified_entry_price": verified_price,
             "verified_entry_value": verified_cost
         }
-    }
+        
+        return {
+            'success': True, 
+            'exit_orders_failed': True, # نعلم بأن أوامر الخروج فشلت
+            'data': error_data # نرجع البيانات الأساسية للشراء
+        }
 
 
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
@@ -946,43 +965,34 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
             exchange_is_tradeable = signal_exchange_id in bot_data["exchanges"] and bot_data["exchanges"][signal_exchange_id].apiKey
             attempt_real_trade = is_real_mode_enabled and exchange_is_tradeable
             signal['is_real_trade'] = attempt_real_trade
-
-            if attempt_real_trade:
-                await send_telegram_message(context.bot, {'custom_message': f"**🔎 تم العثور على إشارة حقيقية لـ `{signal['symbol']}`... جاري محاولة التنفيذ على `{signal['exchange']}`.**"})
-                trade_result = await place_real_trade(signal)
+if attempt_real_trade:
+               await send_telegram_message(context.bot, {'custom_message': f"**🔎 تم العثور على إشارة حقيقية لـ `{signal['symbol']}`... جاري محاولة التنفيذ على `{signal['exchange']}`.**"})
+                try:
+                    trade_result = await place_real_trade(signal)
+                    
+                    if trade_result.get('success'):
+                        # نضمن أن 'data' هو قاموس قبل التحديث لمنع أي خطأ
+                        if isinstance(trade_result.get('data'), dict):
+                            signal.update(trade_result['data'])
+                        
+                        # الآن نسجل في قاعدة البيانات
+                        if log_recommendation_to_db(signal):
+                            await send_telegram_message(context.bot, signal, is_new=True)
+                            new_trades += 1
+                            # بعد التسجيل الناجح، نتحقق إذا كانت أوامر الخروج فشلت ونرسل التحذير
+                            if trade_result.get('exit_orders_failed'):
+                                await send_telegram_message(context.bot, {'custom_message': f"**🚨 تحذير:** تم شراء `{signal['symbol']}` بنجاح وتسجيلها، **لكن فشل وضع أوامر الهدف/الوقف تلقائياً.**\n\n**يرجى وضعها يدوياً الآن!**"})
+                        else: 
+                            # إذا فشل التسجيل في قاعدة البيانات
+                            await send_telegram_message(context.bot, {'custom_message': f"**⚠️ خطأ حرج:** تم تنفيذ صفقة `{signal['symbol']}` لكن فشل تسجيلها في قاعدة البيانات. **يرجى المتابعة اليدوية فوراً!**"})
+                    else:
+                        # في حالة الفشل المعروف من المنصة (رصيد غير كافٍ مثلاً)
+                        await send_telegram_message(context.bot, {'custom_message': f"**❌ فشل تنفيذ صفقة `{signal['symbol']}`**\n\n**السبب:** {trade_result.get('data', 'سبب غير معروف')}"})
                 
-                if trade_result['success']:
-                    signal.update(trade_result['data'])
-                    if log_recommendation_to_db(signal):
-                        await send_telegram_message(context.bot, signal, is_new=True)
-                        new_trades += 1
-                    else: 
-                        await send_telegram_message(context.bot, {'custom_message': f"**⚠️ خطأ حرج:** تم تنفيذ صفقة `{signal['symbol']}` لكن فشل تسجيلها. **يرجى المتابعة اليدوية فوراً!**\nتفاصيل: `{trade_result['data']}`"})
-                else:
-                    await send_telegram_message(context.bot, {'custom_message': f"**❌ فشل تنفيذ صفقة `{signal['symbol']}`**\n\n**السبب:** {trade_result['data']}"})
-
-            else: 
-                if active_trades_count < settings.get("max_concurrent_trades", 10):
-                    trade_amount_usdt = settings["virtual_portfolio_balance_usdt"] * (settings["virtual_trade_size_percentage"] / 100)
-                    signal.update({'quantity': trade_amount_usdt / signal['entry_price'], 'entry_value_usdt': trade_amount_usdt})
-                    if trade_id := log_recommendation_to_db(signal):
-                        signal['trade_id'] = trade_id
-                        await send_telegram_message(context.bot, signal, is_new=True)
-                        new_trades += 1
-                else:
-                    await send_telegram_message(context.bot, signal, is_opportunity=True)
-                    opportunities += 1
-
-            await asyncio.sleep(0.5)
-            last_signal_time[signal['symbol']] = time.time()
-
-        failures = failure_counter[0]
-        logger.info(f"Scan complete. Found: {total_signals_found}, Entered: {new_trades}, Opportunities: {opportunities}, Failures: {failures}.")
-        
-        status['last_scan_end_time'] = datetime.now(EGYPT_TZ)
-        scan_start_time = status.get('last_scan_start_time')
-        scan_duration = (status['last_scan_end_time'] - scan_start_time).total_seconds() if isinstance(scan_start_time, datetime) else 0
-
+                except Exception as e:
+                    # هذا الجزء سيمسك بأي أخطاء غير متوقعة ويمنع الصمت
+                    logger.critical(f"CRITICAL UNHANDLED ERROR during real trade execution for {signal['symbol']}: {e}", exc_info=True)
+                    await send_telegram_message(context.bot, {'custom_message': f"**❌ فشل حرج وغير معالج أثناء محاولة تنفيذ صفقة `{signal['symbol']}`.**\n\n**الخطأ:** `{str(e)}`\n\n*يرجى التحقق من المنصة ومن سجلات الأخطاء (logs).*"})
         summary_message = (f"**🔬 ملخص الفحص الأخير**\n\n"
                            f"- **الحالة:** اكتمل بنجاح\n"
                            f"- **وضع السوق (BTC):** {status['btc_market_mood']}\n"
