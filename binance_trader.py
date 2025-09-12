@@ -2410,10 +2410,10 @@ def main():
         os.remove(reset_file)
         logger.info("Reset file deleted. Bot will start with a fresh database.")
 
-    print("🚀 Starting Minesweeper Bot v3.1 (Network Resilience Release)...")
+    print("🚀 Starting Mineseper Bot v3.2 (Increased Timeout Release)...")
     load_settings(); init_database()
-    # [تحسين] زيادة مهلة الاتصال ليكون البوت أكثر تحملاً للشبكات البطيئة
-    request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0, write_timeout=30.0)
+    # [تحسين] زيادة مهلة الاتصال بشكل كبير لتجنب أخطاء بدء التشغيل
+    request = HTTPXRequest(connect_timeout=60.0, read_timeout=60.0, pool_timeout=60.0)
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).request(request).post_init(post_init).post_shutdown(post_shutdown).build()
 
     application.add_handler(CommandHandler("start", start_command))
@@ -2436,4 +2436,5 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
+
 
