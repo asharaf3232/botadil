@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-# =======================================================================================
-# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v1.9 (Stability & Hotfix) 💣 ---
-# =======================================================================================
-# - [إصلاح حرج] إضافة طبقات حماية للتعامل مع قيم `None` في حقل `stop_loss`
-#   في قاعدة البيانات القديمة، مما يمنع انهيار وظائف التتبع والتقارير.
-# - [إصلاح حرج] إعادة هيكلة وظيفة "لقطة للمحفظة" لتجنب الانهيار بسبب
-#   العملات المحذوفة من المنصة.
-# - [إعادة ميزة] التأكيد على إعادة تفعيل جميع إشعارات الصفقات الوهمية.
-# - [استقرار] مراجعة نظام تحديث قاعدة البيانات لضمان الموثوقية.
-# =======================================================================================
+# =============================================================================
+# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v1.7 (Smart Sync Edition) 💣 ---
+# =============================================================================
+# - [إصلاح بأثر رجعي] بناء نظام تحديث ذكي لقاعدة البيانات لإصلاح أخطاء
+#   التقارير التي ظهرت في الفيديو ومنع تكرارها مستقبلاً.
+# - [ميزة احترافية] إضافة "🔄 مزامنة ومطابقة المحفظة": أداة قوية لمقارنة
+#   سجلات البوت بالواقع الفعلي على المنصة وكشف أي اختلافات.
+# - [تحسين] التأكيد على إزالة الميزات المكررة (مراقب الإدراجات وصائد الجواهر).
+# - [واجهة] دمج أداة المزامنة الجديدة في لوحة التحكم الرئيسية.
+# =============================================================================
 
 
 # --- المكتبات المطلوبة --- #
@@ -253,40 +253,33 @@ def save_settings():
         logger.error(f"Failed to save settings: {e}")
 
 # --- Database Management ---
-# [إصلاح جذري] نظام تحديث قاعدة البيانات الذكي
+# [جديد] نظام تحديث قاعدة البيانات الذكي
 def migrate_database():
-    """Checks for missing columns in the database and adds them. This is critical for updates."""
-    logger.info("Checking database schema...")
+    """Checks for missing columns in the database and adds them."""
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10)
         cursor = conn.cursor()
         
-        # The ideal schema for the `trades` table
-        required_columns = {
-            "id": "INTEGER PRIMARY KEY AUTOINCREMENT", "timestamp": "TEXT", "exchange": "TEXT",
-            "symbol": "TEXT", "entry_price": "REAL", "take_profit": "REAL", "stop_loss": "REAL",
-            "quantity": "REAL", "entry_value_usdt": "REAL", "status": "TEXT", "exit_price": "REAL",
-            "closed_at": "TEXT", "exit_value_usdt": "REAL", "pnl_usdt": "REAL",
-            "trailing_sl_active": "BOOLEAN", "highest_price": "REAL", "reason": "TEXT",
-            "is_real_trade": "BOOLEAN", "trade_mode": "TEXT DEFAULT 'virtual'",
-            "entry_order_id": "TEXT", "exit_order_ids_json": "TEXT"
-        }
-        
+        # Check for `trade_mode` column
         cursor.execute("PRAGMA table_info(trades)")
-        existing_columns = {row[1] for row in cursor.fetchall()}
+        columns = [info[1] for info in cursor.fetchall()]
         
-        for col_name, col_type in required_columns.items():
-            if col_name not in existing_columns:
-                logger.warning(f"Database schema mismatch. Missing column '{col_name}'. Adding it now.")
-                cursor.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
-                logger.info(f"Column '{col_name}' added successfully.")
-        
+        if 'trade_mode' not in columns:
+            logger.info("Migrating database: Adding 'trade_mode' column to trades table.")
+            cursor.execute("ALTER TABLE trades ADD COLUMN trade_mode TEXT DEFAULT 'virtual'")
+            # Populate the new column based on the old `is_real_trade` column
+            cursor.execute("UPDATE trades SET trade_mode = 'real' WHERE is_real_trade = 1")
+            logger.info("Database migration for 'trade_mode' completed successfully.")
+
+        if 'is_real_trade' not in columns:
+            logger.info("Migrating database: Adding 'is_real_trade' column for older compatibility.")
+            cursor.execute("ALTER TABLE trades ADD COLUMN is_real_trade BOOLEAN DEFAULT FALSE")
+            cursor.execute("UPDATE trades SET is_real_trade = 1 WHERE trade_mode = 'real'")
+
         conn.commit()
         conn.close()
-        logger.info("Database schema check complete.")
     except Exception as e:
-        logger.error(f"CRITICAL: Database migration failed: {e}", exc_info=True)
-
+        logger.error(f"Database migration failed: {e}", exc_info=True)
 
 def init_database():
     try:
@@ -294,16 +287,39 @@ def init_database():
         cursor = conn.cursor()
         
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT)
+            CREATE TABLE IF NOT EXISTS trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                exchange TEXT,
+                symbol TEXT,
+                entry_price REAL,
+                take_profit REAL,
+                stop_loss REAL,
+                quantity REAL,
+                entry_value_usdt REAL,
+                status TEXT,
+                exit_price REAL,
+                closed_at TEXT,
+                exit_value_usdt REAL,
+                pnl_usdt REAL,
+                trailing_sl_active BOOLEAN,
+                highest_price REAL,
+                reason TEXT,
+                is_real_trade BOOLEAN,
+                trade_mode TEXT DEFAULT 'virtual', -- 'virtual' or 'real'
+                entry_order_id TEXT,
+                exit_order_ids_json TEXT
+            )
         ''')
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_status_mode ON trades (status, trade_mode);")
         
         conn.commit()
         conn.close()
+        logger.info(f"Database schema verified.")
         
-        # Run migration after ensuring the table exists, even if it's empty
+        # Run migration after ensuring table exists
         migrate_database()
         
-        logger.info(f"Database initialized and schema verified at: {DB_FILE}")
     except Exception as e:
         logger.error(f"Failed to initialize database at {DB_FILE}: {e}")
 
@@ -921,9 +937,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                 if active_trades_count < settings.get("max_concurrent_trades", 10):
                     trade_amount_usdt = settings["virtual_portfolio_balance_usdt"] * (settings["virtual_trade_size_percentage"] / 100)
                     signal.update({'quantity': trade_amount_usdt / signal['entry_price'], 'entry_value_usdt': trade_amount_usdt})
-                    # [إعادة تفعيل] التأكد من إرسال الإشعار للصفقات الوهمية
-                    if trade_id := log_recommendation_to_db(signal):
-                        signal['trade_id'] = trade_id
+                    if log_recommendation_to_db(signal):
                         await send_telegram_message(context.bot, signal, is_new=True)
                         new_trades += 1
                 else:
@@ -1047,11 +1061,10 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
                 continue
 
             # --- 1. التحقق من إغلاق الصفقة (TP/SL) ---
-            # [إصلاح حرج] التحقق من أن وقف الخسارة ليس None قبل المقارنة
-            if trade.get('take_profit') is not None and current_price >= trade['take_profit']:
+            if current_price >= trade['take_profit']:
                 await close_trade_in_db(context, trade, current_price, 'ناجحة')
                 continue
-            if trade.get('stop_loss') is not None and current_price <= trade['stop_loss']:
+            if current_price <= trade['stop_loss']:
                 await close_trade_in_db(context, trade, current_price, 'فاشلة')
                 continue
 
@@ -1065,7 +1078,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
                     activation_price = trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100)
                     if current_price >= activation_price:
                         new_sl = trade['entry_price']
-                        if new_sl > trade.get('stop_loss', 0):
+                        if new_sl > trade['stop_loss']:
                             if trade.get('trade_mode') == 'real':
                                 await send_telegram_message(context.bot, {**trade, "new_sl": new_sl, "current_price": current_price}, update_type='tsl_update_real')
                                 # For real trades, we only notify. We update the DB to prevent re-notifying.
@@ -1076,7 +1089,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
                 # تحديث الوقف المتحرك بعد التفعيل
                 elif trade.get('trailing_sl_active'):
                     new_sl = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
-                    if new_sl > trade.get('stop_loss', 0):
+                    if new_sl > trade['stop_loss']:
                         if trade.get('trade_mode') == 'real':
                             await send_telegram_message(context.bot, {**trade, "new_sl": new_sl, "current_price": current_price}, update_type='tsl_update_real')
                             await update_trade_sl_in_db(context, trade, new_sl, highest_price, silent=True)
@@ -1088,7 +1101,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
                     await update_trade_peak_price_in_db(trade['id'], highest_price)
 
         except Exception as e:
-            logger.error(f"Error tracking trade #{trade['id']} ({trade['symbol']}): {e}", exc_info=True)
+            logger.error(f"Error tracking trade #{trade['id']} ({trade['symbol']}): {e}")
 
 
 # [جديد] دوال مساعدة لتحديث قاعدة البيانات مباشرة (مستوحاة من صياد الفومو)
@@ -1120,17 +1133,16 @@ async def close_trade_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict, exi
         return
     
     trade_type_str = "(صفقة حقيقية)" if trade.get('trade_mode') == 'real' else ""
-    pnl_percent = (pnl_usdt / trade['entry_value_usdt'] * 100) if trade.get('entry_value_usdt', 0) > 0 else 0
     message = ""
     if status == 'ناجحة':
         message = (f"**📦 إغلاق صفقة {trade_type_str} | #{trade['id']} {trade['symbol']}**\n\n"
                    f"**الحالة: ✅ ناجحة (تم تحقيق الهدف)**\n"
-                   f"💰 **الربح:** `${pnl_usdt:+.2f}` (`{pnl_percent:+.2f}%`)\n\n"
+                   f"💰 **الربح:** `${pnl_usdt:+.2f}` (`{(pnl_usdt / trade['entry_value_usdt'] * 100):+.2f}%`)\n\n"
                    f"- **مدة الصفقة:** {duration_str}")
     else: # فاشلة
         message = (f"**📦 إغلاق صفقة {trade_type_str} | #{trade['id']} {trade['symbol']}**\n\n"
                    f"**الحالة: ❌ فاشلة (تم ضرب الوقف)**\n"
-                   f"💰 **الخسارة:** `${pnl_usdt:.2f}` (`{pnl_percent:.2f}%`)\n\n"
+                   f"💰 **الخسارة:** `${pnl_usdt:.2f}` (`{(pnl_usdt / trade['entry_value_usdt'] * 100):.2f}%`)\n\n"
                    f"- **مدة الصفقة:** {duration_str}")
 
     await send_telegram_message(context.bot, {'custom_message': message, 'target_chat': TELEGRAM_SIGNAL_CHANNEL_ID})
@@ -1144,7 +1156,6 @@ async def update_trade_sl_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict,
         conn.commit()
         conn.close()
         logger.info(f"Trailing SL {'activated' if is_activation else 'updated'} for trade #{trade['id']}. New SL: {new_sl}")
-        # [إعادة تفعيل] إرسال إشعار التفعيل للصفقات الوهمية
         if not silent and is_activation:
             await send_telegram_message(context.bot, {**trade, "new_sl": new_sl}, update_type='tsl_activation')
     except Exception as e:
@@ -1281,7 +1292,7 @@ main_menu_keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"], ["�
 settings_menu_keyboard = [["🏁 أنماط جاهزة", "🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 1.8 - الاستقرار والموثوقية)*\n\nاختر من القائمة للبدء."
+    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 1.7 - المزامنة الذكية)*\n\nاختر من القائمة للبدء."
     await update.message.reply_text(welcome_message, reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2089,6 +2100,8 @@ async def portfolio_snapshot_command(update: Update, context: ContextTypes.DEFAU
     target_message = update.callback_query.message
     await target_message.edit_text("📸 **لقطة للمحفظة**\n\n⏳ جارِ الاتصال بالمنصة وجلب البيانات...")
 
+    # For simplicity, this tool will use the first available authenticated exchange.
+    # A more advanced version could let the user choose.
     exchange = next((ex for ex in bot_data["exchanges"].values() if ex.apiKey), None)
     
     if not exchange:
@@ -2096,10 +2109,14 @@ async def portfolio_snapshot_command(update: Update, context: ContextTypes.DEFAU
         return
 
     try:
+        # --- 1. Fetch Balances ---
         balance = await exchange.fetch_balance()
         all_assets = balance.get('total', {})
+        
+        # --- 2. Fetch Tickers to get current prices ---
         tickers = await exchange.fetch_tickers()
         
+        # --- 3. Process assets and calculate USDT value ---
         portfolio_assets = []
         total_usdt_value = 0
         for currency, amount in all_assets.items():
@@ -2110,39 +2127,29 @@ async def portfolio_snapshot_command(update: Update, context: ContextTypes.DEFAU
                 elif f"{currency}/USDT" in tickers and tickers[f"{currency}/USDT"].get('last'):
                     usdt_value = amount * tickers[f"{currency}/USDT"]['last']
                 
-                if usdt_value > 1:
+                if usdt_value > 1: # Only show assets worth more than $1
                     portfolio_assets.append({'currency': currency, 'amount': amount, 'usdt_value': usdt_value})
                     total_usdt_value += usdt_value
         
         portfolio_assets.sort(key=lambda x: x['usdt_value'], reverse=True)
-        
-        # [إصلاح حرج] جلب الصفقات لكل عملة على حدة لتجنب الأخطاء
-        all_recent_trades = []
-        for asset in portfolio_assets:
-            try:
-                symbol = f"{asset['currency']}/USDT"
-                if symbol in exchange.markets:
-                    trades = await exchange.fetch_my_trades(symbol=symbol, limit=5)
-                    all_recent_trades.extend(trades)
-            except Exception as e:
-                logger.warning(f"Could not fetch trades for {asset['currency']}: {e}")
-        
-        # Sort all collected trades by timestamp
-        all_recent_trades.sort(key=lambda x: x['timestamp'], reverse=True)
-        recent_trades = all_recent_trades[:20]
 
+        # --- 4. Fetch Recent Trades ---
+        recent_trades = await exchange.fetch_my_trades(limit=20)
+        recent_trades.reverse() # Show newest last
+
+        # --- 5. Build the Report ---
         parts = [f"**📸 لقطة لمحفظة {exchange.id.capitalize()}**\n"]
         parts.append(f"__**إجمالي القيمة التقديرية:**__ `${total_usdt_value:,.2f}`\n")
 
         parts.append("--- **الأرصدة الحالية (> $1)** ---")
-        for asset in portfolio_assets[:15]:
+        for asset in portfolio_assets[:15]: # Show top 15 assets
             parts.append(f"- **{asset['currency']}**: `{asset['amount']:.4f}` *~`${asset['usdt_value']:.2f}`*")
         
         parts.append("\n--- **آخر 20 عملية تداول** ---")
         if not recent_trades:
             parts.append("لا يوجد سجل تداولات حديث.")
         else:
-            for trade in reversed(recent_trades): # Show oldest of the recent 20 first
+            for trade in recent_trades:
                 side_emoji = "🟢" if trade['side'] == 'buy' else "🔴"
                 parts.append(f"`{trade['symbol']}` {side_emoji} `{trade['side'].upper()}` | الكمية: `{trade['amount']}` | السعر: `{trade['price']}`")
         
@@ -2161,7 +2168,10 @@ async def risk_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         conn = sqlite3.connect(DB_FILE, timeout=10)
         conn.row_factory = sqlite3.Row
         
+        # --- 1. Fetch Active Real Trades ---
         real_trades = conn.cursor().execute("SELECT * FROM trades WHERE status = 'نشطة' AND trade_mode = 'real'").fetchall()
+        
+        # --- 2. Fetch Active Virtual Trades ---
         virtual_trades = conn.cursor().execute("SELECT * FROM trades WHERE status = 'نشطة' AND trade_mode = 'virtual'").fetchall()
         conn.close()
 
@@ -2171,15 +2181,12 @@ async def risk_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             if not trades:
                 return [f"\n--- **{title}** ---\n✅ لا توجد صفقات نشطة حالياً."]
             
-            # [إصلاح حرج] تجاهل الصفقات ذات البيانات المفقودة
-            valid_trades = [t for t in trades if all(t.get(k) is not None for k in ['entry_value_usdt', 'entry_price', 'stop_loss', 'quantity'])]
-            
-            total_at_risk = sum(t['entry_value_usdt'] for t in valid_trades)
-            potential_loss = sum((t['entry_price'] - t['stop_loss']) * t['quantity'] for t in valid_trades)
-            symbol_concentration = Counter(t['symbol'] for t in valid_trades)
+            total_at_risk = sum(t['entry_value_usdt'] for t in trades)
+            potential_loss = sum((t['entry_price'] - t['stop_loss']) * t['quantity'] for t in trades)
+            symbol_concentration = Counter(t['symbol'] for t in trades)
 
             section_parts = [f"\n--- **{title}** ---"]
-            section_parts.append(f"- **عدد الصفقات:** {len(valid_trades)}")
+            section_parts.append(f"- **عدد الصفقات:** {len(trades)}")
             section_parts.append(f"- **إجمالي رأس المال بالصفقات:** `${total_at_risk:,.2f}`")
             if portfolio_value > 0:
                 section_parts.append(f"- **نسبة التعرض:** `{(total_at_risk / portfolio_value) * 100:.2f}%` من المحفظة")
@@ -2191,12 +2198,14 @@ async def risk_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             return section_parts
 
+        # Process Real Trades
         exchange = next((ex for ex in bot_data["exchanges"].values() if ex.apiKey), None)
         real_portfolio_value = 0
         if exchange:
-            real_portfolio_value = await get_real_balance(exchange.id, 'USDT')
+            real_portfolio_value = await get_real_balance(exchange.id, 'USDT') # Simplified total value
         parts.extend(generate_risk_section("🚨 المخاطر الحقيقية", real_trades, real_portfolio_value))
         
+        # Process Virtual Trades
         virtual_portfolio_value = bot_data['settings']['virtual_portfolio_balance_usdt']
         parts.extend(generate_risk_section("📊 المخاطر الوهمية", virtual_trades, virtual_portfolio_value))
 
@@ -2227,7 +2236,6 @@ async def sync_portfolio_command(update: Update, context: ContextTypes.DEFAULT_T
         balance = await exchange.fetch_balance()
         exchange_symbols = set()
         for currency, amount in balance.get('total', {}).items():
-            # A more robust check for minimum tradeable amount can be added here
             if amount > 0 and f"{currency}/USDT" in exchange.markets:
                 exchange_symbols.add(f"{currency}/USDT")
 
@@ -2293,7 +2301,7 @@ async def post_init(application: Application):
     job_queue.run_repeating(track_open_trades, interval=TRACK_INTERVAL_SECONDS, first=20, name='track_open_trades')
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
     logger.info(f"Jobs scheduled. Daily report at 23:55 {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v1.8) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v1.7) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
     logger.info("Post-init finished.")
 async def post_shutdown(application: Application):
     all_exchanges = list(bot_data["exchanges"].values()) + list(bot_data["public_exchanges"].values())
@@ -2303,7 +2311,7 @@ async def post_shutdown(application: Application):
 
 def main():
     # [تعديل] تحديث اسم البوت عند التشغيل
-    print("🚀 Starting Minesweeper Bot v1.8 (Core Stability & Reliability)...")
+    print("🚀 Starting Minesweeper Bot v1.7 (Smart Sync Edition)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
