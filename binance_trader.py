@@ -1,20 +1,15 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v4.1 (إصدار التحكم بالبيانات) 💣 ---
+# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v4.2 (إصلاح جذري للتقارير) 💣 ---
 # =======================================================================================
 # --- سجل التغييرات الكامل ---
 #
-# 13. [إصلاح حاسم] تعديل "لقطة المحفظة" لتعرض قائمة تتيح للمستخدم اختيار
-#      المنصة المراد عرض بياناتها، بدلاً من عرض أول منصة متصلة تلقائياً.
+# 16. [إصلاح جذري] إعادة هيكلة كاملة لطريقة عمل تقارير لوحة التحكم.
+#     أصبحت جميع دوال التقارير تُرجع المحتوى بدلاً من إرساله مباشرةً.
+#     يقوم المعالج الرئيسي الآن بتحديث رسالة "جاري التحميل" بالتقرير
+#     النهائي، مما يحل مشكلة توقف البوت وفشل عرض التقارير بشكل نهائي.
 #
-# 14. [تحسين واجهة المستخدم] ضمان حذف رسالة "جاري التحميل..." بعد إرسال
-#      التقارير المطلوبة من لوحة التحكم لمنع تداخل الرسائل.
-#
-# 15. [تحسين منطق التداول] سيقوم البوت الآن بالتحقق من الحد الأدنى لحجم
-#      الصفقة الذي تفرضه المنصة (`minNotional`) ومقارنته بإعدادات المستخدم
-#      لمنع رفض الأوامر بسبب حجمها.
-#
-# ... (جميع الإصلاحات السابقة من v4.0 موجودة)
+# ... (جميع الإصلاحات السابقة من v4.1 موجودة)
 # =======================================================================================
 
 
@@ -1471,8 +1466,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/trade` - لبدء عملية تداول يدوية لاختبار الاتصال بالمنصات."
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+
+# [إصلاح جذري] تعديل دوال التقارير لترجع المحتوى
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trade_mode_filter='all'):
-    target_message = update.callback_query.message if update.callback_query else update.message
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10); cursor = conn.cursor();
         
@@ -1507,13 +1503,14 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trad
                        f"- *الناجحة:* `{successful}` | *الربح:* `${pnl.get('ناجحة', 0):.2f}`\n"
                        f"- *الفاشلة:* `{failed}` | *الخسارة:* `${abs(pnl.get('فاشلة', 0)):.2f}`\n"
                        f"- *معدل النجاح:* `{win_rate:.2f}%`")
-        await context.bot.send_message(chat_id=target_message.chat_id, text=stats_msg, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e: logger.error(f"Error in stats_command: {e}", exc_info=True); await target_message.reply_text("خطأ في جلب الإحصائيات.")
+        return stats_msg, None
+    except Exception as e:
+        logger.error(f"Error in stats_command: {e}", exc_info=True)
+        return "خطأ في جلب الإحصائيات.", None
+
 async def strategy_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trade_mode_filter='all'):
-    target_message = update.callback_query.message if update.callback_query else update.message
-    await context.bot.send_message(chat_id=target_message.chat_id, text="⏳ جاري إعداد تقرير أداء الاستراتيجيات...");
     report_string = generate_performance_report_string(trade_mode_filter)
-    await context.bot.send_message(chat_id=target_message.chat_id, text=report_string, parse_mode=ParseMode.MARKDOWN)
+    return report_string, None
 
 async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
     today_str = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d')
@@ -1679,8 +1676,8 @@ async def check_trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await target.reply_text(message, parse_mode=ParseMode.MARKDOWN)
     except (ValueError, IndexError): await target.reply_text("رقم صفقة غير صالح. مثال: `/check 17`")
     except Exception as e: logger.error(f"Error in check_trade_command: {e}", exc_info=True); await target.reply_text("حدث خطأ.")
+
 async def show_active_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trade_mode_filter='all'):
-    target_message = update.callback_query.message if update.callback_query else update.message
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
         
@@ -1695,12 +1692,13 @@ async def show_active_trades_command(update: Update, context: ContextTypes.DEFAU
         active_trades = cursor.fetchall(); conn.close()
         
         if not active_trades:
-            await context.bot.send_message(chat_id=target_message.chat_id, text="لا توجد صفقات نشطة حالياً لهذا الفلتر.")
-            return
+            return "لا توجد صفقات نشطة حالياً لهذا الفلتر.", None
             
         keyboard = [[InlineKeyboardButton(f"#{t['id']} | {t['symbol']} | ${t['entry_value_usdt']:.2f} | {t['exchange']}", callback_data=f"check_{t['id']}")] for t in active_trades]
-        await context.bot.send_message(chat_id=target_message.chat_id, text="اختر صفقة لمتابعتها:", reply_markup=InlineKeyboardMarkup(keyboard))
-    except Exception as e: logger.error(f"Error in show_active_trades: {e}"); await context.bot.send_message(chat_id=target_message.chat_id, text="خطأ في جلب الصفقات.")
+        return "اختر صفقة لمتابعتها:", InlineKeyboardMarkup(keyboard)
+    except Exception as e:
+        logger.error(f"Error in show_active_trades: {e}")
+        return "خطأ في جلب الصفقات.", None
 
 async def execute_manual_trade(exchange_id, symbol, amount_usdt, side, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Attempting MANUAL {side.upper()} for {symbol} on {exchange_id} for ${amount_usdt}")
@@ -1769,7 +1767,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query; await query.answer(); data = query.data
     user_data = context.user_data
 
-    # --- Dashboard Report Filtering ---
+    # [إصلاح جذري] إعادة هيكلة كاملة لمعالج التقارير
     if data.startswith("dashboard_") and data.endswith(('_all', '_real', '_virtual')):
         try:
             parts = data.split('_')
@@ -1778,19 +1776,31 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             
             await query.edit_message_text(f"⏳ جاري إعداد تقرير **{report_type.replace('_', ' ').capitalize()}**...", parse_mode=ParseMode.MARKDOWN)
 
-            if report_type == "stats":
-                await stats_command(update, context, trade_mode_filter=trade_mode_filter)
-            elif report_type == "active_trades":
-                await show_active_trades_command(update, context, trade_mode_filter=trade_mode_filter)
-            elif report_type == "strategy_report":
-                await strategy_report_command(update, context, trade_mode_filter=trade_mode_filter)
+            report_content, keyboard = None, None
 
-            # [تحسين واجهة المستخدم] حذف رسالة "جاري التحميل"
-            await query.message.delete()
-            
+            if report_type == "stats":
+                report_content, keyboard = await stats_command(update, context, trade_mode_filter=trade_mode_filter)
+            elif report_type == "active_trades":
+                report_content, keyboard = await show_active_trades_command(update, context, trade_mode_filter=trade_mode_filter)
+            elif report_type == "strategy_report":
+                report_content, keyboard = await strategy_report_command(update, context, trade_mode_filter=trade_mode_filter)
+
+            if report_content:
+                # [إصلاح] تعديل الرسالة بالتقرير النهائي بدلاً من إرسال رسالة جديدة
+                await query.edit_message_text(
+                    text=report_content, 
+                    reply_markup=keyboard, 
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            else:
+                await query.edit_message_text("❌ فشل إعداد التقرير.")
+
         except Exception as e:
             logger.error(f"Error in dashboard filter handler: {e}", exc_info=True)
-            await context.bot.send_message(chat_id=query.message.chat_id, text="حدث خطأ. يرجى المحاولة مرة أخرى بالضغط على Dashboard.")
+            try:
+                await query.edit_message_text("❌ حدث خطأ غير متوقع أثناء إعداد التقرير.")
+            except Exception:
+                pass # Ignore if message context is lost
         return
 
     # --- Dashboard Main Actions ---
@@ -2493,5 +2503,6 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error in the main loop: {e}", exc_info=True)
+
 
 
