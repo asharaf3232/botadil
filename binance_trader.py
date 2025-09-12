@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 # =============================================================================
-# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v1.4 (Final) 💣 ---
+# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v1.5 (Robust Trading) 💣 ---
 # =============================================================================
-# المرحلة 5: الصقل والاختبار
-# - تم إجراء اختبار شامل للكود المدمج.
-# - [تحسين] تم تطوير نظام وقف الخسارة المتحرك ليدعم الصفقات الحقيقية
-#   عبر إرسال إشعارات يدوية للتأمين بدلاً من التعديل الآلي الخطر.
-# - البوت الآن مصقول وجاهز للنشر والعمليات الحقيقية.
+# - [أولوية قصوى] إصلاح منطق التداول الحقيقي: التحقق الإلزامي من المنصة بعد
+#   كل عملية شراء لتجنب الصفقات "الشبحية" وضمان التسجيل الدقيق.
+# - [شفافية] فصل كامل بين تقارير التداول الحقيقي والوهمي في جميع أنحاء البوت.
+# - [تحسين الواجهة] إعادة أدوات "الأوامر المفتوحة" و "سجل التداولات" إلى
+#   لوحة التحكم.
+# - [أمان] تحسينات عامة لزيادة الموثوقية في بيئة التداول الحقيقي.
 # =============================================================================
 
 
@@ -258,6 +259,7 @@ def init_database():
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10)
         cursor = conn.cursor()
+        # [تعديل] إضافة حقل `trade_mode` للفصل بين الصفقات
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -277,12 +279,13 @@ def init_database():
                 trailing_sl_active BOOLEAN,
                 highest_price REAL,
                 reason TEXT,
-                is_real_trade BOOLEAN DEFAULT FALSE,
+                is_real_trade BOOLEAN,
+                trade_mode TEXT DEFAULT 'virtual', -- 'virtual' or 'real'
                 entry_order_id TEXT,
                 exit_order_ids_json TEXT
             )
         ''')
-        # [جديد] إضافة جدول لمراقبة الإدراجات الجديدة (سيتم استخدامه في مرحلة لاحقة)
+        # [جديد] إضافة جدول لمراقبة الإدراجات الجديدة
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS known_symbols (
                 exchange TEXT NOT NULL,
@@ -291,6 +294,8 @@ def init_database():
                 PRIMARY KEY (exchange, symbol)
             )
         ''')
+        # Add Indexes for faster queries
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_status_mode ON trades (status, trade_mode);")
         conn.commit()
         conn.close()
         logger.info(f"Database initialized successfully at: {DB_FILE}")
@@ -301,22 +306,22 @@ def log_recommendation_to_db(signal):
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10)
         cursor = conn.cursor()
-        sql = '''INSERT INTO trades (timestamp, exchange, symbol, entry_price, take_profit, stop_loss, quantity, entry_value_usdt, status, trailing_sl_active, highest_price, reason, is_real_trade, entry_order_id, exit_order_ids_json)
+        sql = '''INSERT INTO trades (timestamp, exchange, symbol, entry_price, take_profit, stop_loss, quantity, entry_value_usdt, status, trailing_sl_active, highest_price, reason, trade_mode, entry_order_id, exit_order_ids_json)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'''
         params = (
             signal['timestamp'].strftime('%Y-%m-%d %H:%M:%S'),
             signal['exchange'],
             signal['symbol'],
-            signal['entry_price'],
+            signal.get('verified_entry_price', signal['entry_price']), # Use verified price if available
             signal['take_profit'],
             signal['stop_loss'],
-            signal['quantity'],
-            signal['entry_value_usdt'],
+            signal.get('verified_quantity', signal['quantity']), # Use verified quantity
+            signal.get('verified_entry_value', signal['entry_value_usdt']), # Use verified value
             'نشطة',
             False,
-            signal['entry_price'],
+            signal.get('verified_entry_price', signal['entry_price']),
             signal['reason'],
-            signal.get('is_real_trade', False),
+            'real' if signal.get('is_real_trade') else 'virtual',
             signal.get('entry_order_id'),
             signal.get('exit_order_ids_json')
         )
@@ -736,18 +741,21 @@ async def get_real_balance(exchange_id, currency='USDT'):
         logger.error(f"Error fetching {exchange_id.capitalize()} balance for {currency}: {e}")
         return 0.0
 
+# [إعادة هيكلة] تم إعادة بناء هذه الدالة بالكامل لضمان الموثوقية
 async def place_real_trade(signal):
     """
-    Attempts to place a real trade using a fixed USDT amount.
-    Returns a dictionary: {'success': bool, 'data': dict_or_error_string}
+    Tries to place a real trade, verifies execution on the exchange,
+    and then places exit orders. Returns a dictionary with detailed results.
     """
     exchange_id = signal['exchange'].lower()
     exchange = bot_data["exchanges"].get(exchange_id)
     settings = bot_data['settings']
+    symbol = signal['symbol']
 
     if not exchange or not exchange.apiKey:
-        return {'success': False, 'data': f"Cannot place real trade: {exchange_id.capitalize()} client not authenticated."}
+        return {'success': False, 'data': f"Client not authenticated for {exchange_id.capitalize()}."}
 
+    # --- Step 1: Pre-flight Checks ---
     try:
         usdt_balance = await get_real_balance(exchange_id, 'USDT')
         trade_amount_usdt = settings.get("real_trade_size_usdt", 15.0)
@@ -756,63 +764,79 @@ async def place_real_trade(signal):
             return {'success': False, 'data': f"رصيدك الحالي ${usdt_balance:.2f} غير كافٍ لفتح صفقة بقيمة ${trade_amount_usdt}."}
 
         markets = await exchange.load_markets()
-        market_info = markets.get(signal['symbol'])
+        market_info = markets.get(symbol)
         if not market_info:
-            return {'success': False, 'data': f"Could not find market info for {signal['symbol']}."}
-
+            return {'success': False, 'data': f"Could not find market info for {symbol}."}
+        
         quantity = trade_amount_usdt / signal['entry_price']
-        formatted_quantity = exchange.amount_to_precision(signal['symbol'], quantity)
+        formatted_quantity = exchange.amount_to_precision(symbol, quantity)
+    except Exception as e:
+        return {'success': False, 'data': f"Pre-flight check failed: {e}"}
 
-        logger.info(f"Placing MARKET BUY order for {formatted_quantity} of {signal['symbol']} on {exchange_id.capitalize()}")
-        buy_order = await exchange.create_market_buy_order(signal['symbol'], float(formatted_quantity))
-        logger.info(f"Market buy order placed successfully. Order ID: {buy_order['id']}")
+    # --- Step 2: Attempt to Place Buy Order ---
+    buy_order = None
+    try:
+        logger.info(f"Placing MARKET BUY order for {formatted_quantity} of {symbol} on {exchange_id.capitalize()}")
+        buy_order = await exchange.create_market_buy_order(symbol, float(formatted_quantity))
+        logger.info(f"Initial response for BUY order {buy_order.get('id', 'N/A')} received.")
+    except Exception as e:
+        logger.error(f"Placing BUY order for {symbol} failed immediately: {e}", exc_info=True)
+        return {'success': False, 'data': f"حدث خطأ من المنصة عند محاولة الشراء: `{str(e)}`"}
 
-        await asyncio.sleep(2)
+    # --- Step 3: Verify Execution (CRITICAL) ---
+    try:
+        await asyncio.sleep(2) # Give the exchange a moment to process the order
+        verified_order = await exchange.fetch_order(buy_order['id'], symbol)
+        
+        if verified_order and verified_order.get('status') == 'closed' and verified_order.get('filled', 0) > 0:
+            verified_price = verified_order.get('average', signal['entry_price'])
+            verified_quantity = verified_order.get('filled')
+            verified_cost = verified_order.get('cost', verified_price * verified_quantity)
+            logger.info(f"BUY order {buy_order['id']} VERIFIED. Filled {verified_quantity} @ {verified_price}")
+        else:
+            raise Exception(f"Order {buy_order['id']} not confirmed as filled. Status: {verified_order.get('status')}")
 
-        tp_price = exchange.price_to_precision(signal['symbol'], signal['take_profit'])
-        sl_price = exchange.price_to_precision(signal['symbol'], signal['stop_loss'])
-        exit_order_ids = {}
+    except Exception as e:
+        logger.error(f"VERIFICATION FAILED for BUY order {buy_order.get('id', 'N/A')}: {e}", exc_info=True)
+        # We return a special status to indicate that a manual check is needed.
+        return {'success': False, 'manual_check_required': True, 'data': f"تم إرسال أمر الشراء لكن فشل التحقق منه. **يرجى التحقق من المنصة يدوياً!** Order ID: `{buy_order.get('id', 'N/A')}`. Error: `{e}`"}
+
+    # --- Step 4: Place Exit Orders (TP/SL) ---
+    exit_order_ids = {}
+    try:
+        tp_price = exchange.price_to_precision(symbol, signal['take_profit'])
+        sl_price = exchange.price_to_precision(symbol, signal['stop_loss'])
 
         if exchange_id == 'binance':
-            logger.info(f"Placing OCO SELL order on Binance. TP: {tp_price}, SL: {sl_price}")
-            sl_trigger_price = exchange.price_to_precision(signal['symbol'], signal['stop_loss'] * 1.001)
+            sl_trigger_price = exchange.price_to_precision(symbol, signal['stop_loss'] * 1.001)
             oco_params = {'stopLimitPrice': sl_price}
-            oco_order = await exchange.create_order(
-                signal['symbol'], 'oco', 'sell', float(formatted_quantity),
-                price=tp_price, stopPrice=sl_trigger_price, params=oco_params
-            )
-            logger.info(f"Binance OCO order placed successfully. List Order ID: {oco_order['id']}")
+            oco_order = await exchange.create_order(symbol, 'oco', 'sell', verified_quantity, price=tp_price, stopPrice=sl_trigger_price, params=oco_params)
             exit_order_ids = {"oco_id": oco_order['id']}
-
         elif exchange_id == 'kucoin':
-            logger.info(f"Placing separate TP/SL orders on KuCoin. TP: {tp_price}, SL: {sl_price}")
-            tp_order = await exchange.create_limit_sell_order(signal['symbol'], float(formatted_quantity), float(tp_price))
-            logger.info(f"KuCoin TP order placed successfully. Order ID: {tp_order['id']}")
-            sl_trigger_price = exchange.price_to_precision(signal['symbol'], signal['stop_loss'] * 1.002)
-            sl_order = await exchange.create_order(signal['symbol'], 'stop_limit', 'sell', float(formatted_quantity), float(sl_price), params={'stopPrice': float(sl_trigger_price)})
-            logger.info(f"KuCoin SL order placed successfully. Order ID: {sl_order['id']}")
+            tp_order = await exchange.create_limit_sell_order(symbol, verified_quantity, float(tp_price))
+            sl_trigger_price = exchange.price_to_precision(symbol, signal['stop_loss'] * 1.002)
+            sl_order = await exchange.create_order(symbol, 'stop_limit', 'sell', verified_quantity, float(sl_price), params={'stopPrice': float(sl_trigger_price)})
             exit_order_ids = {"tp_id": tp_order['id'], "sl_id": sl_order['id']}
-
         else:
-            await exchange.cancel_order(buy_order['id'], signal['symbol'])
-            logger.info(f"Market buy order {buy_order['id']} was cancelled.")
-            return {'success': False, 'data': f"Real trading logic not implemented for {exchange_id.capitalize()}."}
-
-        return {
-            'success': True,
-            'data': {
-                "entry_order_id": buy_order['id'],
-                "exit_order_ids_json": json.dumps(exit_order_ids),
-                "quantity": float(formatted_quantity),
-                "entry_value_usdt": trade_amount_usdt
-            }
-        }
-    except ccxt.InsufficientFunds as e:
-        logger.error(f"REAL TRADE FAILED for {signal['symbol']}: {e}")
-        return {'success': False, 'data': f"رصيد غير كافٍ على {exchange_id.capitalize()}."}
+            raise NotImplementedError(f"Exit logic not implemented for {exchange_id.capitalize()}.")
+        
+        logger.info(f"Successfully placed exit orders for {symbol}.")
     except Exception as e:
-        logger.error(f"CRITICAL REAL TRADE FAILED for {signal['symbol']}: {e}", exc_info=True)
-        return {'success': False, 'data': f"حدث خطأ من المنصة: `{str(e)}`"}
+        logger.error(f"Failed to place exit orders for {symbol} after successful buy: {e}", exc_info=True)
+        # Another special status: entry is confirmed, but exits failed.
+        return {'success': True, 'exit_orders_failed': True, 'data': f"تم شراء {symbol} بنجاح، **لكن فشل وضع أوامر الخروج**. يرجى وضع الوقف والهدف يدوياً!"}
+
+    # --- Step 5: Return All Verified Data for Logging ---
+    return {
+        'success': True,
+        'data': {
+            "entry_order_id": buy_order['id'],
+            "exit_order_ids_json": json.dumps(exit_order_ids),
+            "verified_quantity": verified_quantity,
+            "verified_entry_price": verified_price,
+            "verified_entry_value": verified_cost
+        }
+    }
 
 
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
@@ -839,10 +863,14 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         status.update({"scan_in_progress": True, "last_scan_start_time": datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'), "signals_found": 0})
         try:
             conn = sqlite3.connect(DB_FILE, timeout=10); cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM trades WHERE status = 'نشطة'")
-            active_trades_count = cursor.fetchone()[0]; conn.close()
+            cursor.execute("SELECT COUNT(*) FROM trades WHERE status = 'نشطة' AND trade_mode = 'virtual'")
+            active_virtual_trades = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM trades WHERE status = 'نشطة' AND trade_mode = 'real'")
+            active_real_trades = cursor.fetchone()[0]
+            conn.close()
+            active_trades_count = active_virtual_trades + active_real_trades
         except Exception as e:
-            logger.error(f"DB Error in perform_scan: {e}"); active_trades_count = settings.get("max_concurrent_trades", 5)
+            logger.error(f"DB Error in perform_scan: {e}"); active_trades_count = settings.get("max_concurrent_trades", 10)
 
         top_markets = await aggregate_top_movers()
         if not top_markets:
@@ -865,38 +893,32 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
 
             is_real_mode_enabled = settings.get("real_trading_enabled", False)
             signal_exchange_id = signal['exchange'].lower()
-
             exchange_is_tradeable = signal_exchange_id in bot_data["exchanges"] and bot_data["exchanges"][signal_exchange_id].apiKey
-
             attempt_real_trade = is_real_mode_enabled and exchange_is_tradeable
-
             signal['is_real_trade'] = attempt_real_trade
 
             if attempt_real_trade:
                 await send_telegram_message(context.bot, {'custom_message': f"**🔎 تم العثور على إشارة حقيقية لـ `{signal['symbol']}`... جاري محاولة التنفيذ على `{signal['exchange']}`.**"})
-
-                real_trade_result = await place_real_trade(signal)
-
-                if real_trade_result['success']:
-                    signal.update(real_trade_result['data'])
-                    if trade_id := log_recommendation_to_db(signal):
-                        signal['trade_id'] = trade_id
+                trade_result = await place_real_trade(signal)
+                
+                if trade_result['success']:
+                    signal.update(trade_result['data'])
+                    if log_recommendation_to_db(signal):
                         await send_telegram_message(context.bot, signal, is_new=True)
-                        active_trades_count += 1; new_trades += 1
-                    else:
-                        logger.error(f"CRITICAL: Real trade for {signal['symbol']} was placed but failed to log to DB.")
-                        await send_telegram_message(context.bot, {'custom_message': f"**⚠️ خطأ حرج:** تم تنفيذ صفقة `{signal['symbol']}` لكن فشل تسجيلها. يرجى المتابعة اليدوية!"})
+                        new_trades += 1
+                    else: # Critical failure: trade executed but not logged
+                        await send_telegram_message(context.bot, {'custom_message': f"**⚠️ خطأ حرج:** تم تنفيذ صفقة `{signal['symbol']}` لكن فشل تسجيلها. **يرجى المتابعة اليدوية فوراً!**\nتفاصيل: `{trade_result['data']}`"})
                 else:
-                    error_message = real_trade_result['data']
-                    await send_telegram_message(context.bot, {'custom_message': f"**❌ فشل تنفيذ صفقة `{signal['symbol']}`**\n\n**السبب:** {error_message}"})
-            else:
-                trade_amount_usdt = settings["virtual_portfolio_balance_usdt"] * (settings["virtual_trade_size_percentage"] / 100)
-                signal.update({'quantity': trade_amount_usdt / signal['entry_price'], 'entry_value_usdt': trade_amount_usdt})
-                if active_trades_count < settings.get("max_concurrent_trades", 5):
-                    if trade_id := log_recommendation_to_db(signal):
-                        signal['trade_id'] = trade_id
+                    # Send specific failure message from place_real_trade
+                    await send_telegram_message(context.bot, {'custom_message': f"**❌ فشل تنفيذ صفقة `{signal['symbol']}`**\n\n**السبب:** {trade_result['data']}"})
+
+            else: # Virtual Trade Logic
+                if active_trades_count < settings.get("max_concurrent_trades", 10):
+                    trade_amount_usdt = settings["virtual_portfolio_balance_usdt"] * (settings["virtual_trade_size_percentage"] / 100)
+                    signal.update({'quantity': trade_amount_usdt / signal['entry_price'], 'entry_value_usdt': trade_amount_usdt})
+                    if log_recommendation_to_db(signal):
                         await send_telegram_message(context.bot, signal, is_new=True)
-                        active_trades_count += 1; new_trades += 1
+                        new_trades += 1
                 else:
                     await send_telegram_message(context.bot, signal, is_opportunity=True)
                     opportunities += 1
@@ -946,7 +968,7 @@ async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=F
 
         entry, tp, sl = signal_data['entry_price'], signal_data['take_profit'], signal_data['stop_loss']
         tp_percent, sl_percent = ((tp - entry) / entry * 100), ((entry - sl) / entry * 100)
-        id_line = f"\n*للمتابعة اضغط: /check {signal_data['trade_id']}*" if is_new else ""
+        id_line = f"\n*للمتابعة اضغط: /check {signal_data.get('trade_id', 'N/A')}*" if is_new else ""
 
         reasons_en = signal_data['reason'].split(' + ')
         reasons_ar = ' + '.join([STRATEGY_NAMES_AR.get(r, r) for r in reasons_en])
@@ -1036,7 +1058,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
                     if current_price >= activation_price:
                         new_sl = trade['entry_price']
                         if new_sl > trade['stop_loss']:
-                            if trade.get('is_real_trade'):
+                            if trade.get('trade_mode') == 'real':
                                 await send_telegram_message(context.bot, {**trade, "new_sl": new_sl, "current_price": current_price}, update_type='tsl_update_real')
                                 # For real trades, we only notify. We update the DB to prevent re-notifying.
                                 await update_trade_sl_in_db(context, trade, new_sl, highest_price, is_activation=True, silent=True)
@@ -1047,7 +1069,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
                 elif trade.get('trailing_sl_active'):
                     new_sl = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
                     if new_sl > trade['stop_loss']:
-                        if trade.get('is_real_trade'):
+                        if trade.get('trade_mode') == 'real':
                             await send_telegram_message(context.bot, {**trade, "new_sl": new_sl, "current_price": current_price}, update_type='tsl_update_real')
                             await update_trade_sl_in_db(context, trade, new_sl, highest_price, silent=True)
                         else:
@@ -1064,7 +1086,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
 # [جديد] دوال مساعدة لتحديث قاعدة البيانات مباشرة (مستوحاة من صياد الفومو)
 async def close_trade_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict, exit_price: float, status: str):
     pnl_usdt = (exit_price - trade['entry_price']) * trade['quantity']
-    if not trade.get('is_real_trade'):
+    if trade.get('trade_mode') == 'virtual':
         bot_data['settings']['virtual_portfolio_balance_usdt'] += pnl_usdt
         save_settings()
 
@@ -1089,7 +1111,7 @@ async def close_trade_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict, exi
         logger.error(f"DB update failed while closing trade #{trade['id']}: {e}")
         return
     
-    trade_type_str = "(صفقة حقيقية)" if trade.get('is_real_trade') else ""
+    trade_type_str = "(صفقة حقيقية)" if trade.get('trade_mode') == 'real' else ""
     message = ""
     if status == 'ناجحة':
         message = (f"**📦 إغلاق صفقة {trade_type_str} | #{trade['id']} {trade['symbol']}**\n\n"
@@ -1209,15 +1231,23 @@ async def analyze_performance_and_suggest(context: ContextTypes.DEFAULT_TYPE):
 
 
 # --- Reports and Telegram Commands ---
-def generate_performance_report_string():
+def generate_performance_report_string(trade_mode_filter='all'):
     REPORT_DAYS = 30
     if not os.path.exists(DB_FILE): return "❌ خطأ: لم يتم العثور على ملف قاعدة البيانات."
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
         start_date = (datetime.now() - timedelta(days=REPORT_DAYS)).strftime('%Y-%m-%d %H:%M:%S')
-        cursor.execute("SELECT reason, status, entry_price, highest_price FROM trades WHERE status IN ('ناجحة', 'فاشلة') AND timestamp >= ?", (start_date,)); trades = cursor.fetchall(); conn.close()
+        
+        query = "SELECT reason, status, entry_price, highest_price FROM trades WHERE status IN ('ناجحة', 'فاشلة') AND timestamp >= ?"
+        params = [start_date]
+        if trade_mode_filter != 'all':
+            query += " AND trade_mode = ?"
+            params.append(trade_mode_filter)
+
+        cursor.execute(query, params); trades = cursor.fetchall(); conn.close()
     except Exception as e: return f"❌ حدث خطأ غير متوقع: {e}"
-    if not trades: return f"ℹ️ لا توجد صفقات مغلقة في آخر {REPORT_DAYS} يومًا."
+    if not trades: return f"ℹ️ لا توجد صفقات مغلقة في آخر {REPORT_DAYS} يومًا لهذا الفلتر."
+    
     strategy_stats = defaultdict(lambda: {'total': 0, 'successful': 0, 'max_profits': []})
     for trade in trades:
         reasons = trade['reason'].split(' + ')
@@ -1227,6 +1257,7 @@ def generate_performance_report_string():
             if trade['status'] == 'ناجحة': stats['successful'] += 1
             if trade['entry_price'] > 0 and trade['highest_price'] is not None:
                 stats['max_profits'].append(((trade['highest_price'] - trade['entry_price']) / trade['entry_price']) * 100)
+    
     report_lines = [f"📊 **تقرير أداء الاستراتيجيات (آخر {REPORT_DAYS} يومًا)** 📊", "="*35]
     for reason_en, stats in sorted(strategy_stats.items(), key=lambda item: item[1]['total'], reverse=True):
         reason_ar = STRATEGY_NAMES_AR.get(reason_en, reason_en)
@@ -1240,8 +1271,7 @@ main_menu_keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"], ["�
 settings_menu_keyboard = [["🏁 أنماط جاهزة", "🎭 تفعيل/تعطيل الماسحات"], ["🔧 تعديل المعايير", "🔙 القائمة الرئيسية"]]
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # [تعديل] تحديث الرسالة الترحيبية
-    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(المرحلة الأولى: تم بناء الهيكل الأساسي بنجاح)*\n\nاختر من القائمة للبدء."
+    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 1.5 - تداول موثوق)*\n\nاختر من القائمة للبدء."
     await update.message.reply_text(welcome_message, reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1249,7 +1279,6 @@ async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_T
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 الإحصائيات العامة", callback_data="dashboard_stats"), InlineKeyboardButton("📈 الصفقات النشطة", callback_data="dashboard_active_trades")],
         [InlineKeyboardButton("📜 تقرير أداء الاستراتيجيات", callback_data="dashboard_strategy_report")],
-        # [تعديل] تحديث قائمة الأدوات
         [InlineKeyboardButton("🛠️ أدوات متقدمة", callback_data="dashboard_tools")],
         [InlineKeyboardButton("🗓️ التقرير اليومي", callback_data="dashboard_daily_report"), InlineKeyboardButton("🕵️‍♂️ تقرير التشخيص", callback_data="dashboard_debug")],
         [InlineKeyboardButton("🔄 تحديث", callback_data="dashboard_refresh")]
@@ -1322,17 +1351,36 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/newlistings` - لفحص الإدراجات الجديدة يدوياً."
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trade_mode_filter='all'):
     target_message = update.callback_query.message if update.callback_query else update.message
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=10); cursor = conn.cursor(); cursor.execute("SELECT status, COUNT(*), SUM(pnl_usdt) FROM trades GROUP BY status")
+        conn = sqlite3.connect(DB_FILE, timeout=10); cursor = conn.cursor();
+        
+        query = "SELECT status, COUNT(*), SUM(pnl_usdt) FROM trades"
+        params = []
+        
+        filter_conditions = []
+        if trade_mode_filter != 'all':
+            filter_conditions.append("trade_mode = ?")
+            params.append(trade_mode_filter)
+
+        if filter_conditions:
+            query += " WHERE " + " AND ".join(filter_conditions)
+
+        query += " GROUP BY status"
+        cursor.execute(query, params)
+        
         stats_data = cursor.fetchall(); conn.close()
         counts = {s: c for s, c, p in stats_data}; pnl = {s: (p or 0) for s, c, p in stats_data}
         total, active, successful, failed = sum(counts.values()), counts.get('نشطة', 0), counts.get('ناجحة', 0), counts.get('فاشلة', 0)
         closed = successful + failed; win_rate = (successful / closed * 100) if closed > 0 else 0; total_pnl = sum(pnl.values())
         preset_name = bot_data["settings"].get("active_preset_name", "N/A")
-        stats_msg = (f"*📊 إحصائيات المحفظة*\n\n"
-                       f"📈 *الرصيد الحالي:* `${bot_data['settings']['virtual_portfolio_balance_usdt']:.2f}`\n"
+        
+        mode_title_map = {'all': '(الكل)', 'real': '(حقيقي فقط)', 'virtual': '(وهمي فقط)'}
+        title = mode_title_map.get(trade_mode_filter, '')
+
+        stats_msg = (f"*📊 إحصائيات المحفظة {title}*\n\n"
+                       f"📈 *الرصيد الافتراضي:* `${bot_data['settings']['virtual_portfolio_balance_usdt']:.2f}`\n"
                        f"💰 *إجمالي الربح/الخسارة:* `${total_pnl:+.2f}`\n"
                        f"⚙️ *النمط الحالي:* `{preset_name}`\n\n"
                        f"- *إجمالي الصفقات:* `{total}` (`{active}` نشطة)\n"
@@ -1341,9 +1389,10 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        f"- *معدل النجاح:* `{win_rate:.2f}%`")
         await target_message.reply_text(stats_msg, parse_mode=ParseMode.MARKDOWN)
     except Exception as e: logger.error(f"Error in stats_command: {e}", exc_info=True); await target_message.reply_text("خطأ في جلب الإحصائيات.")
-async def strategy_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def strategy_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trade_mode_filter='all'):
     target_message = update.callback_query.message if update.callback_query else update.message
-    await target_message.reply_text("⏳ جاري إعداد تقرير أداء الاستراتيجيات..."); report_string = generate_performance_report_string()
+    await target_message.reply_text("⏳ جاري إعداد تقرير أداء الاستراتيجيات...");
+    report_string = generate_performance_report_string(trade_mode_filter)
     await target_message.reply_text(report_string, parse_mode=ParseMode.MARKDOWN)
 
 async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
@@ -1353,64 +1402,39 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
         conn = sqlite3.connect(DB_FILE, timeout=10)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT symbol, status, pnl_usdt, entry_value_usdt, reason, is_real_trade, closed_at FROM trades WHERE DATE(closed_at) = ?", (today_str,))
-        closed_today = [dict(row) for row in cursor.fetchall()]
+        
+        # Real Trades Report
+        cursor.execute("SELECT * FROM trades WHERE DATE(closed_at) = ? AND trade_mode = 'real'", (today_str,))
+        closed_real_today = [dict(row) for row in cursor.fetchall()]
+        
+        # Virtual Trades Report
+        cursor.execute("SELECT * FROM trades WHERE DATE(closed_at) = ? AND trade_mode = 'virtual'", (today_str,))
+        closed_virtual_today = [dict(row) for row in cursor.fetchall()]
         conn.close()
 
-        if not closed_today:
-            report_message = f"**🗓️ التقرير اليومي | {today_str}**\n\nلم يتم إغلاق أي صفقات اليوم."
-        else:
-            wins = [t for t in closed_today if t['status'] == 'ناجحة']
-            losses = [t for t in closed_today if t['status'] == 'فاشلة']
-            total_pnl = sum(t['pnl_usdt'] for t in closed_today if t['pnl_usdt'] is not None)
-            win_rate = (len(wins) / len(closed_today) * 100) if closed_today else 0
+        parts = [f"**🗓️ التقرير اليومي المفصل | {today_str}**\n"]
 
-            current_virtual_balance = bot_data['settings']['virtual_portfolio_balance_usdt']
-            pnl_from_virtual_trades_today = sum(t['pnl_usdt'] for t in closed_today if not t.get('is_real_trade') and t['pnl_usdt'] is not None)
-            start_of_day_balance = current_virtual_balance - pnl_from_virtual_trades_today
+        # Function to generate report section
+        def generate_section(title, trades):
+            if not trades:
+                return [f"\n--- **{title}** ---\nلم يتم إغلاق أي صفقات اليوم."]
+            
+            wins = [t for t in trades if t['status'] == 'ناجحة']
+            losses = [t for t in trades if t['status'] == 'فاشلة']
+            total_pnl = sum(t['pnl_usdt'] for t in trades if t['pnl_usdt'] is not None)
+            win_rate = (len(wins) / len(trades) * 100) if trades else 0
 
-            best_trade = max(closed_today, key=lambda t: t.get('pnl_usdt', -float('inf')), default=None)
-            worst_trade = min(closed_today, key=lambda t: t.get('pnl_usdt', float('inf')), default=None)
+            section_parts = [f"\n--- **{title}** ---"]
+            section_parts.append(f"  - الربح/الخسارة الصافي: `${total_pnl:+.2f}`")
+            section_parts.append(f"  - ✅ الرابحة: {len(wins)} | ❌ الخاسرة: {len(losses)}")
+            section_parts.append(f"  - معدل النجاح: {win_rate:.1f}%")
+            return section_parts
 
-            strategy_counter = Counter()
-            for trade in closed_today:
-                reasons = trade['reason'].split(' + ')
-                for reason in reasons:
-                    strategy_counter[reason] += 1
+        parts.extend(generate_section("💰 الأداء الحقيقي", closed_real_today))
+        parts.extend(generate_section("📊 الأداء الوهمي", closed_virtual_today))
 
-            most_active_strategy_en = strategy_counter.most_common(1)[0][0] if strategy_counter else "N/A"
-            most_active_strategy_ar = STRATEGY_NAMES_AR.get(most_active_strategy_en, most_active_strategy_en)
-
-            parts = [f"**🗓️ التقرير اليومي المفصل | {today_str}**\n"]
-
-            parts.append("💰 **الأداء المالي (اليوم):**")
-            parts.append(f"  - الربح/الخسارة الصافي: `${total_pnl:+.2f}`")
-            parts.append(f"  - تغير رصيد المحفظة الافتراضية: `${start_of_day_balance:,.2f} ⬅️ ${current_virtual_balance:,.2f}`\n")
-
-            parts.append("📊 **إحصائيات الصفقات (اليوم):**")
-            parts.append(f"  - الإجمالي: {len(closed_today)}")
-            parts.append(f"  - ✅ الرابحة: {len(wins)}")
-            parts.append(f"  - ❌ الخاسرة: {len(losses)}")
-            parts.append(f"  - معدل النجاح: {win_rate:.1f}%\n")
-
-            parts.append("🏆 **أبرز صفقات اليوم:**")
-            if best_trade and best_trade.get('pnl_usdt', 0) > 0:
-                pnl = best_trade['pnl_usdt']
-                pnl_percent = (pnl / best_trade['entry_value_usdt'] * 100) if best_trade['entry_value_usdt'] > 0 else 0
-                parts.append(f"  - الأفضل: `{best_trade['symbol']}` | `${pnl:+.2f}` (`{pnl_percent:+.1f}%`)")
-            if worst_trade and worst_trade.get('pnl_usdt', 0) < 0:
-                pnl = worst_trade['pnl_usdt']
-                pnl_percent = (pnl / worst_trade['entry_value_usdt'] * 100) if worst_trade['entry_value_usdt'] > 0 else 0
-                parts.append(f"  - الأسوأ: `{worst_trade['symbol']}` | `${pnl:.2f}` (`{pnl_percent:.1f}%`)")
-            parts.append("")
-
-            parts.append("💡 **الأداء حسب الاستراتيجية:**")
-            parts.append(f"  - الاستراتيجية الأنشط اليوم: *{most_active_strategy_ar}*")
-
-            parts.append("\n- - - - - - - - - - - - - - - - - -")
-            parts.append("*رسالة اليوم: \"النجاح في التداول هو نتيجة للانضباط والصبر والتعلم المستمر.\"*")
-
-            report_message = "\n".join(parts)
+        parts.append("\n\n*رسالة اليوم: \"النجاح في التداول هو نتيجة للانضباط والصبر والتعلم المستمر.\"*")
+        report_message = "\n".join(parts)
 
         await send_telegram_message(context.bot, {'custom_message': report_message, 'target_chat': TELEGRAM_SIGNAL_CHANNEL_ID})
     except Exception as e:
@@ -1531,13 +1555,24 @@ async def check_trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await target.reply_text(message, parse_mode=ParseMode.MARKDOWN)
     except (ValueError, IndexError): await target.reply_text("رقم صفقة غير صالح. مثال: `/check 17`")
     except Exception as e: logger.error(f"Error in check_trade_command: {e}", exc_info=True); await target.reply_text("حدث خطأ.")
-async def show_active_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_active_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trade_mode_filter='all'):
     target_message = update.callback_query.message if update.callback_query else update.message
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
-        cursor.execute("SELECT id, symbol, entry_value_usdt, exchange FROM trades WHERE status = 'نشطة' ORDER BY id DESC")
+        
+        query = "SELECT id, symbol, entry_value_usdt, exchange FROM trades WHERE status = 'نشطة'"
+        params = []
+        if trade_mode_filter != 'all':
+            query += " AND trade_mode = ?"
+            params.append(trade_mode_filter)
+        query += " ORDER BY id DESC"
+
+        cursor.execute(query, params)
         active_trades = cursor.fetchall(); conn.close()
-        if not active_trades: await target_message.reply_text("لا توجد صفقات نشطة حالياً."); return
+        
+        if not active_trades:
+            await target_message.reply_text("لا توجد صفقات نشطة حالياً لهذا الفلتر."); return
+            
         keyboard = [[InlineKeyboardButton(f"#{t['id']} | {t['symbol']} | ${t['entry_value_usdt']:.2f} | {t['exchange']}", callback_data=f"check_{t['id']}")] for t in active_trades]
         await target_message.reply_text("اختر صفقة لمتابعتها:", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e: logger.error(f"Error in show_active_trades: {e}"); await target_message.reply_text("خطأ في جلب الصفقات.")
@@ -1609,18 +1644,39 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query; await query.answer(); data = query.data
     user_data = context.user_data
 
+    # --- Dashboard Report Filtering ---
+    if data.startswith("dashboard_") and data.endswith(('_all', '_real', '_virtual')):
+        parts = data.split('_')
+        report_type = parts[1]
+        trade_mode_filter = parts[2]
+        
+        if report_type == "stats": await stats_command(update, context, trade_mode_filter)
+        elif report_type == "active_trades": await show_active_trades_command(update, context, trade_mode_filter)
+        elif report_type == "strategy_report": await strategy_report_command(update, context, trade_mode_filter)
+        return
+
+    # --- Dashboard Main Actions ---
     if data.startswith("dashboard_"):
         action = data.split("_", 1)[1]
-        if action == "stats": await stats_command(update, context)
-        elif action == "active_trades": await show_active_trades_command(update, context)
-        elif action == "strategy_report": await strategy_report_command(update, context)
-        elif action == "daily_report": await daily_report_command(update, context)
+        
+        # Show filtering options for reports that need it
+        if action in ["stats", "active_trades", "strategy_report"]:
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📊 الكل (وهمي + حقيقي)", callback_data=f"dashboard_{action}_all")],
+                [InlineKeyboardButton("📈 حقيقي فقط", callback_data=f"dashboard_{action}_real"), InlineKeyboardButton("📉 وهمي فقط", callback_data=f"dashboard_{action}_virtual")],
+                [InlineKeyboardButton("🔙 العودة", callback_data="dashboard_refresh")]
+            ])
+            await query.edit_message_text(f"اختر نوع السجل لعرض **{action.replace('_', ' ').capitalize()}**:", reply_markup=keyboard)
+            return
+
+        # Handle direct actions
+        if action == "daily_report": await daily_report_command(update, context)
         elif action == "debug": await debug_command(update, context)
         elif action == "refresh": await show_dashboard_command(update, context)
         elif action == "tools":
              keyboard = [
                  [InlineKeyboardButton("✍️ تداول يدوي", callback_data="tools_manual_trade"), InlineKeyboardButton("💰 عرض رصيدي", callback_data="tools_balance")],
-                 # [جديد] إضافة الأزرار الجديدة
+                 [InlineKeyboardButton("📖 أوامري المفتوحة", callback_data="tools_openorders"), InlineKeyboardButton("📜 سجل تداولاتي", callback_data="tools_mytrades")],
                  [InlineKeyboardButton("💎 صائد الجواهر", callback_data="tools_gem_hunter"), InlineKeyboardButton("📢 فحص الإدراجات", callback_data="tools_new_listings")],
                  [InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="dashboard_refresh")]
              ]
@@ -1629,15 +1685,12 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     elif data.startswith("tools_"):
         tool = data.split("_", 1)[1]
-        if tool == "manual_trade":
-            await manual_trade_command(update, context)
-        elif tool == "balance":
-            await balance_command(update, context)
-        # [جديد] ربط الأزرار الجديدة بالدوال الخاصة بها
-        elif tool == "gem_hunter":
-            await run_gem_hunter_scan(update, context)
-        elif tool == "new_listings":
-            await manual_check_listings_command(update, context)
+        if tool == "manual_trade": await manual_trade_command(update, context)
+        elif tool == "balance": await balance_command(update, context)
+        elif tool == "openorders": await open_orders_command(update, context)
+        elif tool == "mytrades": await my_trades_command(update, context)
+        elif tool == "gem_hunter": await run_gem_hunter_scan(update, context)
+        elif tool == "new_listings": await manual_check_listings_command(update, context)
         return
 
     elif data.startswith("preset_"):
@@ -2186,7 +2239,7 @@ async def post_init(application: Application):
     # [جديد] إضافة المهمة الدورية لفحص الإدراجات الجديدة
     job_queue.run_repeating(periodic_listings_check, interval=1800, first=300, name='listings_check')
     logger.info(f"Jobs scheduled. Daily report at 23:55 {EGYPT_TZ}.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v1.5) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
     logger.info("Post-init finished.")
 async def post_shutdown(application: Application):
     all_exchanges = list(bot_data["exchanges"].values()) + list(bot_data["public_exchanges"].values())
@@ -2196,7 +2249,7 @@ async def post_shutdown(application: Application):
 
 def main():
     # [تعديل] تحديث اسم البوت عند التشغيل
-    print("🚀 Starting Minesweeper Bot v1.0...")
+    print("🚀 Starting Minesweeper Bot v1.5 (Robust Trading)...")
     load_settings(); init_database()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
