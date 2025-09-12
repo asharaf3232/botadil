@@ -863,7 +863,7 @@ async def place_real_trade(signal):
 
             # 2. Place Stop Loss (stop_limit sell order)
             logger.info(f"Placing Stop Loss for {symbol}. Trigger: {sl_trigger_price}, Limit: {sl_price}")
-            sl_params = {'triggerPrice': sl_trigger_price}
+            sl_params = {'triggerPrice': sl_trigger_price, 'stop': 'loss'}
             sl_order = await exchange.create_order(symbol, 'stop_limit', 'sell', quantity_to_sell, price=sl_price, params=sl_params)
             logger.info(f"Stop Loss order placed with ID: {sl_order['id']}")
             
@@ -2607,6 +2607,7 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error in the main loop: {e}", exc_info=True)
+
 
 
 
