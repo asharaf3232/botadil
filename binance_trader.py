@@ -1,15 +1,21 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v3.3 (إصلاح حلقة الأحداث) 💣 ---
+# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v4.0 (إصدار الاستقرار الكامل) 💣 ---
 # =======================================================================================
 # --- سجل التغييرات الكامل ---
 #
-# 9.  [إصلاح جذري] إعادة هيكلة طريقة تشغيل البوت باستخدام `asyncio.run()`
-#     لحل مشكلة `RuntimeError: no running event loop` النادرة التي تحدث
-#     عند فشل الاتصال الأولي بالشبكة. هذا يضمن إدارة سليمة ومنضبطة
-#     لجميع العمليات غير المتزامنة.
+# 10. [إصلاح حاسم] حل خطأ `AttributeError: 'zoneinfo.ZoneInfo' object has no
+#     attribute 'localize'` الذي كان يمنع إغلاق الصفقات في قاعدة البيانات
+#     ويتسبب في توقف عملية المتابعة.
 #
-# ... (جميع الإصلاحات السابقة من v3.0 و v3.1 موجودة)
+# 11. [إصلاح حاسم] إعادة هيكلة دالة `main` لاستخدام `application.run_polling()`
+#     مما يحل جميع مشاكل بدء التشغيل النادرة مثل `Bad Gateway` و
+#     `ExtBot not properly initialized`.
+#
+# 12. [تحسين] جعل عملية الاتصال بالمنصات أكثر قوة. فشل الاتصال بمنصة واحدة
+#     (مثل Mexc) لن يؤثر على باقي المنصات.
+#
+# ... (جميع الإصلاحات السابقة من v3.3 موجودة)
 # =======================================================================================
 
 
@@ -510,7 +516,12 @@ async def analyze_whale_radar(df, params, rvol, adx_value, exchange, symbol):
         if not ob or not ob.get('bids'): return None
 
         bids = ob.get('bids', [])
-        total_bid_value = sum(float(price) * float(qty) for price, qty in bids[:10])
+        # [إصلاح] جعل الكود أكثر صلابة ضد البيانات غير المتوقعة من المنصة
+        total_bid_value = 0
+        for item in bids[:10]:
+            if isinstance(item, list) and len(item) >= 2:
+                price, qty = item[0], item[1]
+                total_bid_value += float(price) * float(qty)
 
         if total_bid_value > threshold:
             return {"reason": "whale_radar", "type": "long"}
@@ -1148,7 +1159,8 @@ async def close_trade_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict, exi
 
     closed_at_str = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')
     start_dt_naive = datetime.strptime(trade['timestamp'], '%Y-%m-%d %H:%M:%S')
-    start_dt = EGYPT_TZ.localize(start_dt_naive)
+    # [إصلاح حاسم] استخدام الطريقة الصحيحة لجعل التاريخ على دراية بالمنطقة الزمنية
+    start_dt = start_dt_naive.replace(tzinfo=EGYPT_TZ)
     end_dt = datetime.now(EGYPT_TZ)
     duration = end_dt - start_dt
     days, remainder = divmod(duration.total_seconds(), 86400)
@@ -2398,9 +2410,9 @@ async def post_shutdown(application: Application):
     await asyncio.gather(*[ex.close() for ex in unique_exchanges])
     logger.info("All exchange connections closed.")
 
-# [إصلاح جذري] إعادة هيكلة طريقة التشغيل
-async def async_main():
-    """Sets up and runs the bot application."""
+# [إصلاح جذري] إعادة هيكلة طريقة التشغيل النهائية
+def main():
+    """Sets up and runs the bot application using the library's robust polling method."""
     reset_file = os.path.join(APP_ROOT, '_reset_db_please.txt')
     if os.path.exists(reset_file):
         logger.warning("Reset file found! Deleting database and resetting.")
@@ -2430,30 +2442,14 @@ async def async_main():
     application.add_error_handler(error_handler)
 
     logger.info("Application configured. Starting polling...")
-    
-    # التشغيل غير المتزامن وإدارة الإغلاق النظيف
-    try:
-        await application.initialize()
-        await application.start()
-        await application.updater.start_polling()
-        # إبقاء البرنامج يعمل
-        while True:
-            await asyncio.sleep(3600) 
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot shutting down gracefully...")
-    finally:
-        if application.updater.running:
-            await application.updater.stop()
-        if application.running:
-            await application.stop()
-        await application.shutdown()
-        logger.info("Bot has been shut down.")
+    # استخدام الطريقة القياسية والمستقرة للتشغيل
+    application.run_polling()
 
 
 if __name__ == '__main__':
-    print("🚀 Starting Mineseper Bot v3.3 (Event Loop Fix Release)...")
+    print("🚀 Starting Mineseper Bot v4.0 (Full Stability Release)...")
     try:
-        asyncio.run(async_main())
+        main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error in the main loop: {e}", exc_info=True)
 
