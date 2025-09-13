@@ -1,16 +1,21 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v5.5 (Truly Final & Complete) 💣 ---
+# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v5.6 (نسخة مُصححة ومستقرة) 💣 ---
 # =======================================================================================
-# --- سجل التغييرات v5.5 ---
+# --- سجل التغييرات v5.6 ---
 #
-# 1. [إصلاح حاسم] تم ملء كل الدوال الفارغة (pass) بالمنطق الكامل من النسخة 4.5.
-# 2. [إصلاح هيكلي] تم التأكد من أن كل الدوال معرفة قبل استدعائها.
-# 3. [دمج كامل] تم دمج كل الدوال والمنطق من النسخة 4.5 في الهيكلة الجديدة v5.
-# 4. [إعادة هيكلة] تطبيق نمط المحول (Adapter Pattern) للتعامل مع المنصات.
-# 5. [إعادة هيكلة] تطبيق كلاس إدارة الحالة (State Management).
-# 6. [تحسين أداء] تطبيق التزامن في متابعة الصفقات.
-# 7. [إصلاح نهائي] تطبيق الحل الصحيح لمنصة KuCoin (أمران منفصلان).
+# 1. [إصلاح حاسم] تم حل مشكلة "Invalid order type" في منصة KuCoin بشكل نهائي عبر استخدام
+#    النوع الصحيح لأمر وقف الخسارة (stop market).
+# 2. [إصلاح قاعدة البيانات] تم إصلاح خطأ "'sqlite3.Row' object has no attribute 'get'"
+#    الذي كان يمنع إنشاء تقرير المخاطر.
+# 3. [إصلاح منطقي] تم حل مشكلة "Failed to log recommendation to DB: 'quantity'"
+#    عبر التأكد من حساب الكمية قبل محاولة تنفيذ الصفقة الحقيقية.
+# 4. [إعادة بناء] تم إعادة كتابة دالة `generate_performance_report_string` المفقودة بالكامل،
+#    لذا أصبح تقرير أداء الاستراتيجيات يعمل الآن.
+# 5. [توحيد] تم توحيد منطق حساب قيمة المحفظة لحل التضارب بين تقرير الإحصائيات
+#    ولقطة المحفظة.
+# 6. [تحسين] تحسينات عامة في معالجة الأخطاء وزيادة استقرار البوت.
+# 7. [تحسين] تحديث أرقام الإصدارات لتكون متطابقة.
 #
 # =======================================================================================
 
@@ -126,6 +131,7 @@ class BinanceAdapter(ExchangeAdapter):
         
         logger.info(f"BinanceAdapter: Placing OCO for {symbol}. TP: {tp_price}, SL Trigger: {sl_trigger_price}")
         oco_params = {'stopLimitPrice': sl_price}
+        # In CCXT, for OCO 'sell' orders, 'price' is the take-profit price and 'stopPrice' is the stop-loss trigger.
         oco_order = await self.exchange.create_order(symbol, 'oco', 'sell', verified_quantity, price=tp_price, stopPrice=sl_trigger_price, params=oco_params)
         return {"oco_id": oco_order['id']}
 
@@ -155,7 +161,6 @@ class KuCoinAdapter(ExchangeAdapter):
     async def place_exit_orders(self, signal, verified_quantity):
         symbol = signal['symbol']
         tp_price = self.exchange.price_to_precision(symbol, signal['take_profit'])
-        sl_price = self.exchange.price_to_precision(symbol, signal['stop_loss'])
         sl_trigger_price = self.exchange.price_to_precision(symbol, signal['stop_loss'])
         
         logger.info(f"KuCoinAdapter: Placing separate TP and SL orders for {symbol}.")
@@ -163,9 +168,10 @@ class KuCoinAdapter(ExchangeAdapter):
         tp_order = await self.exchange.create_order(symbol, 'limit', 'sell', verified_quantity, price=tp_price)
         logger.info(f"KuCoinAdapter: Take Profit order placed with ID: {tp_order['id']}")
         
-        sl_params = {'triggerPrice': sl_trigger_price, 'stop': 'loss'}
-        sl_order = await self.exchange.create_order(symbol, 'stop_limit', 'sell', verified_quantity, price=sl_price, params=sl_params)
-        logger.info(f"KuCoinAdapter: Stop Loss order placed with ID: {sl_order['id']}")
+        # [FIX v5.6] Use a stop-market order for stop-loss on KuCoin for reliability.
+        sl_params = {'stopPrice': sl_trigger_price}
+        sl_order = await self.exchange.create_order(symbol, 'market', 'sell', verified_quantity, params=sl_params)
+        logger.info(f"KuCoinAdapter: Stop Loss (Market) order placed with ID: {sl_order['id']}")
         
         return {"tp_id": tp_order['id'], "sl_id": sl_order['id']}
 
@@ -178,19 +184,23 @@ class KuCoinAdapter(ExchangeAdapter):
             raise ValueError("KuCoin trade is missing TP or SL order ID for TSL update.")
 
         logger.info(f"KuCoinAdapter: Cancelling old orders for {symbol}. TP_ID: {tp_id_to_cancel}, SL_ID: {sl_id_to_cancel}")
-        await self.exchange.cancel_order(tp_id_to_cancel, symbol)
-        await self.exchange.cancel_order(sl_id_to_cancel, symbol)
+        # Use try-except blocks to avoid crashing if one order is already filled/cancelled
+        try: await self.exchange.cancel_order(tp_id_to_cancel, symbol)
+        except ccxt.OrderNotFound: logger.warning(f"TP order {tp_id_to_cancel} not found, likely already filled.")
+        try: await self.exchange.cancel_order(sl_id_to_cancel, symbol)
+        except ccxt.OrderNotFound: logger.warning(f"SL order {sl_id_to_cancel} not found, likely already filled.")
         await asyncio.sleep(2)
 
         quantity = trade['quantity']
         tp_price = self.exchange.price_to_precision(symbol, trade['take_profit'])
-        sl_price = self.exchange.price_to_precision(symbol, new_sl)
         sl_trigger_price = self.exchange.price_to_precision(symbol, new_sl)
 
-        logger.info(f"KuCoinAdapter: Creating new separate orders for {symbol} with new SL: {sl_price}")
+        logger.info(f"KuCoinAdapter: Creating new separate orders for {symbol} with new SL trigger: {sl_trigger_price}")
         new_tp_order = await self.exchange.create_order(symbol, 'limit', 'sell', quantity, price=tp_price)
-        new_sl_params = {'triggerPrice': sl_trigger_price, 'stop': 'loss'}
-        new_sl_order = await self.exchange.create_order(symbol, 'stop_limit', 'sell', quantity, price=sl_price, params=new_sl_params)
+        
+        # [FIX v5.6] Use a stop-market order for the new stop-loss.
+        new_sl_params = {'stopPrice': sl_trigger_price}
+        new_sl_order = await self.exchange.create_order(symbol, 'market', 'sell', quantity, params=new_sl_params)
         
         return {"tp_id": new_tp_order['id'], "sl_id": new_sl_order['id']}
 
@@ -397,6 +407,12 @@ def log_recommendation_to_db(signal):
         cursor = conn.cursor()
         sql = '''INSERT INTO trades (timestamp, exchange, symbol, entry_price, take_profit, stop_loss, quantity, entry_value_usdt, status, trailing_sl_active, highest_price, reason, trade_mode, entry_order_id, exit_order_ids_json)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'''
+        
+        # [FIX v5.6] Ensure 'quantity' exists before logging
+        if 'quantity' not in signal or signal['quantity'] is None:
+            logger.error(f"Attempted to log trade for {signal['symbol']} with missing quantity.")
+            return None
+
         params = (
             datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'),
             signal['exchange'],
@@ -420,7 +436,7 @@ def log_recommendation_to_db(signal):
         conn.close()
         return trade_id
     except Exception as e:
-        logger.error(f"Failed to log recommendation to DB: {e}")
+        logger.error(f"Failed to log recommendation to DB: {e}", exc_info=True)
         return None
 
 async def get_alpha_vantage_economic_events():
@@ -636,10 +652,10 @@ async def initialize_exchanges():
 
         params = {'enableRateLimit': True, 'options': {'defaultType': 'spot'}}
         authenticated = False
-        if ex_id == 'binance' and BINANCE_API_KEY != 'YOUR_BINANCE_API_KEY':
+        if ex_id == 'binance' and BINANCE_API_KEY and BINANCE_API_KEY != 'YOUR_BINANCE_API_KEY':
             params.update({'apiKey': BINANCE_API_KEY, 'secret': BINANCE_API_SECRET})
             authenticated = True
-        if ex_id == 'kucoin' and KUCOIN_API_KEY != 'YOUR_KUCOIN_API_KEY':
+        if ex_id == 'kucoin' and KUCOIN_API_KEY and KUCOIN_API_KEY != 'YOUR_KUCOIN_API_KEY':
             params.update({'apiKey': KUCOIN_API_KEY, 'secret': KUCOIN_API_SECRET, 'password': KUCOIN_API_PASSPHRASE})
             authenticated = True
 
@@ -842,16 +858,28 @@ async def place_real_trade(signal):
         if usdt_balance < trade_amount_usdt:
             return {'success': False, 'data': f"رصيدك الحالي ${usdt_balance:.2f} غير كافٍ لفتح صفقة بقيمة ${trade_amount_usdt:.2f}."}
         
+        # [FIX v5.6] Update signal dict with quantity info before placing the trade
         quantity = trade_amount_usdt / signal['entry_price']
         formatted_quantity = exchange.amount_to_precision(symbol, quantity)
+        signal.update({
+            'quantity': float(formatted_quantity),
+            'entry_value_usdt': trade_amount_usdt
+        })
+
     except Exception as e:
         return {'success': False, 'data': f"Pre-flight check failed: {e}"}
 
     buy_order = None
     try:
-        logger.info(f"Placing MARKET BUY order for {formatted_quantity} of {symbol} on {exchange_id.capitalize()}")
-        buy_order = await exchange.create_market_buy_order(symbol, float(formatted_quantity))
+        logger.info(f"Placing MARKET BUY order for {signal['quantity']} of {symbol} on {exchange_id.capitalize()}")
+        buy_order = await exchange.create_market_buy_order(symbol, signal['quantity'])
         logger.info(f"Initial response for BUY order {buy_order.get('id', 'N/A')} received.")
+    except ccxt.InvalidOrder as e:
+        logger.error(f"Placing BUY order for {symbol} failed (InvalidOrder): {e}", exc_info=True)
+        return {'success': False, 'data': f"فشل: أمر غير صالح. قد يكون المبلغ أقل من الحد الأدنى أو نوع الأمر خاطئ.\n`{str(e)}`"}
+    except ccxt.InsufficientFunds as e:
+        logger.error(f"Placing BUY order for {symbol} failed (InsufficientFunds): {e}", exc_info=True)
+        return {'success': False, 'data': f"فشل: رصيد غير كاف.\n`{str(e)}`"}
     except Exception as e:
         logger.error(f"Placing BUY order for {symbol} failed immediately: {e}", exc_info=True)
         return {'success': False, 'data': f"حدث خطأ من المنصة عند محاولة الشراء: `{str(e)}`"}
@@ -1366,7 +1394,7 @@ settings_menu_keyboard = [
 ]
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 5.2 - الهيكلة النهائية)*\n\nاختر من القائمة للبدء."
+    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 5.6 - نسخة مستقرة)*\n\nاختر من القائمة للبدء."
     await update.message.reply_text(welcome_message, reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1519,6 +1547,66 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trad
     except Exception as e:
         logger.error(f"Error in stats_command: {e}", exc_info=True)
         return "خطأ في جلب الإحصائيات.", None
+
+# [FIX v5.6] Re-implemented the missing strategy report function
+def generate_performance_report_string(trade_mode_filter='all'):
+    """Generates a detailed performance report string for each strategy."""
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        query = "SELECT reason, status, pnl_usdt FROM trades WHERE status != 'نشطة'"
+        params = []
+        if trade_mode_filter != 'all':
+            query += " AND trade_mode = ?"
+            params.append(trade_mode_filter)
+
+        cursor.execute(query, params)
+        trades = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+
+        if not trades:
+            return "لا توجد صفقات مغلقة لتحليل أداء الاستراتيجيات."
+
+        strategy_stats = defaultdict(lambda: {'wins': 0, 'losses': 0, 'total_pnl': 0.0})
+
+        for trade in trades:
+            # Handle combined reasons like "momentum_breakout + whale_radar"
+            reasons = [r.strip() for r in trade['reason'].split('+')]
+            for reason in reasons:
+                stats = strategy_stats[reason]
+                if trade['status'] == 'ناجحة':
+                    stats['wins'] += 1
+                elif trade['status'] == 'فاشلة':
+                    stats['losses'] += 1
+                
+                # Divide PNL among contributing strategies
+                if trade['pnl_usdt'] is not None:
+                    stats['total_pnl'] += trade['pnl_usdt'] / len(reasons)
+        
+        report_lines = ["**📜 تقرير أداء الاستراتيجيات**\n"]
+        
+        sorted_strategies = sorted(strategy_stats.items(), key=lambda item: item[1]['total_pnl'], reverse=True)
+
+        for reason, stats in sorted_strategies:
+            total_trades = stats['wins'] + stats['losses']
+            win_rate = (stats['wins'] / total_trades * 100) if total_trades > 0 else 0
+            avg_pnl = stats['total_pnl'] / total_trades if total_trades > 0 else 0
+            strategy_name_ar = STRATEGY_NAMES_AR.get(reason, reason)
+
+            report_lines.append(f"\n--- **{strategy_name_ar}** ---")
+            report_lines.append(f"  - **إجمالي الصفقات:** {total_trades}")
+            report_lines.append(f"  - **معدل النجاح:** {win_rate:.2f}% ({stats['wins']} ✅ / {stats['losses']} ❌)")
+            report_lines.append(f"  - **صافي الربح/الخسارة:** `${stats['total_pnl']:+.2f}`")
+            report_lines.append(f"  - **متوسط الربح للصفقة:** `${avg_pnl:+.2f}`")
+
+        return "\n".join(report_lines)
+
+    except Exception as e:
+        logger.error(f"Error generating performance report string: {e}", exc_info=True)
+        return "❌ حدث خطأ غير متوقع أثناء إعداد تقرير أداء الاستراتيجيات."
+
 
 async def strategy_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trade_mode_filter='all'):
     report_string = generate_performance_report_string(trade_mode_filter)
@@ -2130,32 +2218,15 @@ async def fetch_and_display_balance(exchange_id, query):
         return
 
     try:
-        balance = await exchange.fetch_balance()
-        total_balance = balance.get('total', {})
-
-        public_exchange = bot_state.public_exchanges.get(exchange_id.lower())
-        tickers = await public_exchange.fetch_tickers()
-
-        assets = []
-        for currency, amount in total_balance.items():
-            if amount > 0:
-                usdt_value = 0
-                if currency == 'USDT':
-                    usdt_value = amount
-                elif f"{currency}/USDT" in tickers:
-                    usdt_value = amount * tickers[f"{currency}/USDT"]['last']
-
-                if usdt_value > 1:
-                    assets.append({'currency': currency, 'amount': amount, 'usdt_value': usdt_value})
-
-        assets.sort(key=lambda x: x['usdt_value'], reverse=True)
+        portfolio_data = await calculate_full_portfolio(exchange)
+        assets = portfolio_data.get('assets', [])
+        total_usdt_value = portfolio_data.get('total_usdt', 0)
 
         if not assets:
             await query.edit_message_text(f"ℹ️ لا توجد أرصدة كبيرة (> $1) على منصة {exchange_id.capitalize()}.")
             return
 
         message_lines = [f"**💰 رصيدك على {exchange_id.capitalize()}**\n"]
-        total_usdt_value = sum(a['usdt_value'] for a in assets)
         message_lines.append(f"__**إجمالي القيمة التقديرية:**__ `${total_usdt_value:,.2f}`\n")
 
         for asset in assets[:15]:
@@ -2229,32 +2300,50 @@ async def fetch_and_display_my_trades(exchange_id, symbol, message):
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None: logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
 
-async def get_total_real_portfolio_value_usdt():
-    total_usdt_value = 0
-    for exchange in bot_state.exchanges.values():
-        if not exchange.apiKey:
-            continue
-        try:
-            balance = await exchange.fetch_balance()
-            if not hasattr(exchange, '_tickers_cache') or (time.time() - exchange._tickers_cache_time > 60):
-                 exchange._tickers_cache = await exchange.fetch_tickers()
-                 exchange._tickers_cache_time = time.time()
-            
-            tickers = exchange._tickers_cache
+# [FIX v5.6] Unified portfolio calculation function
+async def calculate_full_portfolio(exchange):
+    """Calculates the total portfolio value and provides a detailed asset breakdown."""
+    if not exchange or not exchange.apiKey:
+        return {'total_usdt': 0, 'assets': []}
+        
+    try:
+        balance = await exchange.fetch_balance()
+        all_assets = balance.get('total', {})
+        
+        # Simple caching for tickers to avoid re-fetching in the same process loop
+        if not hasattr(exchange, '_tickers_cache') or (time.time() - getattr(exchange, '_tickers_cache_time', 0) > 60):
+             exchange._tickers_cache = await exchange.fetch_tickers()
+             exchange._tickers_cache_time = time.time()
+        tickers = exchange._tickers_cache
+        
+        portfolio_assets = []
+        total_usdt_value = 0
+        for currency, amount in all_assets.items():
+            if amount > 0:
+                usdt_value = 0
+                if currency == 'USDT':
+                    usdt_value = amount
+                elif f"{currency}/USDT" in tickers and tickers[f"{currency}/USDT"].get('last'):
+                    usdt_value = amount * tickers[f"{currency}/USDT"]['last']
+                
+                if usdt_value > 1.0: # Consistent threshold of $1
+                    portfolio_assets.append({'currency': currency, 'amount': amount, 'usdt_value': usdt_value})
+                    total_usdt_value += usdt_value
+        
+        portfolio_assets.sort(key=lambda x: x['usdt_value'], reverse=True)
+        return {'total_usdt': total_usdt_value, 'assets': portfolio_assets}
+    except Exception as e:
+        logger.error(f"Could not calculate portfolio value for {exchange.id}: {e}")
+        return {'total_usdt': 0, 'assets': []}
 
-            for currency, amount in balance.get('total', {}).items():
-                if amount > 0:
-                    usdt_value = 0
-                    if currency == 'USDT':
-                        usdt_value = amount
-                    elif f"{currency}/USDT" in tickers and tickers[f"{currency}/USDT"].get('last'):
-                        usdt_value = amount * tickers[f"{currency}/USDT"]['last']
-                    
-                    if usdt_value > 0.1:
-                        total_usdt_value += usdt_value
-        except Exception as e:
-            logger.error(f"Could not calculate real portfolio value for {exchange.id}: {e}")
-    return total_usdt_value
+
+async def get_total_real_portfolio_value_usdt():
+    total_value = 0
+    tasks = [calculate_full_portfolio(ex) for ex in bot_state.exchanges.values() if ex.apiKey]
+    results = await asyncio.gather(*tasks)
+    for res in results:
+        total_value += res['total_usdt']
+    return total_value
 
 async def portfolio_snapshot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.callback_query.message
@@ -2288,35 +2377,20 @@ async def process_portfolio_snapshot(update: Update, context: ContextTypes.DEFAU
         return
 
     try:
-        balance = await exchange.fetch_balance()
-        all_assets = balance.get('total', {})
-        tickers = await exchange.fetch_tickers()
-        
-        portfolio_assets = []
-        total_usdt_value = 0
-        for currency, amount in all_assets.items():
-            if amount > 0:
-                usdt_value = 0
-                if currency == 'USDT':
-                    usdt_value = amount
-                elif f"{currency}/USDT" in tickers and tickers[f"{currency}/USDT"].get('last'):
-                    usdt_value = amount * tickers[f"{currency}/USDT"]['last']
-                
-                if usdt_value > 1:
-                    portfolio_assets.append({'currency': currency, 'amount': amount, 'usdt_value': usdt_value})
-                    total_usdt_value += usdt_value
-        
-        portfolio_assets.sort(key=lambda x: x['usdt_value'], reverse=True)
+        portfolio_data = await calculate_full_portfolio(exchange)
+        portfolio_assets = portfolio_data.get('assets', [])
+        total_usdt_value = portfolio_data.get('total_usdt', 0)
         
         all_recent_trades = []
-        for asset in portfolio_assets:
-            try:
-                symbol = f"{asset['currency']}/USDT"
-                if symbol in exchange.markets:
-                    trades = await exchange.fetch_my_trades(symbol=symbol, limit=5)
-                    all_recent_trades.extend(trades)
-            except Exception as e:
-                logger.warning(f"Could not fetch trades for {asset['currency']}: {e}")
+        # Fetch trades only for assets currently held
+        symbols_to_fetch = [f"{asset['currency']}/USDT" for asset in portfolio_assets if f"{asset['currency']}/USDT" in exchange.markets]
+        
+        trade_tasks = [exchange.fetch_my_trades(symbol=symbol, limit=5) for symbol in symbols_to_fetch]
+        trade_results = await asyncio.gather(*trade_tasks, return_exceptions=True)
+
+        for result in trade_results:
+            if not isinstance(result, Exception):
+                all_recent_trades.extend(result)
         
         all_recent_trades.sort(key=lambda x: x['timestamp'], reverse=True)
         recent_trades = all_recent_trades[:20]
@@ -2332,7 +2406,7 @@ async def process_portfolio_snapshot(update: Update, context: ContextTypes.DEFAU
         if not recent_trades:
             parts.append("لا يوجد سجل تداولات حديث.")
         else:
-            for trade in reversed(recent_trades): 
+            for trade in recent_trades: # Already sorted, no need to reverse
                 side_emoji = "🟢" if trade['side'] == 'buy' else "🔴"
                 parts.append(f"`{trade['symbol']}` {side_emoji} `{trade['side'].upper()}` | الكمية: `{trade['amount']}` | السعر: `{trade['price']}`")
         
@@ -2350,8 +2424,9 @@ async def risk_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         conn = sqlite3.connect(DB_FILE, timeout=10)
         conn.row_factory = sqlite3.Row
         
-        real_trades = conn.cursor().execute("SELECT * FROM trades WHERE status = 'نشطة' AND trade_mode = 'real'").fetchall()
-        virtual_trades = conn.cursor().execute("SELECT * FROM trades WHERE status = 'نشطة' AND trade_mode = 'virtual'").fetchall()
+        # [FIX v5.6] Convert rows to dicts immediately to avoid attribute errors
+        real_trades = [dict(row) for row in conn.cursor().execute("SELECT * FROM trades WHERE status = 'نشطة' AND trade_mode = 'real'").fetchall()]
+        virtual_trades = [dict(row) for row in conn.cursor().execute("SELECT * FROM trades WHERE status = 'نشطة' AND trade_mode = 'virtual'").fetchall()]
         conn.close()
 
         parts = ["**ρίск تقرير المخاطر الحالي**\n"]
@@ -2360,7 +2435,8 @@ async def risk_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             if not trades:
                 return [f"\n--- **{title}** ---\n✅ لا توجد صفقات نشطة حالياً."]
             
-            valid_trades = [t for t in trades if all(t.get(k) is not None for k in ['entry_value_usdt', 'entry_price', 'stop_loss', 'quantity'])]
+            # [FIX v5.6] Access dict keys directly now
+            valid_trades = [t for t in trades if all(k in t and t[k] is not None for k in ['entry_value_usdt', 'entry_price', 'stop_loss', 'quantity'])]
             
             total_at_risk = sum(t['entry_value_usdt'] for t in valid_trades)
             potential_loss = sum((t['entry_price'] - t['stop_loss']) * t['quantity'] for t in valid_trades)
@@ -2379,10 +2455,7 @@ async def risk_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             return section_parts
 
-        exchange = next((ex for ex in bot_state.exchanges.values() if ex.apiKey), None)
-        real_portfolio_value = 0
-        if exchange:
-            real_portfolio_value = await get_real_balance(exchange.id, 'USDT')
+        real_portfolio_value = await get_total_real_portfolio_value_usdt()
         parts.extend(generate_risk_section("🚨 المخاطر الحقيقية", real_trades, real_portfolio_value))
         
         virtual_portfolio_value = bot_state.settings['virtual_portfolio_balance_usdt']
@@ -2409,11 +2482,8 @@ async def sync_portfolio_command(update: Update, context: ContextTypes.DEFAULT_T
         bot_symbols = {item[0] for item in bot_trades_raw}
         conn.close()
 
-        balance = await exchange.fetch_balance()
-        exchange_symbols = set()
-        for currency, amount in balance.get('total', {}).items():
-            if amount > 0 and f"{currency}/USDT" in exchange.markets:
-                exchange_symbols.add(f"{currency}/USDT")
+        portfolio_data = await calculate_full_portfolio(exchange)
+        exchange_symbols = {f"{asset['currency']}/USDT" for asset in portfolio_data['assets']}
 
         matched_symbols = bot_symbols.intersection(exchange_symbols)
         bot_only_symbols = bot_symbols.difference(exchange_symbols)
@@ -2473,7 +2543,7 @@ async def post_init(application: Application):
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
 
     logger.info("Jobs scheduled.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v5.2) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v5.6) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
 
 async def post_shutdown(application: Application):
     all_exchanges = list(bot_state.exchanges.values()) + list(bot_state.public_exchanges.values())
@@ -2483,7 +2553,7 @@ async def post_shutdown(application: Application):
 
 def main():
     """Sets up and runs the bot application."""
-    if TELEGRAM_BOT_TOKEN == 'YOUR_BOT_TOKEN_HERE':
+    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == 'YOUR_BOT_TOKEN_HERE':
         print("FATAL ERROR: TELEGRAM_BOT_TOKEN is not set.")
         exit()
 
@@ -2510,9 +2580,8 @@ def main():
 
 
 if __name__ == '__main__':
-    print("🚀 Starting Mineseper Bot v5.2 (Full & Final Version)...")
+    print("🚀 Starting Mineseper Bot v5.6 (Stable & Patched Version)...")
     try:
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
-
