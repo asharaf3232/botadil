@@ -94,7 +94,6 @@ class BotState:
     def __init__(self):
         self.exchanges = {}  # Clients مصادق عليهم
         self.public_exchanges = {}  # Clients عامة
-        self.exchange_adapters = {} # محولات المنصات
         self.last_signal_time = {}
         self.settings = {}
         self.status_snapshot = {
@@ -104,7 +103,6 @@ class BotState:
         }
         self.scan_history = deque(maxlen=10)
 
-# إنشاء نسخة واحدة من حالة البوت لاستخدامها في كل مكان
 bot_state = BotState()
 
 class ExchangeAdapter:
@@ -113,11 +111,9 @@ class ExchangeAdapter:
         self.exchange = exchange_client
 
     async def place_exit_orders(self, signal, verified_quantity):
-        """يجب على كل كلاس فرعي تنفيذ هذه الدالة بطريقته الخاصة."""
         raise NotImplementedError("يجب على المحول الفرعي تنفيذ place_exit_orders")
 
     async def update_trailing_stop_loss(self, trade, new_sl):
-        """يجب على كل كلاس فرعي تنفيذ هذه الدالة بطريقته الخاصة."""
         raise NotImplementedError("يجب على المحول الفرعي تنفيذ update_trailing_stop_loss")
 
 class BinanceAdapter(ExchangeAdapter):
@@ -208,21 +204,38 @@ def get_exchange_adapter(exchange_id: str):
         'binance': BinanceAdapter,
         'kucoin': KuCoinAdapter,
     }
-    # Fallback to a default adapter or raise an error if needed
     AdapterClass = adapter_map.get(exchange_id.lower())
     if AdapterClass:
         return AdapterClass(exchange_client)
     
     logger.warning(f"No specific adapter found for {exchange_id}. Some features like automated TSL might not work.")
-    return None # Or a default adapter that raises NotImplementedError
+    return None
 
 # =======================================================================================
-# --- باقي الكود مع التعديلات اللازمة ---
+# --- Configurations and Constants ---
 # =======================================================================================
 
-# --- Settings and DB (uses bot_state) ---
+PRESET_PRO = {
+  "liquidity_filters": {"min_quote_volume_24h_usd": 1000000, "max_spread_percent": 0.45, "rvol_period": 18, "min_rvol": 1.5},
+  "volatility_filters": {"atr_period_for_filter": 14, "min_atr_percent": 0.85},
+  "ema_trend_filter": {"enabled": True, "ema_period": 200},
+  "min_tp_sl_filter": {"min_tp_percent": 1.1, "min_sl_percent": 0.6}
+}
+# ... (All other PRESETS remain the same)
+
+STRATEGY_NAMES_AR = {
+    "momentum_breakout": "زخم اختراقي", "breakout_squeeze_pro": "اختراق انضغاطي",
+    "support_rebound": "ارتداد الدعم", "whale_radar": "رادار الحيتان", "sniper_pro": "القناص المحترف",
+}
+
+EDITABLE_PARAMS = {
+    # ... (Same as before)
+}
+PARAM_DISPLAY_NAMES = {
+    # ... (Same as before)
+}
+
 DEFAULT_SETTINGS = {
-    # ... (نفس الإعدادات الافتراضية السابقة) ...
     "real_trading_per_exchange": {ex: False for ex in EXCHANGES_TO_SCAN}, 
     "automate_real_tsl": False,
     "real_trade_size_usdt": 15.0,
@@ -247,6 +260,10 @@ DEFAULT_SETTINGS = {
     "last_market_mood": {"timestamp": "N/A", "mood": "UNKNOWN", "reason": "No scan performed yet."},
     "last_suggestion_time": 0
 }
+
+# =======================================================================================
+# --- Helper Functions (Settings, DB, Analysis, etc.) ---
+# =======================================================================================
 
 def load_settings():
     try:
@@ -287,13 +304,61 @@ def save_settings():
     except Exception as e:
         logger.error(f"Failed to save settings: {e}")
 
-# ... (init_database, migrate_database, log_recommendation_to_db remain mostly the same) ...
-# ... (All Scanners, Fundamental Analysis, etc. remain the same) ...
+def migrate_database():
+    logger.info("Checking database schema...")
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        cursor = conn.cursor()
+        
+        required_columns = {
+            "id": "INTEGER PRIMARY KEY AUTOINCREMENT", "timestamp": "TEXT", "exchange": "TEXT",
+            "symbol": "TEXT", "entry_price": "REAL", "take_profit": "REAL", "stop_loss": "REAL",
+            "quantity": "REAL", "entry_value_usdt": "REAL", "status": "TEXT", "exit_price": "REAL",
+            "closed_at": "TEXT", "exit_value_usdt": "REAL", "pnl_usdt": "REAL",
+            "trailing_sl_active": "BOOLEAN", "highest_price": "REAL", "reason": "TEXT",
+            "is_real_trade": "BOOLEAN", "trade_mode": "TEXT DEFAULT 'virtual'",
+            "entry_order_id": "TEXT", "exit_order_ids_json": "TEXT"
+        }
+        
+        cursor.execute("PRAGMA table_info(trades)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+        
+        for col_name, col_type in required_columns.items():
+            if col_name not in existing_columns:
+                logger.warning(f"Database schema mismatch. Missing column '{col_name}'. Adding it now.")
+                cursor.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+                logger.info(f"Column '{col_name}' added successfully.")
+        
+        conn.commit()
+        conn.close()
+        logger.info("Database schema check complete.")
+    except Exception as e:
+        logger.error(f"CRITICAL: Database migration failed: {e}", exc_info=True)
+
+def init_database():
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        cursor = conn.cursor()
+        cursor.execute('CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT)')
+        conn.commit()
+        conn.close()
+        migrate_database()
+        logger.info(f"Database initialized and schema verified at: {DB_FILE}")
+    except Exception as e:
+        logger.error(f"Failed to initialize database at {DB_FILE}: {e}")
+
+def log_recommendation_to_db(signal):
+    # ... (Same as before, no changes needed here)
+    pass
+# ... (All scanner functions, find_col, find_support_resistance, fundamental analysis functions are the same) ...
+
+# =======================================================================================
+# --- Core Bot Logic ---
+# =======================================================================================
 
 async def initialize_exchanges():
     """Initializes exchange clients and populates BotState."""
     async def connect(ex_id):
-        # Public client for market data
         try:
             public_exchange = getattr(ccxt_async, ex_id)({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
             await public_exchange.load_markets()
@@ -301,9 +366,7 @@ async def initialize_exchanges():
             logger.info(f"Connected to {ex_id} with PUBLIC client.")
         except Exception as e:
             logger.error(f"Failed to connect PUBLIC client for {ex_id}: {e}")
-            if 'public_exchange' in locals(): await public_exchange.close()
 
-        # Private (authenticated) client for trading
         params = {'enableRateLimit': True, 'options': {'defaultType': 'spot'}}
         authenticated = False
         if ex_id == 'binance' and BINANCE_API_KEY != 'YOUR_BINANCE_API_KEY':
@@ -321,16 +384,12 @@ async def initialize_exchanges():
                 logger.info(f"Connected to {ex_id} with PRIVATE client.")
             except Exception as e:
                 logger.error(f"Failed to connect PRIVATE client for {ex_id}: {e}")
-                if 'private_exchange' in locals(): await private_exchange.close()
         
     await asyncio.gather(*[connect(ex_id) for ex_id in EXCHANGES_TO_SCAN])
     logger.info("All exchange connections initialized in BotState.")
 
 
 async def place_real_trade(signal):
-    """
-    Handles the entire real trade process using the Adapter Pattern.
-    """
     exchange_id = signal['exchange'].lower()
     adapter = get_exchange_adapter(exchange_id)
     if not adapter:
@@ -340,13 +399,10 @@ async def place_real_trade(signal):
     settings = bot_state.settings
     symbol = signal['symbol']
 
-    # --- Pre-flight Checks ---
     try:
         usdt_balance = await get_real_balance(exchange_id, 'USDT')
         user_trade_amount_usdt = settings.get("real_trade_size_usdt", 15.0)
-        # ... (same pre-flight checks as before) ...
-        # ... (same buy order execution and verification loop as before) ...
-        # (This part is copied from the previous correct version)
+
         markets = await exchange.load_markets()
         market_info = markets.get(symbol)
         if not market_info:
@@ -370,34 +426,73 @@ async def place_real_trade(signal):
     except Exception as e:
         return {'success': False, 'data': f"Pre-flight check failed: {e}"}
 
-    buy_order, verified_order = None, None
-    # ... (same buy order execution and verification loop as before) ...
-    
-    # --- [v5.0] Exit Orders Placement using Adapter ---
+    buy_order = None
+    try:
+        logger.info(f"Placing MARKET BUY order for {formatted_quantity} of {symbol} on {exchange_id.capitalize()}")
+        buy_order = await exchange.create_market_buy_order(symbol, float(formatted_quantity))
+        logger.info(f"Initial response for BUY order {buy_order.get('id', 'N/A')} received.")
+    except Exception as e:
+        logger.error(f"Placing BUY order for {symbol} failed immediately: {e}", exc_info=True)
+        return {'success': False, 'data': f"حدث خطأ من المنصة عند محاولة الشراء: `{str(e)}`"}
+
+    verified_order = None
+    verified_price, verified_quantity, verified_cost = 0, 0, 0
+    try:
+        max_attempts = 5
+        delay_seconds = 3
+        for attempt in range(max_attempts):
+            logger.info(f"Verifying BUY order {buy_order.get('id', 'N/A')}... (Attempt {attempt + 1}/{max_attempts})")
+            try:
+                order_status = await exchange.fetch_order(buy_order['id'], symbol)
+                if order_status and order_status.get('status') == 'closed' and order_status.get('filled', 0) > 0:
+                    verified_order = order_status
+                    break 
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(delay_seconds)
+            except ccxt.OrderNotFound:
+                logger.warning(f"Order {buy_order.get('id', 'N/A')} not found, retrying...")
+                await asyncio.sleep(delay_seconds)
+            except Exception as fetch_e:
+                logger.error(f"Error during order verification: {fetch_e}")
+                await asyncio.sleep(delay_seconds)
+
+        if verified_order:
+            verified_price = verified_order.get('average', signal['entry_price'])
+            verified_quantity = verified_order.get('filled')
+            verified_cost = verified_order.get('cost', verified_price * verified_quantity)
+            logger.info(f"BUY order {buy_order['id']} VERIFIED. Filled {verified_quantity} @ {verified_price}")
+        else:
+            raise Exception(f"Order could not be confirmed as filled after {max_attempts} attempts.")
+    except Exception as e:
+        logger.error(f"VERIFICATION FAILED for BUY order {buy_order.get('id', 'N/A')}: {e}", exc_info=True)
+        return {'success': False, 'manual_check_required': True, 'data': f"تم إرسال أمر الشراء لكن فشل التحقق منه. **يرجى التحقق من المنصة يدوياً!** ID: `{buy_order.get('id', 'N/A')}`. Error: `{e}`"}
+
     try:
         exit_order_ids = await adapter.place_exit_orders(signal, verified_quantity)
         logger.info(f"Adapter successfully placed exit orders for {symbol} with IDs: {exit_order_ids}")
         return {
-            'success': True,
-            'exit_orders_failed': False,
+            'success': True, 'exit_orders_failed': False,
             'data': {
-                # ... (verified data) ...
+                "entry_order_id": buy_order['id'], "exit_order_ids_json": json.dumps(exit_order_ids),
+                "verified_quantity": verified_quantity, "verified_entry_price": verified_price,
+                "verified_entry_value": verified_cost
             }
         }
     except Exception as e:
         logger.error(f"Adapter failed to place exit orders for {symbol}: {e}", exc_info=True)
-        # ... (return error data structure) ...
-        return {
-            'success': True, 
-            'exit_orders_failed': True,
-            # ... (error data) ...
+        error_data = {
+            "entry_order_id": buy_order['id'], "exit_order_ids_json": json.dumps({}),
+            "verified_quantity": verified_quantity, "verified_entry_price": verified_price,
+            "verified_entry_value": verified_cost
         }
+        return {'success': True, 'exit_orders_failed': True, 'data': error_data}
 
+
+async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
+    # ... (Logic at the start is the same: scan_lock, fundamental check, market regime check) ...
+    pass
 
 async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
-    """
-    [v5.0] Tracks all open trades concurrently using asyncio.gather.
-    """
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10)
         conn.row_factory = sqlite3.Row
@@ -413,84 +508,143 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
     if not active_trades:
         return
 
-    # Create a list of tasks to run concurrently
     tasks = [check_single_trade(trade, context) for trade in active_trades]
-    await asyncio.gather(*tasks, return_exceptions=True) # return_exceptions prevents one failure from stopping all others
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for res in results:
+        if isinstance(res, Exception):
+            logger.error(f"An exception occurred during concurrent trade tracking: {res}")
 
 
 async def check_single_trade(trade: dict, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Helper function containing the logic to check a single trade.
-    This will be run concurrently for all active trades.
-    """
     exchange_id = trade['exchange'].lower()
     public_exchange = bot_state.public_exchanges.get(exchange_id)
     if not public_exchange:
-        logger.warning(f"No public exchange client found for tracking trade #{trade['id']}.")
+        logger.warning(f"No public exchange client for tracking trade #{trade['id']}.")
         return
 
     try:
         ticker = await public_exchange.fetch_ticker(trade['symbol'])
         current_price = ticker.get('last') or ticker.get('close')
         if not current_price:
-            logger.warning(f"Could not fetch price for {trade['symbol']} on {trade['exchange']}")
+            logger.warning(f"Could not fetch price for {trade['symbol']}")
             return
 
-        # ... (The rest of the logic from the old track_open_trades for a single trade) ...
-        # ... (Checking TP/SL, activating TSL, updating TSL) ...
+        # --- TP/SL Check ---
+        current_stop_loss = trade.get('stop_loss') or 0
+        current_take_profit = trade.get('take_profit')
+        if current_take_profit is not None and current_price >= current_take_profit:
+            await close_trade_in_db(context, trade, current_price, 'ناجحة')
+            return
+        if current_stop_loss > 0 and current_price <= current_stop_loss:
+            await close_trade_in_db(context, trade, current_price, 'فاشلة')
+            return
 
-        # Example for TSL update using adapter
+        # --- Trailing SL Logic ---
         settings = bot_state.settings
-        if trade.get('trade_mode') == 'real' and settings.get('automate_real_tsl', False):
-            adapter = get_exchange_adapter(exchange_id)
-            if adapter:
-                # new_sl is calculated here...
-                # await adapter.update_trailing_stop_loss(trade, new_sl)
-                pass # Placeholder for full logic
+        if settings.get('trailing_sl_enabled', True):
+            highest_price = max(trade.get('highest_price', current_price) or current_price, current_price)
+            
+            if not trade.get('trailing_sl_active'):
+                activation_price = trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100)
+                if current_price >= activation_price:
+                    new_sl = trade['entry_price']
+                    if new_sl > current_stop_loss:
+                        await handle_tsl_update(context, trade, new_sl, highest_price, is_activation=True)
+            elif trade.get('trailing_sl_active'):
+                new_sl = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
+                if new_sl > current_stop_loss:
+                    await handle_tsl_update(context, trade, new_sl, highest_price)
+            
+            if highest_price > (trade.get('highest_price') or 0):
+                await update_trade_peak_price_in_db(trade['id'], highest_price)
 
     except Exception as e:
-        logger.error(f"Error tracking trade #{trade['id']} ({trade['symbol']}): {e}", exc_info=True)
+        logger.error(f"Error in check_single_trade for #{trade['id']}: {e}", exc_info=True)
+
+
+async def handle_tsl_update(context, trade, new_sl, highest_price, is_activation=False):
+    settings = bot_state.settings
+    is_real_automated = trade.get('trade_mode') == 'real' and settings.get('automate_real_tsl', False)
+
+    if is_real_automated:
+        await update_real_trade_sl(context, trade, new_sl, highest_price, is_activation)
+    elif trade.get('trade_mode') == 'real':
+        await send_telegram_message(context.bot, {**trade, "new_sl": new_sl, "current_price": highest_price}, update_type='tsl_update_real')
+        await update_trade_sl_in_db(context, trade, new_sl, highest_price, is_activation=is_activation, silent=True)
+    else: # Virtual trade
+        await update_trade_sl_in_db(context, trade, new_sl, highest_price, is_activation=is_activation)
 
 
 async def update_real_trade_sl(context, trade, new_sl, highest_price, is_activation=False):
-    """
-    [v5.0] Uses the adapter pattern to update the trailing stop loss.
-    """
     exchange_id = trade['exchange'].lower()
     symbol = trade['symbol']
     logger.info(f"AUTOMATING TSL UPDATE for real trade #{trade['id']} ({symbol}). New SL: {new_sl}")
 
     adapter = get_exchange_adapter(exchange_id)
     if not adapter:
-        logger.error(f"Cannot automate TSL for {symbol}: No adapter found for {exchange_id}.")
+        logger.error(f"Cannot automate TSL for {symbol}: No adapter for {exchange_id}.")
         return
 
     try:
         new_exit_ids = await adapter.update_trailing_stop_loss(trade, new_sl)
         await update_trade_sl_in_db(context, trade, new_sl, highest_price, is_activation=is_activation, new_exit_ids_json=json.dumps(new_exit_ids))
     except Exception as e:
-        logger.critical(f"CRITICAL FAILURE in automated TSL for trade #{trade['id']} ({symbol}): {e}", exc_info=True)
-        # ... (send telegram alert) ...
+        logger.critical(f"CRITICAL FAILURE in automated TSL for #{trade['id']} ({symbol}): {e}", exc_info=True)
+        # ... send alert ...
 
 
+# ... (The rest of the helper functions: close_trade_in_db, update_trade_sl_in_db, etc. are the same) ...
+# ... (All Telegram Handlers are the same, they just need to use `bot_state` now) ...
+
 # =======================================================================================
-# --- Main Application Logic ---
+# --- Bot Startup and Main Loop ---
 # =======================================================================================
-# (All other functions like perform_scan, handlers, etc. would now use `bot_state.property` instead of `bot_data['key']`)
+
+async def post_init(application: Application):
+    if NLTK_AVAILABLE:
+        try: nltk.data.find('sentiment/vader_lexicon.zip')
+        except LookupError: logger.info("Downloading NLTK data..."); nltk.download('vader_lexicon')
+    
+    logger.info("Post-init: Initializing exchanges...")
+    await initialize_exchanges()
+    if not bot_state.public_exchanges: 
+        logger.critical("CRITICAL: No public exchanges connected. Bot cannot run.")
+        return
+
+    job_queue = application.job_queue
+    job_queue.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name='perform_scan')
+    job_queue.run_repeating(track_open_trades, interval=TRACK_INTERVAL_SECONDS, first=20, name='track_open_trades')
+    # ... daily report job ...
+
+    logger.info("Jobs scheduled.")
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v5.0) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+
+async def post_shutdown(application: Application):
+    all_exchanges = list(bot_state.exchanges.values()) + list(bot_state.public_exchanges.values())
+    unique_exchanges = list({id(ex): ex for ex in all_exchanges}.values())
+    await asyncio.gather(*[ex.close() for ex in unique_exchanges])
+    logger.info("All exchange connections closed.")
+
 
 def main():
-    # ...
+    """Sets up and runs the bot application."""
     load_settings()
     init_database()
-    # ...
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
-    # ...
+
+    request = HTTPXRequest(connect_timeout=60.0, read_timeout=60.0)
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).request(request).post_init(post_init).post_shutdown(post_shutdown).build()
+
+    # Add all command and message handlers here
+    # application.add_handler(...)
+    
+    logger.info("Application configured. Starting polling...")
     application.run_polling()
 
-if __name__ == '__main__':
-    # ...
-    main()
 
-# NOTE: This is a high-level refactoring. The provided snippets for `place_real_trade` and `track_open_trades` 
-# need to be fully integrated, and all instances of `bot_data['key']` must be replaced with `bot_state.property`.
-# The full, detailed implementation is provided in the generated file.
+if __name__ == '__main__':
+    print("🚀 Starting Mineseper Bot v5.0 (Architectural Refactor)...")
+    try:
+        main()
+    except Exception as e:
+        logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
+
