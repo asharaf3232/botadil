@@ -1432,43 +1432,43 @@ async def handle_tsl_update(context, trade, new_sl, highest_price, is_activation
 async def update_real_trade_sl(context, trade, new_sl, highest_price, is_activation=False):
     exchange_id = trade['exchange'].lower()
     symbol = trade['symbol']
-    logger.info(f"SELF-HEALING TSL: Attempting update for real trade #{trade['id']} ({symbol}). New SL: {new_sl}")
-    
     adapter = get_exchange_adapter(exchange_id)
     if not adapter:
         logger.error(f"Cannot automate TSL for {symbol}: No adapter for {exchange_id}.")
         return
 
-    try:
-        new_exit_ids = await adapter.update_trailing_stop_loss(trade, new_sl)
-        await update_trade_sl_in_db(context, trade, new_sl, highest_price, is_activation=is_activation, new_exit_ids_json=json.dumps(new_exit_ids))
-        logger.info(f"SELF-HEALING TSL: Primary update for trade #{trade['id']} successful.")
+    # --- START OF FIX ---
+    # Check if this is the first TSL activation for a rescued/imported trade
+    # A rescued trade has no exit orders logged yet.
+    is_first_tsl_for_rescued = trade.get('entry_order_id') == 'imported' and trade.get('exit_order_ids_json', '{}') in ['{}', 'null']
 
-    except Exception as e:
-        logger.critical(f"SELF-HEALING TSL: CRITICAL FAILURE in primary update for trade #{trade['id']} ({symbol}): {e}", exc_info=True)
-        await send_telegram_message(context.bot, {'custom_message': f"**🚨 فشل حرج في أتمتة الوقف المتحرك 🚨**\n\n**صفقة:** `#{trade['id']} {symbol}`\n**الخطأ:** `{e}`\n\n**⚠️ قد تكون الصفقة الآن بدون حماية! جارِ محاولة الشفاء الذاتي...**"})
-        
-        await update_trade_order_ids_in_db(trade['id'], "{}")
-        
-        try:
-            logger.info(f"SELF-HEALING TSL: Starting recovery for trade #{trade['id']}.")
-            recovery_signal = {
+    try:
+        if is_first_tsl_for_rescued:
+            logger.info(f"TSL ACTIVATION (RESCUED): Placing initial exit orders for trade #{trade['id']} ({symbol}) with SL: {new_sl}")
+            # Create a minimal signal object needed for placing orders
+            placement_signal = {
                 'symbol': trade['symbol'],
                 'take_profit': trade['take_profit'],
-                'stop_loss': new_sl
+                'stop_loss': new_sl, # Use the new calculated SL
             }
-            recovered_exit_ids = await adapter.place_exit_orders(recovery_signal, trade['quantity'])
-            
-            await update_trade_sl_in_db(context, trade, new_sl, highest_price, is_activation=is_activation, new_exit_ids_json=json.dumps(recovered_exit_ids))
-            logger.info(f"SELF-HEALING TSL: RECOVERY SUCCESSFUL for trade #{trade['id']}.")
-            await send_telegram_message(context.bot, {'custom_message': f"**✅ تم التعافي بنجاح!**\n\n**صفقة:** `#{trade['id']} {symbol}`\n\nتم إعادة وضع أوامر الحماية بنجاح. الصفقة مؤمنة ومؤتمتة مجدداً."})
+            new_exit_ids = await adapter.place_exit_orders(placement_signal, trade['quantity'])
+        else:
+            # This is a normal TSL update for a trade the bot opened itself
+            logger.info(f"TSL UPDATE: Attempting update for real trade #{trade['id']} ({symbol}). New SL: {new_sl}")
+            new_exit_ids = await adapter.update_trailing_stop_loss(trade, new_sl)
+
+        # Update the database with the new SL and the new order IDs
+        await update_trade_sl_in_db(context, trade, new_sl, highest_price, is_activation=is_activation, new_exit_ids_json=json.dumps(new_exit_ids))
+        logger.info(f"TSL automation successful for trade #{trade['id']}.")
         
-        except Exception as recovery_e:
-            logger.critical(f"SELF-HEALING TSL: RECOVERY FAILED for trade #{trade['id']}: {recovery_e}", exc_info=True)
-            await send_telegram_message(context.bot, {'custom_message': f"**🚨 فشل الشفاء الذاتي! 🚨**\n\n**صفقة:** `#{trade['id']} {symbol}`\n**خطأ التعافي:** `{recovery_e}`\n\n**لم أتمكن من إعادة تأمين الصفقة. التدخل اليدوي الفوري ضروري الآن!**"})
+        # Send a confirmation message to the user, especially on first activation
+        if is_activation:
+             await send_telegram_message(context.bot, {**trade, "new_sl": new_sl}, update_type='tsl_activation')
 
-
-async def close_trade_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict, exit_price: float, is_win: bool):
+    except Exception as e:
+        logger.critical(f"TSL AUTOMATION: CRITICAL FAILURE for trade #{trade['id']} ({symbol}): {e}", exc_info=True)
+        # The self-healing logic was problematic, so we now send a clearer error message for manual intervention.
+        await send_telegram_message(context.bot, {'custom_message': f"**🚨 فشل حرج في أتمتة الوقف المتحرك 🚨**\n\n**صفقة:** `#{trade['id']} {symbol}`\n**الخطأ:** `{e}`\n\n**لم أتمكن من تأمين الصفقة تلقائياً. التدخل اليدوي الفوري ضروري الآن!**"})
     pnl_usdt = (exit_price - trade['entry_price']) * trade['quantity']
     
     # [v6.1] New Status Logic
@@ -2891,4 +2891,5 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
+
 
