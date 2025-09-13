@@ -2667,11 +2667,10 @@ def main():
     logger.info("Application configured with all handlers. Starting polling...")
     application.run_polling()
 
-
 if __name__ == '__main__':
     print("🚀 Starting Mineseper Bot v6.0 (Enhanced UX)...")
     try:
         main()
     except Exception as e:
-    logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
-
+        # لاحظ المسافة البادئة هنا
+        logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
