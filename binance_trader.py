@@ -1,20 +1,22 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v5.7 (آلية الشفاء الذاتي) 💣 ---
+# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v5.8 (توسيع المنصات) 💣 ---
 # =======================================================================================
-# --- سجل التغييرات v5.7 ---
+# --- سجل التغييرات v5.8 ---
 #
-# 1. [ميزة حاسمة] تطبيق آلية "الشفاء الذاتي" (Self-Healing) لمنع "الصفقات الشبحية".
-#    - عند فشل تحديث الوقف المتحرك، يقوم البوت بالآتي:
-#      أ. يرسل تنبيهاً حرجاً فورياً.
-#      ب. يمسح أرقام الأوامر القديمة من قاعدة البيانات لمنع فقدان السيطرة.
-#      ج. يحاول "شفاء" الصفقة عبر إعادة وضع أوامر حماية جديدة من الصفر.
-#      د. يبلغك بنجاح أو فشل عملية الشفاء الذاتي.
-# 2. [تحسين الموثوقية] تمت إضافة معالجة أخطاء `OrderNotFound` لجميع عمليات إلغاء
-#    الأوامر في كل المنصات، مما يزيد من استقرار البوت.
-# 3. [تحسينات هيكلية] تم إنشاء دوال مساعدة صغيرة لتقليل تكرار الكود في عمليات
-#    تحديث قاعدة البيانات.
-# 4. [تحديث الإصدار] تم تحديث رقم الإصدار ليعكس هذه التحسينات الهامة في الموثوقية.
+# 1. [ميزة ضخمة] تمت إضافة دعم التداول الحقيقي الكامل للمنصات التالية:
+#    - OKX
+#    - Bybit
+#    - Gate.io (Gate)
+#    - MEXC
+# 2. [هيكلة متقدمة] تم إنشاء محولات تداول (Adapters) ذكية وموحدة:
+#    - `OcoAdapter`: للمنصات التي تدعم أوامر OCO (Binance, Bybit, Gate, OKX).
+#    - `DualOrderAdapter`: للمنصات التي تتطلب أمرين للخروج (KuCoin, MEXC).
+#    هذا يضمن أن البوت يتعامل مع كل منصة بالطريقة المثلى تلقائياً.
+# 3. [تكامل الإعدادات] تمت إضافة متغيرات البيئة (API Keys) لجميع المنصات الجديدة.
+# 4. [تحديث الواجهة] تم تحديث جميع قوائم تيليجرام (التداول اليدوي، التحكم بالتداول
+#    الحقيقي، عرض الرصيد، إلخ) لتشمل جميع المنصات الجديدة المدعومة.
+# 5. [تحسينات عامة] تم تحسين آلية الاتصال بالمنصات عند بدء التشغيل.
 #
 # =======================================================================================
 
@@ -62,11 +64,22 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', 'YOUR_CHAT_ID_HERE')
 TELEGRAM_SIGNAL_CHANNEL_ID = os.getenv('TELEGRAM_SIGNAL_CHANNEL_ID', TELEGRAM_CHAT_ID)
 ALPHA_VANTAGE_API_KEY = os.getenv('ALPHA_VANTAGE_API_KEY', 'YOUR_AV_KEY_HERE')
+
+# --- [v5.8] Add API Keys for all supported exchanges ---
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', 'YOUR_BINANCE_API_KEY')
 BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', 'YOUR_BINANCE_API_SECRET')
 KUCOIN_API_KEY = os.getenv('KUCOIN_API_KEY', 'YOUR_KUCOIN_API_KEY')
 KUCOIN_API_SECRET = os.getenv('KUCOIN_API_SECRET', 'YOUR_KUCOIN_API_SECRET')
 KUCOIN_API_PASSPHRASE = os.getenv('KUCOIN_API_PASSPHRASE', 'YOUR_KUCOIN_API_PASSPHRASE')
+GATE_API_KEY = os.getenv('GATE_API_KEY', 'YOUR_GATE_API_KEY')
+GATE_API_SECRET = os.getenv('GATE_API_SECRET', 'YOUR_GATE_API_SECRET')
+MEXC_API_KEY = os.getenv('MEXC_API_KEY', 'YOUR_MEXC_API_KEY')
+MEXC_API_SECRET = os.getenv('MEXC_API_SECRET', 'YOUR_MEXC_API_SECRET')
+OKX_API_KEY = os.getenv('OKX_API_KEY', 'YOUR_OKX_API_KEY')
+OKX_API_SECRET = os.getenv('OKX_API_SECRET', 'YOUR_OKX_API_SECRET')
+OKX_API_PASSPHRASE = os.getenv('OKX_API_PASSPHRASE', 'YOUR_OKX_PASSPHRASE')
+BYBIT_API_KEY = os.getenv('BYBIT_API_KEY', 'YOUR_BYBIT_API_KEY')
+BYBIT_API_SECRET = os.getenv('BYBIT_API_SECRET', 'YOUR_BYBIT_API_SECRET')
 
 # --- إعدادات البوت ---
 EXCHANGES_TO_SCAN = ['binance', 'okx', 'bybit', 'kucoin', 'gate', 'mexc']
@@ -88,7 +101,7 @@ logger = logging.getLogger("MinesweeperBot_v5")
 
 
 # =======================================================================================
-# --- 🚀 [v5.0] إعادة الهيكلة: إدارة الحالة والمنصات 🚀 ---
+# --- 🚀 [v5.8] إعادة هيكلة المحولات (Adapters) لدعم منصات متعددة 🚀 ---
 # =======================================================================================
 
 class BotState:
@@ -115,22 +128,33 @@ class ExchangeAdapter:
         self.exchange = exchange_client
 
     async def place_exit_orders(self, signal, verified_quantity):
-        raise NotImplementedError
+        raise NotImplementedError("يجب تعريف هذه الدالة في الكلاس الفرعي")
 
     async def update_trailing_stop_loss(self, trade, new_sl):
-        raise NotImplementedError
+        raise NotImplementedError("يجب تعريف هذه الدالة في الكلاس الفرعي")
 
-class BinanceAdapter(ExchangeAdapter):
-    """محول خاص بمنصة Binance، يستخدم أوامر OCO."""
+# --- [v5.8] Universal OCO Adapter ---
+class OcoAdapter(ExchangeAdapter):
+    """محول أساسي للمنصات التي تدعم أوامر OCO (مثل Binance, Bybit, Gate, OKX)."""
     async def place_exit_orders(self, signal, verified_quantity):
         symbol = signal['symbol']
         tp_price = self.exchange.price_to_precision(symbol, signal['take_profit'])
         sl_price = self.exchange.price_to_precision(symbol, signal['stop_loss'])
-        sl_trigger_price = self.exchange.price_to_precision(symbol, signal['stop_loss'])
         
-        logger.info(f"BinanceAdapter: Placing OCO for {symbol}. TP: {tp_price}, SL Trigger: {sl_trigger_price}")
-        oco_params = {'stopLimitPrice': sl_price}
-        oco_order = await self.exchange.create_order(symbol, 'oco', 'sell', verified_quantity, price=tp_price, stopPrice=sl_trigger_price, params=oco_params)
+        logger.info(f"{self.exchange.id} OCO: Placing for {symbol}. TP: {tp_price}, SL: {sl_price}")
+        # Note: CCXT unifies OCO orders. 'price' is the limit price (TP), 'stopPrice' is the trigger for the stop order (SL).
+        # Some exchanges might need stopLimitPrice in params if it's a stop-limit, but for a stop-market, this is often enough.
+        params = {'stopLimitPrice': sl_price} if self.exchange.id == 'binance' else {} # Binance needs this for stop-limit part of OCO
+        
+        oco_order = await self.exchange.create_order(
+            symbol=symbol,
+            type='oco',
+            side='sell',
+            amount=verified_quantity,
+            price=tp_price,
+            stopPrice=sl_price,
+            params=params
+        )
         return {"oco_id": oco_order['id']}
 
     async def update_trailing_stop_loss(self, trade, new_sl):
@@ -138,10 +162,9 @@ class BinanceAdapter(ExchangeAdapter):
         exit_ids = json.loads(trade.get('exit_order_ids_json', '{}'))
         oco_id_to_cancel = exit_ids.get('oco_id')
         if not oco_id_to_cancel:
-            raise ValueError("Binance trade is missing its OCO ID for TSL update.")
+            raise ValueError(f"{self.exchange.id} trade is missing its OCO ID for TSL update.")
 
-        logger.info(f"BinanceAdapter: Cancelling old OCO order {oco_id_to_cancel} for {symbol}.")
-        # [FIX v5.7] Add try-except for robustness
+        logger.info(f"{self.exchange.id} OCO: Cancelling old OCO order {oco_id_to_cancel} for {symbol}.")
         try:
             await self.exchange.cancel_order(oco_id_to_cancel, symbol)
         except ccxt.OrderNotFound:
@@ -151,28 +174,37 @@ class BinanceAdapter(ExchangeAdapter):
         quantity = trade['quantity']
         tp_price = self.exchange.price_to_precision(symbol, trade['take_profit'])
         sl_price = self.exchange.price_to_precision(symbol, new_sl)
-        sl_trigger_price = self.exchange.price_to_precision(symbol, new_sl)
         
-        logger.info(f"BinanceAdapter: Creating new OCO for {symbol} with new SL: {sl_price}")
-        oco_params = {'stopLimitPrice': sl_price}
-        new_oco_order = await self.exchange.create_order(symbol, 'oco', 'sell', quantity, price=tp_price, stopPrice=sl_trigger_price, params=oco_params)
+        logger.info(f"{self.exchange.id} OCO: Creating new OCO for {symbol} with new SL: {sl_price}")
+        params = {'stopLimitPrice': sl_price} if self.exchange.id == 'binance' else {}
+
+        new_oco_order = await self.exchange.create_order(
+            symbol=symbol,
+            type='oco',
+            side='sell',
+            amount=quantity,
+            price=tp_price,
+            stopPrice=sl_price,
+            params=params
+        )
         return {"oco_id": new_oco_order['id']}
 
-class KuCoinAdapter(ExchangeAdapter):
-    """محول خاص بمنصة KuCoin، يستخدم أمرين منفصلين."""
+# --- [v5.8] Universal Dual Order Adapter ---
+class DualOrderAdapter(ExchangeAdapter):
+    """محول أساسي للمنصات التي تتطلب أمرين منفصلين للخروج (مثل KuCoin, MEXC)."""
     async def place_exit_orders(self, signal, verified_quantity):
         symbol = signal['symbol']
         tp_price = self.exchange.price_to_precision(symbol, signal['take_profit'])
         sl_trigger_price = self.exchange.price_to_precision(symbol, signal['stop_loss'])
         
-        logger.info(f"KuCoinAdapter: Placing separate TP and SL orders for {symbol}.")
+        logger.info(f"{self.exchange.id} DualOrder: Placing separate TP and SL orders for {symbol}.")
         
         tp_order = await self.exchange.create_order(symbol, 'limit', 'sell', verified_quantity, price=tp_price)
-        logger.info(f"KuCoinAdapter: Take Profit order placed with ID: {tp_order['id']}")
+        logger.info(f"{self.exchange.id} DualOrder: Take Profit order placed with ID: {tp_order['id']}")
         
         sl_params = {'stopPrice': sl_trigger_price}
         sl_order = await self.exchange.create_order(symbol, 'market', 'sell', verified_quantity, params=sl_params)
-        logger.info(f"KuCoinAdapter: Stop Loss (Market) order placed with ID: {sl_order['id']}")
+        logger.info(f"{self.exchange.id} DualOrder: Stop Loss (Market) order placed with ID: {sl_order['id']}")
         
         return {"tp_id": tp_order['id'], "sl_id": sl_order['id']}
 
@@ -182,9 +214,9 @@ class KuCoinAdapter(ExchangeAdapter):
         tp_id_to_cancel = exit_ids.get('tp_id')
         sl_id_to_cancel = exit_ids.get('sl_id')
         if not tp_id_to_cancel or not sl_id_to_cancel:
-            raise ValueError("KuCoin trade is missing TP or SL order ID for TSL update.")
+            raise ValueError(f"{self.exchange.id} trade is missing TP or SL order ID for TSL update.")
 
-        logger.info(f"KuCoinAdapter: Cancelling old orders for {symbol}. TP_ID: {tp_id_to_cancel}, SL_ID: {sl_id_to_cancel}")
+        logger.info(f"{self.exchange.id} DualOrder: Cancelling old orders for {symbol}. TP_ID: {tp_id_to_cancel}, SL_ID: {sl_id_to_cancel}")
         try: await self.exchange.cancel_order(tp_id_to_cancel, symbol)
         except ccxt.OrderNotFound: logger.warning(f"TP order {tp_id_to_cancel} not found, likely already filled.")
         try: await self.exchange.cancel_order(sl_id_to_cancel, symbol)
@@ -195,7 +227,7 @@ class KuCoinAdapter(ExchangeAdapter):
         tp_price = self.exchange.price_to_precision(symbol, trade['take_profit'])
         sl_trigger_price = self.exchange.price_to_precision(symbol, new_sl)
 
-        logger.info(f"KuCoinAdapter: Creating new separate orders for {symbol} with new SL trigger: {sl_trigger_price}")
+        logger.info(f"{self.exchange.id} DualOrder: Creating new separate orders for {symbol} with new SL trigger: {sl_trigger_price}")
         new_tp_order = await self.exchange.create_order(symbol, 'limit', 'sell', quantity, price=tp_price)
         
         new_sl_params = {'stopPrice': sl_trigger_price}
@@ -203,17 +235,33 @@ class KuCoinAdapter(ExchangeAdapter):
         
         return {"tp_id": new_tp_order['id'], "sl_id": new_sl_order['id']}
 
+# --- [v5.8] Specific Adapter Implementations ---
+class BinanceAdapter(OcoAdapter): pass
+class BybitAdapter(OcoAdapter): pass
+class GateAdapter(OcoAdapter): pass
+class OKXAdapter(OcoAdapter): pass
+class KuCoinAdapter(DualOrderAdapter): pass
+class MEXCAdapter(DualOrderAdapter): pass
+
 def get_exchange_adapter(exchange_id: str):
     exchange_client = bot_state.exchanges.get(exchange_id.lower())
     if not exchange_client:
         return None
         
-    adapter_map = { 'binance': BinanceAdapter, 'kucoin': KuCoinAdapter }
+    adapter_map = {
+        'binance': BinanceAdapter,
+        'kucoin': KuCoinAdapter,
+        'okx': OKXAdapter,
+        'bybit': BybitAdapter,
+        'gate': GateAdapter,
+        'mexc': MEXCAdapter
+    }
     AdapterClass = adapter_map.get(exchange_id.lower())
+    
     if AdapterClass:
         return AdapterClass(exchange_client)
     
-    logger.warning(f"No specific adapter found for {exchange_id}.")
+    logger.warning(f"No specific adapter found for {exchange_id}, trade automation will be disabled for it.")
     return None
 
 # =======================================================================================
@@ -648,16 +696,25 @@ async def initialize_exchanges():
         except Exception as e:
             logger.error(f"Failed to connect PUBLIC client for {ex_id}: {e}")
 
+        # --- [v5.8] Unified private client connection logic ---
         params = {'enableRateLimit': True, 'options': {'defaultType': 'spot'}}
-        authenticated = False
-        if ex_id == 'binance' and BINANCE_API_KEY and BINANCE_API_KEY != 'YOUR_BINANCE_API_KEY':
-            params.update({'apiKey': BINANCE_API_KEY, 'secret': BINANCE_API_SECRET})
-            authenticated = True
-        if ex_id == 'kucoin' and KUCOIN_API_KEY and KUCOIN_API_KEY != 'YOUR_KUCOIN_API_KEY':
-            params.update({'apiKey': KUCOIN_API_KEY, 'secret': KUCOIN_API_SECRET, 'password': KUCOIN_API_PASSPHRASE})
-            authenticated = True
-
-        if authenticated:
+        credentials = {}
+        if ex_id == 'binance':
+            credentials = {'apiKey': BINANCE_API_KEY, 'secret': BINANCE_API_SECRET}
+        elif ex_id == 'kucoin':
+            credentials = {'apiKey': KUCOIN_API_KEY, 'secret': KUCOIN_API_SECRET, 'password': KUCOIN_API_PASSPHRASE}
+        elif ex_id == 'gate':
+            credentials = {'apiKey': GATE_API_KEY, 'secret': GATE_API_SECRET}
+        elif ex_id == 'mexc':
+            credentials = {'apiKey': MEXC_API_KEY, 'secret': MEXC_API_SECRET}
+        elif ex_id == 'okx':
+            credentials = {'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 'password': OKX_API_PASSPHRASE}
+        elif ex_id == 'bybit':
+            credentials = {'apiKey': BYBIT_API_KEY, 'secret': BYBIT_API_SECRET}
+        
+        # Check if credentials are provided and not default placeholders
+        if credentials.get('apiKey') and 'YOUR_' not in credentials['apiKey']:
+            params.update(credentials)
             try:
                 private_exchange = getattr(ccxt_async, ex_id)(params)
                 await private_exchange.load_markets()
@@ -1200,7 +1257,6 @@ async def handle_tsl_update(context, trade, new_sl, highest_price, is_activation
         await update_trade_sl_in_db(context, trade, new_sl, highest_price, is_activation=is_activation)
 
 
-# [MAJOR FEATURE v5.7] Self-Healing TSL Update Logic
 async def update_real_trade_sl(context, trade, new_sl, highest_price, is_activation=False):
     exchange_id = trade['exchange'].lower()
     symbol = trade['symbol']
@@ -1212,37 +1268,30 @@ async def update_real_trade_sl(context, trade, new_sl, highest_price, is_activat
         return
 
     try:
-        # --- 1. Primary Update Attempt ---
         new_exit_ids = await adapter.update_trailing_stop_loss(trade, new_sl)
         await update_trade_sl_in_db(context, trade, new_sl, highest_price, is_activation=is_activation, new_exit_ids_json=json.dumps(new_exit_ids))
         logger.info(f"SELF-HEALING TSL: Primary update for trade #{trade['id']} successful.")
 
     except Exception as e:
-        # --- 2. Failure Detected: Alert and Isolate ---
         logger.critical(f"SELF-HEALING TSL: CRITICAL FAILURE in primary update for trade #{trade['id']} ({symbol}): {e}", exc_info=True)
         await send_telegram_message(context.bot, {'custom_message': f"**🚨 فشل حرج في أتمتة الوقف المتحرك 🚨**\n\n**صفقة:** `#{trade['id']} {symbol}`\n**الخطأ:** `{e}`\n\n**⚠️ قد تكون الصفقة الآن بدون حماية! جارِ محاولة الشفاء الذاتي...**"})
         
-        # Invalidate old order IDs in DB to prevent a "ghost trade"
         await update_trade_order_ids_in_db(trade['id'], "{}")
         
-        # --- 3. Self-Healing Recovery Attempt ---
         try:
             logger.info(f"SELF-HEALING TSL: Starting recovery for trade #{trade['id']}.")
-            # Create a signal-like object for the recovery function
             recovery_signal = {
                 'symbol': trade['symbol'],
                 'take_profit': trade['take_profit'],
-                'stop_loss': new_sl # Use the new, higher stop loss for recovery
+                'stop_loss': new_sl
             }
             recovered_exit_ids = await adapter.place_exit_orders(recovery_signal, trade['quantity'])
             
-            # --- 4a. Recovery Successful ---
             await update_trade_sl_in_db(context, trade, new_sl, highest_price, is_activation=is_activation, new_exit_ids_json=json.dumps(recovered_exit_ids))
             logger.info(f"SELF-HEALING TSL: RECOVERY SUCCESSFUL for trade #{trade['id']}.")
             await send_telegram_message(context.bot, {'custom_message': f"**✅ تم التعافي بنجاح!**\n\n**صفقة:** `#{trade['id']} {symbol}`\n\nتم إعادة وضع أوامر الحماية بنجاح. الصفقة مؤمنة ومؤتمتة مجدداً."})
         
         except Exception as recovery_e:
-            # --- 4b. Recovery Failed ---
             logger.critical(f"SELF-HEALING TSL: RECOVERY FAILED for trade #{trade['id']}: {recovery_e}", exc_info=True)
             await send_telegram_message(context.bot, {'custom_message': f"**🚨 فشل الشفاء الذاتي! 🚨**\n\n**صفقة:** `#{trade['id']} {symbol}`\n**خطأ التعافي:** `{recovery_e}`\n\n**لم أتمكن من إعادة تأمين الصفقة. التدخل اليدوي الفوري ضروري الآن!**"})
 
@@ -1290,7 +1339,6 @@ async def close_trade_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict, exi
 
     await send_telegram_message(context.bot, {'custom_message': message, 'target_chat': TELEGRAM_SIGNAL_CHANNEL_ID})
 
-# [HELPER v5.7] Helper function to update only order IDs
 async def update_trade_order_ids_in_db(trade_id: int, new_exit_ids_json: str):
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10)
@@ -1431,7 +1479,7 @@ settings_menu_keyboard = [
 ]
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 5.7 - آلية الشفاء الذاتي)*\n\nاختر من القائمة للبدء."
+    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 5.8 - دعم منصات متعددة)*\n\nاختر من القائمة للبدء."
     await update.message.reply_text(welcome_message, reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2042,6 +2090,22 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         elif action == "decline":
             await query.edit_message_text("👍 **تم تجاهل الاقتراح.**\n\nسيستمر البوت بالعمل على الإعدادات الحالية.", parse_mode=ParseMode.MARKDOWN)
 
+# [v5.8] Helper function to generate exchange selection keyboard
+def get_exchange_selection_keyboard(callback_prefix: str):
+    """Generates a keyboard with buttons for all connected private exchanges."""
+    keyboard = []
+    # Create rows of 2 buttons each
+    connected_exchanges = list(bot_state.exchanges.keys())
+    for i in range(0, len(connected_exchanges), 2):
+        row = [
+            InlineKeyboardButton(ex.capitalize(), callback_data=f"{callback_prefix}_exchange_{ex}")
+            for ex in connected_exchanges[i:i+2]
+        ]
+        keyboard.append(row)
+    
+    keyboard.append([InlineKeyboardButton("❌ إلغاء", callback_data=f"{callback_prefix}_cancel")])
+    return InlineKeyboardMarkup(keyboard)
+
 async def manual_trade_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); data = query.data
     user_data = context.user_data
@@ -2206,44 +2270,27 @@ async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 async def manual_trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['manual_trade'] = {'state': 'awaiting_exchange'}
-    keyboard = [
-        [InlineKeyboardButton("Binance", callback_data="manual_trade_exchange_binance"),
-         InlineKeyboardButton("KuCoin", callback_data="manual_trade_exchange_kucoin")],
-        [InlineKeyboardButton("❌ إلغاء", callback_data="manual_trade_cancel")]
-    ]
-
+    keyboard = get_exchange_selection_keyboard("manual_trade")
     message_text = "✍️ **بدء تداول يدوي**\n\nاختر المنصة التي تريد تنفيذ الأمر عليها:"
     if update.callback_query:
-        await update.callback_query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.callback_query.edit_message_text(message_text, reply_markup=keyboard)
     else:
-        await update.message.reply_text(message_text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(message_text, reply_markup=keyboard)
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['balance_tool'] = {'state': 'awaiting_exchange'}
-    keyboard = [
-        [InlineKeyboardButton("Binance", callback_data="balance_exchange_binance"),
-         InlineKeyboardButton("KuCoin", callback_data="balance_exchange_kucoin")],
-        [InlineKeyboardButton("🔙 العودة للأدوات", callback_data="dashboard_tools")]
-    ]
-    await update.callback_query.edit_message_text("💰 **عرض الرصيد**\n\nاختر المنصة لعرض أرصدتك:", reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard = get_exchange_selection_keyboard("balance")
+    await update.callback_query.edit_message_text("💰 **عرض الرصيد**\n\nاختر المنصة لعرض أرصدتك:", reply_markup=keyboard)
 
 async def open_orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['openorders_tool'] = {'state': 'awaiting_exchange'}
-    keyboard = [
-        [InlineKeyboardButton("Binance", callback_data="openorders_exchange_binance"),
-         InlineKeyboardButton("KuCoin", callback_data="openorders_exchange_kucoin")],
-        [InlineKeyboardButton("🔙 العودة للأدوات", callback_data="dashboard_tools")]
-    ]
-    await update.callback_query.edit_message_text("📖 **أوامري المفتوحة**\n\nاختر المنصة:", reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard = get_exchange_selection_keyboard("openorders")
+    await update.callback_query.edit_message_text("📖 **أوامري المفتوحة**\n\nاختر المنصة:", reply_markup=keyboard)
 
 async def my_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['mytrades_tool'] = {'state': 'awaiting_exchange'}
-    keyboard = [
-        [InlineKeyboardButton("Binance", callback_data="mytrades_exchange_binance"),
-         InlineKeyboardButton("KuCoin", callback_data="mytrades_exchange_kucoin")],
-        [InlineKeyboardButton("🔙 العودة للأدوات", callback_data="dashboard_tools")]
-    ]
-    await update.callback_query.edit_message_text("📜 **سجل تداولاتي**\n\nاختر المنصة:", reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard = get_exchange_selection_keyboard("mytrades")
+    await update.callback_query.edit_message_text("📜 **سجل تداولاتي**\n\nاختر المنصة:", reply_markup=keyboard)
 
 async def fetch_and_display_balance(exchange_id, query):
     exchange = bot_state.exchanges.get(exchange_id.lower())
@@ -2572,7 +2619,7 @@ async def post_init(application: Application):
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
 
     logger.info("Jobs scheduled.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v5.7) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v5.8) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
 
 async def post_shutdown(application: Application):
     all_exchanges = list(bot_state.exchanges.values()) + list(bot_state.public_exchanges.values())
@@ -2609,7 +2656,7 @@ def main():
 
 
 if __name__ == '__main__':
-    print("🚀 Starting Mineseper Bot v5.7 (Self-Healing Version)...")
+    print("🚀 Starting Mineseper Bot v5.8 (Multi-Exchange Support)...")
     try:
         main()
     except Exception as e:
