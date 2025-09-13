@@ -704,7 +704,18 @@ async def aggregate_top_movers():
     min_volume = settings['liquidity_filters']['min_quote_volume_24h_usd']
     usdt_tickers = [t for t in all_tickers if t.get('symbol') and t['symbol'].upper().endswith('/USDT') and t['symbol'].split('/')[0] not in excluded_bases and t.get('quoteVolume', 0) and t['quoteVolume'] >= min_volume and not any(k in t['symbol'].upper() for k in ['UP','DOWN','3L','3S','BEAR','BULL'])]
     sorted_tickers = sorted(usdt_tickers, key=lambda t: t.get('quoteVolume', 0), reverse=True)
-    unique_symbols = {t['symbol']: {'exchange': t['exchange'], 'symbol': t['symbol']} for t in sorted_tickers}
+    
+    # -------------------  التعديل هنا -------------------
+    # --- احذف أو علّق السطر القديم ---
+    # unique_symbols = {t['symbol']: {'exchange': t['exchange'], 'symbol': t['symbol']} for t in sorted_tickers}
+    
+    # +++ أضف هذا المنطق الجديد +++
+    unique_symbols = {}
+    for t in sorted_tickers:
+        if t['symbol'] not in unique_symbols:
+            unique_symbols[t['symbol']] = {'exchange': t['exchange'], 'symbol': t['symbol']}
+    # ----------------- نهاية التعديل -----------------
+
     final_list = list(unique_symbols.values())[:settings['top_n_symbols_by_volume']]
     logger.info(f"Aggregated markets. Found {len(all_tickers)} tickers -> Post-filter: {len(usdt_tickers)} -> Selected top {len(final_list)} unique pairs.")
     bot_state.status_snapshot['markets_found'] = len(final_list)
@@ -2676,3 +2687,4 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
+
