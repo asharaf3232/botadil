@@ -431,10 +431,44 @@ def log_recommendation_to_db(signal):
         cursor = conn.cursor()
         sql = '''INSERT INTO trades (timestamp, exchange, symbol, entry_price, take_profit, stop_loss, quantity, entry_value_usdt, status, trailing_sl_active, highest_price, reason, trade_mode, entry_order_id, exit_order_ids_json)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'''
-        
+
         if 'quantity' not in signal or signal['quantity'] is None:
             logger.error(f"Attempted to log trade for {signal['symbol']} with missing quantity.")
             return None
+
+        # --- START OF FIX ---
+        # 1. Get the timestamp object (either from signal or the current time)
+        timestamp_obj = signal.get('timestamp', datetime.now(EGYPT_TZ))
+
+        # 2. Convert the timestamp object to a string in the correct format
+        timestamp_str = timestamp_obj.strftime('%Y-%m-%d %H:%M:%S')
+        # --- END OF FIX ---
+
+        params = (
+            timestamp_str, # Use the guaranteed string variable here
+            signal['exchange'],
+            signal['symbol'],
+            signal.get('entry_price'),
+            signal.get('take_profit'),
+            signal.get('stop_loss'),
+            signal.get('quantity'),
+            signal.get('entry_value_usdt'),  
+            'نشطة',
+            False,
+            signal.get('entry_price'),
+            signal['reason'],
+            'real' if signal.get('is_real_trade') else 'virtual',
+            signal.get('entry_order_id'),
+            signal.get('exit_order_ids_json')
+        )
+        cursor.execute(sql, params)
+        trade_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return trade_id
+    except Exception as e:
+        logger.error(f"Failed to log recommendation to DB: {e}", exc_info=True)
+        return None
 
         params = (
             signal.get('timestamp', datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')),
@@ -3122,6 +3156,7 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
+
 
 
 
