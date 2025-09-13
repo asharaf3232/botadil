@@ -743,9 +743,6 @@ async def _reconstruct_and_save_trade(exchange, symbol: str, context: ContextTyp
         logger.error(f"Error during trade reconstruction for {symbol}: {e}", exc_info=True)
         return f"❌ حدث خطأ فادح أثناء محاولة استيراد `{symbol}`: {e}"
 
-
-}
-
 # =======================================================================================
 # --- Core Bot Logic ---
 # =======================================================================================
@@ -3126,5 +3123,6 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
+
 
 
