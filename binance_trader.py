@@ -742,12 +742,14 @@ async def _reconstruct_and_save_trade(exchange, symbol: str, context: ContextTyp
             logger.warning(f"Could not fetch ATR for rescued trade {symbol}: {e}")
 
         if settings.get("use_dynamic_risk_management", False) and current_atr > 0:
-            risk_per_unit = current_atr * settings['atr_sl_multiplier']
+            # Give rescued trades a wider initial berth to avoid instant SL triggers
+            RESCUE_SL_MULTIPLIER = 1.5 
+            risk_per_unit = (current_atr * settings['atr_sl_multiplier']) * RESCUE_SL_MULTIPLIER
             stop_loss = avg_price - risk_per_unit
             take_profit = avg_price + (risk_per_unit * settings['risk_reward_ratio'])
         else: # Fallback to percentage if ATR fails
-            sl_percent = 2.0
-            tp_percent = 4.0
+            sl_percent = 7.0  # Increased significantly to 7%
+            tp_percent = 14.0 # Keep R:R ratio
             stop_loss = avg_price * (1 - sl_percent / 100)
             take_profit = avg_price * (1 + tp_percent / 100)
 
@@ -2587,7 +2589,8 @@ async def fetch_and_display_my_trades(exchange_id, symbol, message):
         await message.reply_text(f"❌ فشل جلب سجل تداولاتك. تأكد من صحة الرمز: `{symbol or ''}`.")
 
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None: logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None: 
+    logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
 
 async def calculate_full_portfolio(exchange):
     """Calculates the total portfolio value and provides a detailed asset breakdown."""
@@ -2888,7 +2891,4 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
-
-
-
 
