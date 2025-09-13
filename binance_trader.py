@@ -1,21 +1,20 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v5.6 (نسخة مُصححة ومستقرة) 💣 ---
+# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v5.7 (آلية الشفاء الذاتي) 💣 ---
 # =======================================================================================
-# --- سجل التغييرات v5.6 ---
+# --- سجل التغييرات v5.7 ---
 #
-# 1. [إصلاح حاسم] تم حل مشكلة "Invalid order type" في منصة KuCoin بشكل نهائي عبر استخدام
-#    النوع الصحيح لأمر وقف الخسارة (stop market).
-# 2. [إصلاح قاعدة البيانات] تم إصلاح خطأ "'sqlite3.Row' object has no attribute 'get'"
-#    الذي كان يمنع إنشاء تقرير المخاطر.
-# 3. [إصلاح منطقي] تم حل مشكلة "Failed to log recommendation to DB: 'quantity'"
-#    عبر التأكد من حساب الكمية قبل محاولة تنفيذ الصفقة الحقيقية.
-# 4. [إعادة بناء] تم إعادة كتابة دالة `generate_performance_report_string` المفقودة بالكامل،
-#    لذا أصبح تقرير أداء الاستراتيجيات يعمل الآن.
-# 5. [توحيد] تم توحيد منطق حساب قيمة المحفظة لحل التضارب بين تقرير الإحصائيات
-#    ولقطة المحفظة.
-# 6. [تحسين] تحسينات عامة في معالجة الأخطاء وزيادة استقرار البوت.
-# 7. [تحسين] تحديث أرقام الإصدارات لتكون متطابقة.
+# 1. [ميزة حاسمة] تطبيق آلية "الشفاء الذاتي" (Self-Healing) لمنع "الصفقات الشبحية".
+#    - عند فشل تحديث الوقف المتحرك، يقوم البوت بالآتي:
+#      أ. يرسل تنبيهاً حرجاً فورياً.
+#      ب. يمسح أرقام الأوامر القديمة من قاعدة البيانات لمنع فقدان السيطرة.
+#      ج. يحاول "شفاء" الصفقة عبر إعادة وضع أوامر حماية جديدة من الصفر.
+#      د. يبلغك بنجاح أو فشل عملية الشفاء الذاتي.
+# 2. [تحسين الموثوقية] تمت إضافة معالجة أخطاء `OrderNotFound` لجميع عمليات إلغاء
+#    الأوامر في كل المنصات، مما يزيد من استقرار البوت.
+# 3. [تحسينات هيكلية] تم إنشاء دوال مساعدة صغيرة لتقليل تكرار الكود في عمليات
+#    تحديث قاعدة البيانات.
+# 4. [تحديث الإصدار] تم تحديث رقم الإصدار ليعكس هذه التحسينات الهامة في الموثوقية.
 #
 # =======================================================================================
 
@@ -131,7 +130,6 @@ class BinanceAdapter(ExchangeAdapter):
         
         logger.info(f"BinanceAdapter: Placing OCO for {symbol}. TP: {tp_price}, SL Trigger: {sl_trigger_price}")
         oco_params = {'stopLimitPrice': sl_price}
-        # In CCXT, for OCO 'sell' orders, 'price' is the take-profit price and 'stopPrice' is the stop-loss trigger.
         oco_order = await self.exchange.create_order(symbol, 'oco', 'sell', verified_quantity, price=tp_price, stopPrice=sl_trigger_price, params=oco_params)
         return {"oco_id": oco_order['id']}
 
@@ -143,7 +141,11 @@ class BinanceAdapter(ExchangeAdapter):
             raise ValueError("Binance trade is missing its OCO ID for TSL update.")
 
         logger.info(f"BinanceAdapter: Cancelling old OCO order {oco_id_to_cancel} for {symbol}.")
-        await self.exchange.cancel_order(oco_id_to_cancel, symbol)
+        # [FIX v5.7] Add try-except for robustness
+        try:
+            await self.exchange.cancel_order(oco_id_to_cancel, symbol)
+        except ccxt.OrderNotFound:
+            logger.warning(f"OCO order {oco_id_to_cancel} not found, likely already filled/cancelled.")
         await asyncio.sleep(2)
 
         quantity = trade['quantity']
@@ -168,7 +170,6 @@ class KuCoinAdapter(ExchangeAdapter):
         tp_order = await self.exchange.create_order(symbol, 'limit', 'sell', verified_quantity, price=tp_price)
         logger.info(f"KuCoinAdapter: Take Profit order placed with ID: {tp_order['id']}")
         
-        # [FIX v5.6] Use a stop-market order for stop-loss on KuCoin for reliability.
         sl_params = {'stopPrice': sl_trigger_price}
         sl_order = await self.exchange.create_order(symbol, 'market', 'sell', verified_quantity, params=sl_params)
         logger.info(f"KuCoinAdapter: Stop Loss (Market) order placed with ID: {sl_order['id']}")
@@ -184,7 +185,6 @@ class KuCoinAdapter(ExchangeAdapter):
             raise ValueError("KuCoin trade is missing TP or SL order ID for TSL update.")
 
         logger.info(f"KuCoinAdapter: Cancelling old orders for {symbol}. TP_ID: {tp_id_to_cancel}, SL_ID: {sl_id_to_cancel}")
-        # Use try-except blocks to avoid crashing if one order is already filled/cancelled
         try: await self.exchange.cancel_order(tp_id_to_cancel, symbol)
         except ccxt.OrderNotFound: logger.warning(f"TP order {tp_id_to_cancel} not found, likely already filled.")
         try: await self.exchange.cancel_order(sl_id_to_cancel, symbol)
@@ -198,7 +198,6 @@ class KuCoinAdapter(ExchangeAdapter):
         logger.info(f"KuCoinAdapter: Creating new separate orders for {symbol} with new SL trigger: {sl_trigger_price}")
         new_tp_order = await self.exchange.create_order(symbol, 'limit', 'sell', quantity, price=tp_price)
         
-        # [FIX v5.6] Use a stop-market order for the new stop-loss.
         new_sl_params = {'stopPrice': sl_trigger_price}
         new_sl_order = await self.exchange.create_order(symbol, 'market', 'sell', quantity, params=new_sl_params)
         
@@ -408,7 +407,6 @@ def log_recommendation_to_db(signal):
         sql = '''INSERT INTO trades (timestamp, exchange, symbol, entry_price, take_profit, stop_loss, quantity, entry_value_usdt, status, trailing_sl_active, highest_price, reason, trade_mode, entry_order_id, exit_order_ids_json)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'''
         
-        # [FIX v5.6] Ensure 'quantity' exists before logging
         if 'quantity' not in signal or signal['quantity'] is None:
             logger.error(f"Attempted to log trade for {signal['symbol']} with missing quantity.")
             return None
@@ -858,7 +856,6 @@ async def place_real_trade(signal):
         if usdt_balance < trade_amount_usdt:
             return {'success': False, 'data': f"رصيدك الحالي ${usdt_balance:.2f} غير كافٍ لفتح صفقة بقيمة ${trade_amount_usdt:.2f}."}
         
-        # [FIX v5.6] Update signal dict with quantity info before placing the trade
         quantity = trade_amount_usdt / signal['entry_price']
         formatted_quantity = exchange.amount_to_precision(symbol, quantity)
         signal.update({
@@ -1203,10 +1200,11 @@ async def handle_tsl_update(context, trade, new_sl, highest_price, is_activation
         await update_trade_sl_in_db(context, trade, new_sl, highest_price, is_activation=is_activation)
 
 
+# [MAJOR FEATURE v5.7] Self-Healing TSL Update Logic
 async def update_real_trade_sl(context, trade, new_sl, highest_price, is_activation=False):
     exchange_id = trade['exchange'].lower()
     symbol = trade['symbol']
-    logger.info(f"AUTOMATING TSL UPDATE for real trade #{trade['id']} ({symbol}). New SL: {new_sl}")
+    logger.info(f"SELF-HEALING TSL: Attempting update for real trade #{trade['id']} ({symbol}). New SL: {new_sl}")
     
     adapter = get_exchange_adapter(exchange_id)
     if not adapter:
@@ -1214,12 +1212,39 @@ async def update_real_trade_sl(context, trade, new_sl, highest_price, is_activat
         return
 
     try:
+        # --- 1. Primary Update Attempt ---
         new_exit_ids = await adapter.update_trailing_stop_loss(trade, new_sl)
         await update_trade_sl_in_db(context, trade, new_sl, highest_price, is_activation=is_activation, new_exit_ids_json=json.dumps(new_exit_ids))
+        logger.info(f"SELF-HEALING TSL: Primary update for trade #{trade['id']} successful.")
 
     except Exception as e:
-        logger.critical(f"CRITICAL FAILURE in automated TSL for trade #{trade['id']} ({symbol}): {e}", exc_info=True)
-        await send_telegram_message(context.bot, {'custom_message': f"**🚨 فشل حرج في أتمتة الوقف المتحرك 🚨**\n\n**صفقة:** `#{trade['id']} {symbol}`\n**الخطأ:** `{e}`\n\n**قد تكون الصفقة الآن بدون حماية! يرجى المتابعة اليدوية فوراً!**"})
+        # --- 2. Failure Detected: Alert and Isolate ---
+        logger.critical(f"SELF-HEALING TSL: CRITICAL FAILURE in primary update for trade #{trade['id']} ({symbol}): {e}", exc_info=True)
+        await send_telegram_message(context.bot, {'custom_message': f"**🚨 فشل حرج في أتمتة الوقف المتحرك 🚨**\n\n**صفقة:** `#{trade['id']} {symbol}`\n**الخطأ:** `{e}`\n\n**⚠️ قد تكون الصفقة الآن بدون حماية! جارِ محاولة الشفاء الذاتي...**"})
+        
+        # Invalidate old order IDs in DB to prevent a "ghost trade"
+        await update_trade_order_ids_in_db(trade['id'], "{}")
+        
+        # --- 3. Self-Healing Recovery Attempt ---
+        try:
+            logger.info(f"SELF-HEALING TSL: Starting recovery for trade #{trade['id']}.")
+            # Create a signal-like object for the recovery function
+            recovery_signal = {
+                'symbol': trade['symbol'],
+                'take_profit': trade['take_profit'],
+                'stop_loss': new_sl # Use the new, higher stop loss for recovery
+            }
+            recovered_exit_ids = await adapter.place_exit_orders(recovery_signal, trade['quantity'])
+            
+            # --- 4a. Recovery Successful ---
+            await update_trade_sl_in_db(context, trade, new_sl, highest_price, is_activation=is_activation, new_exit_ids_json=json.dumps(recovered_exit_ids))
+            logger.info(f"SELF-HEALING TSL: RECOVERY SUCCESSFUL for trade #{trade['id']}.")
+            await send_telegram_message(context.bot, {'custom_message': f"**✅ تم التعافي بنجاح!**\n\n**صفقة:** `#{trade['id']} {symbol}`\n\nتم إعادة وضع أوامر الحماية بنجاح. الصفقة مؤمنة ومؤتمتة مجدداً."})
+        
+        except Exception as recovery_e:
+            # --- 4b. Recovery Failed ---
+            logger.critical(f"SELF-HEALING TSL: RECOVERY FAILED for trade #{trade['id']}: {recovery_e}", exc_info=True)
+            await send_telegram_message(context.bot, {'custom_message': f"**🚨 فشل الشفاء الذاتي! 🚨**\n\n**صفقة:** `#{trade['id']} {symbol}`\n**خطأ التعافي:** `{recovery_e}`\n\n**لم أتمكن من إعادة تأمين الصفقة. التدخل اليدوي الفوري ضروري الآن!**"})
 
 
 async def close_trade_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict, exit_price: float, status: str):
@@ -1265,6 +1290,18 @@ async def close_trade_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict, exi
 
     await send_telegram_message(context.bot, {'custom_message': message, 'target_chat': TELEGRAM_SIGNAL_CHANNEL_ID})
 
+# [HELPER v5.7] Helper function to update only order IDs
+async def update_trade_order_ids_in_db(trade_id: int, new_exit_ids_json: str):
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE trades SET exit_order_ids_json=? WHERE id=?", (new_exit_ids_json, trade_id))
+        conn.commit()
+        conn.close()
+        logger.info(f"Updated order IDs for trade #{trade_id} to: {new_exit_ids_json}")
+    except Exception as e:
+        logger.error(f"Failed to update order IDs for trade #{trade_id} in DB: {e}")
+
 async def update_trade_sl_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict, new_sl: float, highest_price: float, is_activation: bool = False, silent: bool = False, new_exit_ids_json: str = None):
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10)
@@ -1273,7 +1310,7 @@ async def update_trade_sl_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict,
         sql = "UPDATE trades SET stop_loss=?, highest_price=?, trailing_sl_active=? "
         params = [new_sl, highest_price, True]
         
-        if new_exit_ids_json:
+        if new_exit_ids_json is not None:
             sql += ", exit_order_ids_json=? "
             params.append(new_exit_ids_json)
 
@@ -1285,7 +1322,7 @@ async def update_trade_sl_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict,
         conn.close()
         
         log_msg = f"Trailing SL {'activated' if is_activation else 'updated'} for trade #{trade['id']}. New SL: {new_sl}"
-        if new_exit_ids_json:
+        if new_exit_ids_json is not None:
             log_msg += f", New Exit IDs: {new_exit_ids_json}"
         logger.info(log_msg)
 
@@ -1394,7 +1431,7 @@ settings_menu_keyboard = [
 ]
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 5.6 - نسخة مستقرة)*\n\nاختر من القائمة للبدء."
+    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 5.7 - آلية الشفاء الذاتي)*\n\nاختر من القائمة للبدء."
     await update.message.reply_text(welcome_message, reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1548,7 +1585,6 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trad
         logger.error(f"Error in stats_command: {e}", exc_info=True)
         return "خطأ في جلب الإحصائيات.", None
 
-# [FIX v5.6] Re-implemented the missing strategy report function
 def generate_performance_report_string(trade_mode_filter='all'):
     """Generates a detailed performance report string for each strategy."""
     try:
@@ -1572,7 +1608,6 @@ def generate_performance_report_string(trade_mode_filter='all'):
         strategy_stats = defaultdict(lambda: {'wins': 0, 'losses': 0, 'total_pnl': 0.0})
 
         for trade in trades:
-            # Handle combined reasons like "momentum_breakout + whale_radar"
             reasons = [r.strip() for r in trade['reason'].split('+')]
             for reason in reasons:
                 stats = strategy_stats[reason]
@@ -1581,7 +1616,6 @@ def generate_performance_report_string(trade_mode_filter='all'):
                 elif trade['status'] == 'فاشلة':
                     stats['losses'] += 1
                 
-                # Divide PNL among contributing strategies
                 if trade['pnl_usdt'] is not None:
                     stats['total_pnl'] += trade['pnl_usdt'] / len(reasons)
         
@@ -2300,7 +2334,6 @@ async def fetch_and_display_my_trades(exchange_id, symbol, message):
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None: logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
 
-# [FIX v5.6] Unified portfolio calculation function
 async def calculate_full_portfolio(exchange):
     """Calculates the total portfolio value and provides a detailed asset breakdown."""
     if not exchange or not exchange.apiKey:
@@ -2310,7 +2343,6 @@ async def calculate_full_portfolio(exchange):
         balance = await exchange.fetch_balance()
         all_assets = balance.get('total', {})
         
-        # Simple caching for tickers to avoid re-fetching in the same process loop
         if not hasattr(exchange, '_tickers_cache') or (time.time() - getattr(exchange, '_tickers_cache_time', 0) > 60):
              exchange._tickers_cache = await exchange.fetch_tickers()
              exchange._tickers_cache_time = time.time()
@@ -2326,7 +2358,7 @@ async def calculate_full_portfolio(exchange):
                 elif f"{currency}/USDT" in tickers and tickers[f"{currency}/USDT"].get('last'):
                     usdt_value = amount * tickers[f"{currency}/USDT"]['last']
                 
-                if usdt_value > 1.0: # Consistent threshold of $1
+                if usdt_value > 1.0:
                     portfolio_assets.append({'currency': currency, 'amount': amount, 'usdt_value': usdt_value})
                     total_usdt_value += usdt_value
         
@@ -2381,13 +2413,12 @@ async def process_portfolio_snapshot(update: Update, context: ContextTypes.DEFAU
         portfolio_assets = portfolio_data.get('assets', [])
         total_usdt_value = portfolio_data.get('total_usdt', 0)
         
-        all_recent_trades = []
-        # Fetch trades only for assets currently held
         symbols_to_fetch = [f"{asset['currency']}/USDT" for asset in portfolio_assets if f"{asset['currency']}/USDT" in exchange.markets]
         
         trade_tasks = [exchange.fetch_my_trades(symbol=symbol, limit=5) for symbol in symbols_to_fetch]
         trade_results = await asyncio.gather(*trade_tasks, return_exceptions=True)
 
+        all_recent_trades = []
         for result in trade_results:
             if not isinstance(result, Exception):
                 all_recent_trades.extend(result)
@@ -2406,7 +2437,7 @@ async def process_portfolio_snapshot(update: Update, context: ContextTypes.DEFAU
         if not recent_trades:
             parts.append("لا يوجد سجل تداولات حديث.")
         else:
-            for trade in recent_trades: # Already sorted, no need to reverse
+            for trade in recent_trades:
                 side_emoji = "🟢" if trade['side'] == 'buy' else "🔴"
                 parts.append(f"`{trade['symbol']}` {side_emoji} `{trade['side'].upper()}` | الكمية: `{trade['amount']}` | السعر: `{trade['price']}`")
         
@@ -2424,7 +2455,6 @@ async def risk_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         conn = sqlite3.connect(DB_FILE, timeout=10)
         conn.row_factory = sqlite3.Row
         
-        # [FIX v5.6] Convert rows to dicts immediately to avoid attribute errors
         real_trades = [dict(row) for row in conn.cursor().execute("SELECT * FROM trades WHERE status = 'نشطة' AND trade_mode = 'real'").fetchall()]
         virtual_trades = [dict(row) for row in conn.cursor().execute("SELECT * FROM trades WHERE status = 'نشطة' AND trade_mode = 'virtual'").fetchall()]
         conn.close()
@@ -2435,7 +2465,6 @@ async def risk_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             if not trades:
                 return [f"\n--- **{title}** ---\n✅ لا توجد صفقات نشطة حالياً."]
             
-            # [FIX v5.6] Access dict keys directly now
             valid_trades = [t for t in trades if all(k in t and t[k] is not None for k in ['entry_value_usdt', 'entry_price', 'stop_loss', 'quantity'])]
             
             total_at_risk = sum(t['entry_value_usdt'] for t in valid_trades)
@@ -2543,7 +2572,7 @@ async def post_init(application: Application):
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
 
     logger.info("Jobs scheduled.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v5.6) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v5.7) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
 
 async def post_shutdown(application: Application):
     all_exchanges = list(bot_state.exchanges.values()) + list(bot_state.public_exchanges.values())
@@ -2580,7 +2609,7 @@ def main():
 
 
 if __name__ == '__main__':
-    print("🚀 Starting Mineseper Bot v5.6 (Stable & Patched Version)...")
+    print("🚀 Starting Mineseper Bot v5.7 (Self-Healing Version)...")
     try:
         main()
     except Exception as e:
