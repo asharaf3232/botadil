@@ -1437,37 +1437,39 @@ async def update_real_trade_sl(context, trade, new_sl, highest_price, is_activat
         logger.error(f"Cannot automate TSL for {symbol}: No adapter for {exchange_id}.")
         return
 
-    # --- START OF FIX ---
-    # Check if this is the first TSL activation for a rescued/imported trade
-    # A rescued trade has no exit orders logged yet.
+    # --- START OF FINAL FIX ---
+    # This logic now handles rescued trades by first clearing any existing manual orders.
     is_first_tsl_for_rescued = trade.get('entry_order_id') == 'imported' and trade.get('exit_order_ids_json', '{}') in ['{}', 'null']
 
     try:
+        # For rescued trades activating TSL for the first time, we must assume manual orders might exist.
         if is_first_tsl_for_rescued:
-            logger.info(f"TSL ACTIVATION (RESCUED): Placing initial exit orders for trade #{trade['id']} ({symbol}) with SL: {new_sl}")
-            # Create a minimal signal object needed for placing orders
+            logger.info(f"TSL (RESCUED): First activation for #{trade['id']}. Clearing any existing orders for {symbol} before proceeding.")
+            try:
+                open_orders = await adapter.exchange.fetch_open_orders(symbol)
+                if open_orders:
+                    logger.warning(f"Found {len(open_orders)} existing open orders for {symbol}. Cancelling them now.")
+                    await adapter.exchange.cancel_all_orders(symbol)
+                    await asyncio.sleep(2) # Give exchange time to process cancellations
+            except Exception as e:
+                logger.error(f"Failed to cancel existing orders for rescued trade #{trade['id']}: {e}")
+                # We proceed anyway, as the balance might still be free.
+
+            logger.info(f"TSL (RESCUED): Placing initial exit orders for trade #{trade['id']} with SL: {new_sl}")
             placement_signal = {
-                'symbol': trade['symbol'],
-                'take_profit': trade['take_profit'],
-                'stop_loss': new_sl, # Use the new calculated SL
+                'symbol': trade['symbol'], 'take_profit': trade['take_profit'], 'stop_loss': new_sl
             }
             new_exit_ids = await adapter.place_exit_orders(placement_signal, trade['quantity'])
         else:
-            # This is a normal TSL update for a trade the bot opened itself
-            logger.info(f"TSL UPDATE: Attempting update for real trade #{trade['id']} ({symbol}). New SL: {new_sl}")
+            # This is a normal TSL update for a regular trade.
+            logger.info(f"TSL UPDATE: Attempting update for regular trade #{trade['id']} ({symbol}). New SL: {new_sl}")
             new_exit_ids = await adapter.update_trailing_stop_loss(trade, new_sl)
 
-        # Update the database with the new SL and the new order IDs
         await update_trade_sl_in_db(context, trade, new_sl, highest_price, is_activation=is_activation, new_exit_ids_json=json.dumps(new_exit_ids))
         logger.info(f"TSL automation successful for trade #{trade['id']}.")
-        
-        # Send a confirmation message to the user, especially on first activation
-        if is_activation:
-             await send_telegram_message(context.bot, {**trade, "new_sl": new_sl}, update_type='tsl_activation')
 
     except Exception as e:
         logger.critical(f"TSL AUTOMATION: CRITICAL FAILURE for trade #{trade['id']} ({symbol}): {e}", exc_info=True)
-        # The self-healing logic was problematic, so we now send a clearer error message for manual intervention.
         await send_telegram_message(context.bot, {'custom_message': f"**🚨 فشل حرج في أتمتة الوقف المتحرك 🚨**\n\n**صفقة:** `#{trade['id']} {symbol}`\n**الخطأ:** `{e}`\n\n**لم أتمكن من تأمين الصفقة تلقائياً. التدخل اليدوي الفوري ضروري الآن!**"})
     pnl_usdt = (exit_price - trade['entry_price']) * trade['quantity']
     
@@ -2891,5 +2893,6 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
+
 
 
