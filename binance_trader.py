@@ -1,18 +1,19 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v6.1 (الذكاء والأولوية) 💣 ---
+# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v6.2 (الإنقاذ الذكي والتحسينات) 💣 ---
 # =======================================================================================
-# --- سجل التغييرات v6.1 ---
+# --- سجل التغييرات v6.2 ---
 #
-# 1. [إصلاح حاسم] تم إصلاح الخطأ التراجعي (Regression Bug) في واجهة "لقطة المحفظة"
-#    و "المزامنة"، حيث أصبحت تعمل بشكل مباشر دون طلب رمز العملة.
-# 2. [تطوير استراتيجي] تم استبدال منطق تجميع العملات بمنطق "هجين ذو أولوية":
-#    - يعطي البوت الآن الأولوية القصوى لنسخة العملة على المنصة المفعل عليها التداول الحقيقي.
-#    - في حال عدم وجود تداول حقيقي، يختار النسخة ذات حجم التداول الأعلى.
-#    - هذا يحل مشكلة "هيمنة Binance" ويضمن توزيعاً عادلاً وذكياً للفرص.
-# 3. [تحسين المنطق] تم إصلاح مشكلة تصنيف الصفقات الرابحة كـ "فاشلة". الآن:
-#    - الصفقات التي تغلق على ربح عبر وقف الخسارة المتحرك تصنف "ناجحة (وقف ربح)".
-#    - تم تحديث تقارير الإحصائيات لتعكس هذا التصنيف الجديد والدقيق.
+# 1. [ميزة رئيسية] تمت ترقية أداة "المزامنة" إلى "المزامنة والإنقاذ الذكي":
+#    - تقوم الأداة الآن تلقائياً باكتشاف الصفقات "اليتيمة" (الموجودة في المنصة وغير المسجلة).
+#    - يمكن استيراد أي صفقة يتيمة بضغطة زر.
+#    - يقوم البوت بالبحث في سجل التداول لحساب متوسط سعر الشراء بدقة وإعادة بناء الصفقة.
+#    - تبدأ متابعة الصفقة المستوردة فوراً، مما يحل مشكلة فقدان البيانات عند إعادة التشغيل.
+# 2. [تحسين وظيفي] تم تفعيل زر التحديث (🔄) في لوحة التحكم:
+#    - يقوم الزر الآن ببدء عملية فحص يدوي فوري للسوق عند الطلب.
+# 3. [تحسين الواجهة] تم تحسين تقرير التشخيص:
+#    - يعرض الآن الوقت المتبقي للعمليات المجدولة (الفحص والمتابعة) كعد تنازلي.
+#    - يعرض حالة "يعمل الآن" إذا كانت المهمة قيد التنفيذ لمزيد من الوضوح.
 #
 # =======================================================================================
 
@@ -62,20 +63,20 @@ TELEGRAM_SIGNAL_CHANNEL_ID = os.getenv('TELEGRAM_SIGNAL_CHANNEL_ID', TELEGRAM_CH
 ALPHA_VANTAGE_API_KEY = os.getenv('ALPHA_VANTAGE_API_KEY', 'YOUR_AV_KEY_HERE')
 
 # --- [v5.8] Add API Keys for all supported exchanges ---
-BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', 'YOUR_BINANCE_API_KEY')
-BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', 'YOUR_BINANCE_API_SECRET')
-KUCOIN_API_KEY = os.getenv('KUCOIN_API_KEY', 'YOUR_KUCOIN_API_KEY')
-KUCOIN_API_SECRET = os.getenv('KUCOIN_API_SECRET', 'YOUR_KUCOIN_API_SECRET')
-KUCOIN_API_PASSPHRASE = os.getenv('KUCOIN_API_PASSPHRASE', 'YOUR_KUCOIN_API_PASSPHRASE')
-GATE_API_KEY = os.getenv('GATE_API_KEY', 'YOUR_GATE_API_KEY')
-GATE_API_SECRET = os.getenv('GATE_API_SECRET', 'YOUR_GATE_API_SECRET')
-MEXC_API_KEY = os.getenv('MEXC_API_KEY', 'YOUR_MEXC_API_KEY')
-MEXC_API_SECRET = os.getenv('MEXC_API_SECRET', 'YOUR_MEXC_API_SECRET')
-OKX_API_KEY = os.getenv('OKX_API_KEY', 'YOUR_OKX_API_KEY')
-OKX_API_SECRET = os.getenv('OKX_API_SECRET', 'YOUR_OKX_API_SECRET')
-OKX_API_PASSPHRASE = os.getenv('OKX_API_PASSPHRASE', 'YOUR_OKX_PASSPHRASE')
-BYBIT_API_KEY = os.getenv('BYBIT_API_KEY', 'YOUR_BYBIT_API_KEY')
-BYBIT_API_SECRET = os.getenv('BYBIT_API_SECRET', 'YOUR_BYBIT_API_SECRET')
+BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '')
+BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', '')
+KUCOIN_API_KEY = os.getenv('KUCOIN_API_KEY', '')
+KUCOIN_API_SECRET = os.getenv('KUCOIN_API_SECRET', '')
+KUCOIN_API_PASSPHRASE = os.getenv('KUCOIN_API_PASSPHRASE', '')
+GATE_API_KEY = os.getenv('GATE_API_KEY', '')
+GATE_API_SECRET = os.getenv('GATE_API_SECRET', '')
+MEXC_API_KEY = os.getenv('MEXC_API_KEY', '')
+MEXC_API_SECRET = os.getenv('MEXC_API_SECRET', '')
+OKX_API_KEY = os.getenv('OKX_API_KEY', '')
+OKX_API_SECRET = os.getenv('OKX_API_SECRET', '')
+OKX_API_PASSPHRASE = os.getenv('OKX_API_PASSPHRASE', '')
+BYBIT_API_KEY = os.getenv('BYBIT_API_KEY', '')
+BYBIT_API_SECRET = os.getenv('BYBIT_API_SECRET', '')
 
 # --- إعدادات البوت ---
 EXCHANGES_TO_SCAN = ['binance', 'okx', 'bybit', 'kucoin', 'gate', 'mexc']
@@ -85,15 +86,15 @@ SCAN_INTERVAL_SECONDS = 900
 TRACK_INTERVAL_SECONDS = 45
 
 APP_ROOT = '.'
-DB_FILE = os.path.join(APP_ROOT, 'minesweeper_bot_v5.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'minesweeper_settings_v5.json')
+DB_FILE = os.path.join(APP_ROOT, 'minesweeper_bot_v6.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'minesweeper_settings_v6.json')
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) ---
-LOG_FILE = os.path.join(APP_ROOT, 'minesweeper_bot_v5.log')
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'a'), logging.StreamHandler()])
+LOG_FILE = os.path.join(APP_ROOT, 'minesweeper_bot_v6.log')
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'a', 'utf-8'), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
-logger = logging.getLogger("MinesweeperBot_v5")
+logger = logging.getLogger("MinesweeperBot_v6")
 
 
 # =======================================================================================
@@ -244,34 +245,35 @@ def get_exchange_adapter(exchange_id: str):
 # =======================================================================================
 
 PRESET_PRO = {
-  "liquidity_filters": {"min_quote_volume_24h_usd": 1000000, "max_spread_percent": 0.45, "rvol_period": 18, "min_rvol": 1.5},
-  "volatility_filters": {"atr_period_for_filter": 14, "min_atr_percent": 0.85},
-  "ema_trend_filter": {"enabled": True, "ema_period": 200},
-  "min_tp_sl_filter": {"min_tp_percent": 1.1, "min_sl_percent": 0.6}
+ "liquidity_filters": {"min_quote_volume_24h_usd": 1000000, "max_spread_percent": 0.45, "rvol_period": 18, "min_rvol": 1.5},
+ "volatility_filters": {"atr_period_for_filter": 14, "min_atr_percent": 0.85},
+ "ema_trend_filter": {"enabled": True, "ema_period": 200},
+ "min_tp_sl_filter": {"min_tp_percent": 1.1, "min_sl_percent": 0.6}
 }
 PRESET_LAX = {
-  "liquidity_filters": {"min_quote_volume_24h_usd": 400000, "max_spread_percent": 1.3, "rvol_period": 12, "min_rvol": 1.1},
-  "volatility_filters": {"atr_period_for_filter": 10, "min_atr_percent": 0.3},
-  "ema_trend_filter": {"enabled": False, "ema_period": 200},
-  "min_tp_sl_filter": {"min_tp_percent": 0.4, "min_sl_percent": 0.2}
+ "liquidity_filters": {"min_quote_volume_24h_usd": 400000, "max_spread_percent": 1.3, "rvol_period": 12, "min_rvol": 1.1},
+ "volatility_filters": {"atr_period_for_filter": 10, "min_atr_percent": 0.3},
+ "ema_trend_filter": {"enabled": False, "ema_period": 200},
+ "min_tp_sl_filter": {"min_tp_percent": 0.4, "min_sl_percent": 0.2}
 }
 PRESET_STRICT = {
-  "liquidity_filters": {"min_quote_volume_24h_usd": 2500000, "max_spread_percent": 0.22, "rvol_period": 25, "min_rvol": 2.2},
-  "volatility_filters": {"atr_period_for_filter": 20, "min_atr_percent": 1.4},
-  "ema_trend_filter": {"enabled": True, "ema_period": 200},
-  "min_tp_sl_filter": {"min_tp_percent": 1.8, "min_sl_percent": 0.9}
+ "liquidity_filters": {"min_quote_volume_24h_usd": 2500000, "max_spread_percent": 0.22, "rvol_period": 25, "min_rvol": 2.2},
+ "volatility_filters": {"atr_period_for_filter": 20, "min_atr_percent": 1.4},
+ "ema_trend_filter": {"enabled": True, "ema_period": 200},
+ "min_tp_sl_filter": {"min_tp_percent": 1.8, "min_sl_percent": 0.9}
 }
 PRESET_VERY_LAX = {
-  "liquidity_filters": {"min_quote_volume_24h_usd": 200000, "max_spread_percent": 2.0, "rvol_period": 10, "min_rvol": 0.8},
-  "volatility_filters": {"atr_period_for_filter": 10, "min_atr_percent": 0.2},
-  "ema_trend_filter": {"enabled": False, "ema_period": 200},
-  "min_tp_sl_filter": {"min_tp_percent": 0.3, "min_sl_percent": 0.15}
+ "liquidity_filters": {"min_quote_volume_24h_usd": 200000, "max_spread_percent": 2.0, "rvol_period": 10, "min_rvol": 0.8},
+ "volatility_filters": {"atr_period_for_filter": 10, "min_atr_percent": 0.2},
+ "ema_trend_filter": {"enabled": False, "ema_period": 200},
+ "min_tp_sl_filter": {"min_tp_percent": 0.3, "min_sl_percent": 0.15}
 }
 PRESETS = {"PRO": PRESET_PRO, "LAX": PRESET_LAX, "STRICT": PRESET_STRICT, "VERY_LAX": PRESET_VERY_LAX}
 
 STRATEGY_NAMES_AR = {
     "momentum_breakout": "زخم اختراقي", "breakout_squeeze_pro": "اختراق انضغاطي",
     "support_rebound": "ارتداد الدعم", "whale_radar": "رادار الحيتان", "sniper_pro": "القناص المحترف",
+    "Rescued/Imported": "مستورد/تم إنقاذه"
 }
 
 EDITABLE_PARAMS = {
@@ -435,7 +437,7 @@ def log_recommendation_to_db(signal):
             return None
 
         params = (
-            datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'),
+            signal.get('timestamp', datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')),
             signal['exchange'],
             signal['symbol'],
             signal.get('entry_price'),
@@ -643,7 +645,7 @@ async def analyze_support_rebound(df, params, rvol, adx_value, exchange, symbol)
             avg_volume_15m = df['volume'].rolling(window=20).mean().iloc[-2]
 
             if last_candle_15m['close'] > last_candle_15m['open'] and last_candle_15m['volume'] > avg_volume_15m * 1.5:
-                 return {"reason": "support_rebound", "type": "long"}
+                return {"reason": "support_rebound", "type": "long"}
     except Exception as e:
         logger.warning(f"Support Rebound scan failed for {symbol}: {e}")
     return None
@@ -655,10 +657,12 @@ SCANNERS = {
     "support_rebound": analyze_support_rebound,
     "whale_radar": analyze_whale_radar,
     "sniper_pro": analyze_sniper_pro,
-    # =======================================================================================
+}
+
+# =======================================================================================
 # --- 🚑 [v6.2] New Helper Functions for Smart Sync & Rescue 🚑 ---
 # =======================================================================================
-}
+
 async def _calculate_weighted_average_price(trades: list) -> tuple:
     """
     Calculates the weighted average price from a list of buy trades.
@@ -667,26 +671,6 @@ async def _calculate_weighted_average_price(trades: list) -> tuple:
     if not trades:
         return 0, 0, 0
 
-    # Sort trades by timestamp to process them chronologically
-    trades.sort(key=lambda x: x['timestamp'])
-
-    last_sell_index = -1
-    for i, trade in enumerate(trades):
-        if trade['side'] == 'sell':
-            last_sell_index = i
-
-    # All trades after the last sell are part of the current open position
-    relevant_trades = trades[last_sell_index + 1:]
-    buy_trades = [t for t in relevant_trades if t['side'] == 'buy']
-
-    if not buy_trades:
-        return 0, 0, 0 # No open position found
-
-    total_cost = sum(t.get('cost', t['price'] * t['amount']) for t in buy_trades)
-    total_amount = sum(t['amount'] for t in buy_trades)
-    
-    if total_amount == 0:
-        return 0, 0, 0
 
     average_price = total_cost / total_amount
     first_trade_timestamp = datetime.fromtimestamp(buy_trades[0]['timestamp'] / 1000, tz=EGYPT_TZ)
@@ -3142,4 +3126,5 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
+
 
