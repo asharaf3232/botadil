@@ -1017,7 +1017,6 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
             signal['is_real_trade'] = attempt_real_trade
 
             if attempt_real_trade:
-                # [v6.0] Message Editing Logic
                 attempt_msg_data = {'custom_message': f"**🔎 تم العثور على إشارة حقيقية لـ `{signal['symbol']}`...**\n*جاري محاولة التنفيذ على `{signal['exchange']}`... ⏳*"}
                 sent_msg = await send_telegram_message(context.bot, attempt_msg_data, return_message_object=True)
                 edit_msg_id = sent_msg.message_id if sent_msg else None
@@ -1055,7 +1054,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                     fail_msg = f"**❌ فشل حرج وغير معالج أثناء محاولة تنفيذ صفقة `{signal['symbol']}`.**\n\n**الخطأ:** `{str(e)}`\n\n*يرجى التحقق من المنصة ومن سجلات الأخطاء (logs).*`"
                     await send_telegram_message(context.bot, {'custom_message': fail_msg}, edit_message_id=edit_msg_id)
             
-            else: # الصفقات الوهمية
+            else:
                 if active_trades_count < settings.get("max_concurrent_trades", 10):
                     trade_amount_usdt = settings["virtual_portfolio_balance_usdt"] * (settings["virtual_trade_size_percentage"] / 100)
                     signal.update({'quantity': trade_amount_usdt / signal['entry_price'], 'entry_value_usdt': trade_amount_usdt})
@@ -1177,7 +1176,6 @@ async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=F
                     logger.error(f"Failed to send admin warning about ChatNotFound: {admin_e}")
         else:
             logger.error(f"Failed to send/edit Telegram message to {target_chat}: {e}")
-            # If editing failed, try sending a new message as a fallback
             if edit_message_id:
                 try:
                     logger.info(f"Editing failed. Sending new message instead for {target_chat}")
@@ -2022,9 +2020,13 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         elif tool == "mytrades": await my_trades_command(update, context)
         return
 
-    elif data.startswith("snapshot_exchange_"):
-        exchange_id = data.split("_", 2)[2]
-        await process_portfolio_snapshot(update, context, exchange_id)
+    elif data.startswith("snapshot_exchange_") or data.startswith("sync_exchange_"):
+        parts = data.split("_")
+        tool, exchange_id = parts[0], parts[2]
+        if tool == 'snapshot':
+            await process_portfolio_snapshot(update, context, exchange_id)
+        elif tool == 'sync':
+            await process_sync_portfolio(update, context, exchange_id)
         return
 
     elif data.startswith("preset_"):
@@ -2667,10 +2669,10 @@ def main():
     logger.info("Application configured with all handlers. Starting polling...")
     application.run_polling()
 
+
 if __name__ == '__main__':
     print("🚀 Starting Mineseper Bot v6.0 (Enhanced UX)...")
     try:
         main()
     except Exception as e:
-        # لاحظ المسافة البادئة هنا
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
