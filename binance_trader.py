@@ -767,7 +767,8 @@ async def worker(queue, results_list, settings, failure_counter):
     while not queue.empty():
         market_info = await queue.get()
         symbol = market_info.get('symbol', 'N/A')
-        exchange = bot_state.public_exchanges.get(market_info['exchange'])
+        exchange_id = market_info.get('exchange') # Keep the id as a string
+        exchange = bot_state.public_exchanges.get(exchange_id)
         if not exchange or not settings.get('active_scanners'):
             queue.task_done()
             continue
@@ -775,9 +776,9 @@ async def worker(queue, results_list, settings, failure_counter):
             liq_filters, vol_filters, ema_filters = settings['liquidity_filters'], settings['volatility_filters'], settings['ema_trend_filter']
 
             orderbook = await exchange.fetch_order_book(symbol, limit=20)
-            if not orderbook or not orderbook['bids'] or not orderbook['asks']:
-                logger.debug(f"Reject {symbol}: Could not fetch order book."); continue
-
+            if not orderbook or not orderbook['bids'] or not orderbook['asks'] or not orderbook['bids'][0] or not orderbook['asks'][0]:
+                logger.debug(f"Reject {symbol}: Could not fetch valid order book."); continue
+            
             best_bid, best_ask = orderbook['bids'][0][0], orderbook['asks'][0][0]
             if best_bid <= 0: logger.debug(f"Reject {symbol}: Invalid bid price."); continue
 
@@ -786,7 +787,7 @@ async def worker(queue, results_list, settings, failure_counter):
                 logger.debug(f"Reject {symbol}: High Spread ({spread_percent:.2f}% > {liq_filters['max_spread_percent']}%)"); continue
 
             ohlcv = await exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=220)
-            if len(ohlcv) < ema_filters['ema_period']:
+            if len(ohlcv) < ema_filters.get('ema_period', 200) + 1:
                 logger.debug(f"Skipping {symbol}: Not enough data ({len(ohlcv)} candles) for EMA calculation."); continue
 
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']); df.set_index(pd.to_datetime(df['timestamp'], unit='ms'), inplace=True)
@@ -804,7 +805,7 @@ async def worker(queue, results_list, settings, failure_counter):
             last_close = df['close'].iloc[-2]
             if last_close <= 0: logger.debug(f"Skipping {symbol}: Invalid close price."); continue
 
-            atr_percent = (df[atr_col_name].iloc[-2] / last_close) * 100
+            atr_percent = (df[atr_col_name].iloc[-2] / last_close) * 100 if find_col(df.columns, 'ATRr_') else 0
             if atr_percent < vol_filters['min_atr_percent']:
                 logger.debug(f"Reject {symbol}: Low ATR% ({atr_percent:.2f}% < {vol_filters['min_atr_percent']}%)"); continue
 
@@ -847,7 +848,9 @@ async def worker(queue, results_list, settings, failure_counter):
                 reason_str = ' + '.join(confirmed_reasons)
                 entry_price = df.iloc[-2]['close']
                 df.ta.atr(length=settings['atr_period'], append=True)
-                current_atr = df.iloc[-2].get(find_col(df.columns, f"ATRr_{settings['atr_period']}"), 0)
+                atr_col = find_col(df.columns, f"ATRr_{settings['atr_period']}")
+                current_atr = df.iloc[-2].get(atr_col, 0) if atr_col else 0
+
                 if settings.get("use_dynamic_risk_management", False) and current_atr > 0:
                     risk_per_unit = current_atr * settings['atr_sl_multiplier']
                     stop_loss, take_profit = entry_price - risk_per_unit, entry_price + (risk_per_unit * settings['risk_reward_ratio'])
@@ -859,17 +862,17 @@ async def worker(queue, results_list, settings, failure_counter):
                 tp_percent_calc, sl_percent_calc = ((take_profit - entry_price) / entry_price * 100), ((entry_price - stop_loss) / entry_price * 100)
                 min_filters = settings['min_tp_sl_filter']
                 if tp_percent_calc >= min_filters['min_tp_percent'] and sl_percent_calc >= min_filters['min_sl_percent']:
-                    results_list.append({"symbol": symbol, "exchange": market_info['exchange'].capitalize(), "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "timestamp": df.index[-2], "reason": reason_str, "strength": len(confirmed_reasons)})
+                    results_list.append({"symbol": symbol, "exchange": exchange_id.capitalize(), "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "timestamp": df.index[-2], "reason": reason_str, "strength": len(confirmed_reasons)})
                 else:
                     logger.debug(f"Reject {symbol} Signal: Small TP/SL (TP: {tp_percent_calc:.2f}%, SL: {sl_percent_calc:.2f}%)")
 
         except ccxt.RateLimitExceeded as e:
-            logger.warning(f"Rate limit exceeded for {symbol} on {market_info['exchange']}. Pausing...: {e}")
+            logger.warning(f"Rate limit exceeded for {symbol} on {exchange_id}. Pausing...: {e}")
             await asyncio.sleep(10)
         except ccxt.NetworkError as e:
             logger.warning(f"Network error for {symbol}: {e}")
         except Exception as e:
-            logger.error(f"CRITICAL ERROR in worker for {symbol}: {e}", exc_info=True)
+            logger.error(f"CRITICAL ERROR in worker for {symbol} on {exchange_id}: {e}", exc_info=True)
             failure_counter[0] += 1
         finally:
             queue.task_done()
@@ -912,8 +915,8 @@ async def place_real_trade(signal):
         elif exchange_id == 'kucoin':
             min_notional = float(market_info.get('info', {}).get('minProvideSize', 5.0))
 
-        trade_amount_usdt = max(user_trade_amount_usdt, min_notional)
-        if min_notional > user_trade_amount_usdt:
+        trade_amount_usdt = max(user_trade_amount_usdt, min_notional or 0)
+        if min_notional and min_notional > user_trade_amount_usdt:
              logger.warning(f"User trade size ${user_trade_amount_usdt} for {symbol} is below exchange minimum of ${min_notional}. Using exchange minimum.")
 
         if usdt_balance < trade_amount_usdt:
@@ -1095,7 +1098,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                     fail_msg = f"**❌ فشل حرج وغير معالج أثناء محاولة تنفيذ صفقة `{signal['symbol']}`.**\n\n**الخطأ:** `{str(e)}`\n\n*يرجى التحقق من المنصة ومن سجلات الأخطاء (logs).*`"
                     await send_telegram_message(context.bot, {'custom_message': fail_msg}, edit_message_id=edit_msg_id)
             
-            else:
+            else: # الصفقات الوهمية
                 if active_trades_count < settings.get("max_concurrent_trades", 10):
                     trade_amount_usdt = settings["virtual_portfolio_balance_usdt"] * (settings["virtual_trade_size_percentage"] / 100)
                     signal.update({'quantity': trade_amount_usdt / signal['entry_price'], 'entry_value_usdt': trade_amount_usdt})
@@ -2077,24 +2080,23 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
              await query.edit_message_text("🛠️ *أدوات التداول*\n\nاختر الأداة التي تريد استخدامها:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
         return
 
-    # [v6.1] FIX: Handle snapshot and sync commands correctly without asking for symbol
-    if data.startswith("tools_"):
-        parts = data.split("_")
-        tool_name = parts[1]
-        if tool_name in ["manual_trade", "balance", "openorders", "mytrades"]:
-            await context.user_data.get('tool_handler', {}).get(tool_name, lambda u,c: None)(update, context)
+    elif data.startswith("tools_"):
+        tool = data.split("_", 1)[1]
+        if tool == "manual_trade": await manual_trade_command(update, context)
+        elif tool == "balance": await balance_command(update, context)
+        elif tool == "openorders": await open_orders_command(update, context)
+        elif tool == "mytrades": await my_trades_command(update, context)
         return
 
-    if data.startswith("snapshot_exchange_") or data.startswith("sync_exchange_"):
-        parts = data.split("_")
-        tool, exchange_id = parts[0], parts[2]
-        if tool == 'snapshot':
+    elif data.startswith("snapshot_exchange_") or data.startswith("sync_exchange_"):
+        tool, _, exchange_id = data.partition('_exchange_')
+        if tool == "snapshot":
             await process_portfolio_snapshot(update, context, exchange_id)
-        elif tool == 'sync':
+        elif tool == "sync":
             await process_sync_portfolio(update, context, exchange_id)
         return
 
-    if data.startswith("preset_"):
+    elif data.startswith("preset_"):
         preset_name = data.split("_", 1)[1]
         if preset_data := PRESETS.get(preset_name):
             bot_state.settings['liquidity_filters'] = preset_data['liquidity_filters']
@@ -2137,8 +2139,9 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         bot_state.settings["real_trading_per_exchange"] = settings
         save_settings()
         await query.answer(f"تم {'تفعيل' if settings[exchange_id] else 'تعطيل'} التداول على {exchange_id.capitalize()}")
-        await show_real_trading_control_menu(update, context)
-        if query.message: await query.message.delete()
+        if query.message: 
+            await query.message.delete()
+            await show_real_trading_control_menu(update, context)
         return
 
     elif data == "back_to_settings":
@@ -2293,7 +2296,7 @@ async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_T
                      InlineKeyboardButton("📉 بيع (Sell)", callback_data="manual_trade_side_sell")],
                     [InlineKeyboardButton("❌ إلغاء", callback_data="manual_trade_cancel")]
                 ]
-                await update.message.reply_text(f"المبلغ: *${amount}*\n\nاختر نوع الأمر:", reply_markup=InlineKeyboardMarkup(keyboard))
+                await update.message.reply_text(f"المبلغ: *${amount}*\n\nاختر نوع الأمر:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
             except ValueError:
                 await update.message.reply_text("❌ مبلغ غير صالح. الرجاء إرسال رقم فقط (مثال: `15` أو `20.5`).")
             return
@@ -2343,12 +2346,14 @@ async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 async def manual_trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['manual_trade'] = {'state': 'awaiting_exchange'}
-    keyboard = get_exchange_selection_keyboard("manual_trade", "dashboard_tools")
+    keyboard = get_exchange_selection_keyboard("manual_trade", "dashboard_refresh") # Changed back button
     message_text = "✍️ **بدء تداول يدوي**\n\nاختر المنصة التي تريد تنفيذ الأمر عليها:"
+    target_message = update.callback_query.message if update.callback_query else update.message
     if update.callback_query:
-        await update.callback_query.edit_message_text(message_text, reply_markup=keyboard)
+        await target_message.edit_text(message_text, reply_markup=keyboard)
     else:
-        await update.message.reply_text(message_text, reply_markup=keyboard)
+        await target_message.reply_text(message_text, reply_markup=keyboard)
+
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['balance_tool'] = {'state': 'awaiting_exchange'}
@@ -2561,6 +2566,117 @@ async def process_portfolio_snapshot(update: Update, context: ContextTypes.DEFAU
 
     except Exception as e:
         logger.error(f"Error generating portfolio snapshot: {e}", exc_info=True)
+        await target_message.edit_text(f"❌ **فشل:** حدث خطأ أثناء جلب بيانات المحفظة.\n`{e}`")
+
+async def risk_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_message = update.callback_query.message
+    await target_message.edit_text("ρίск **تقرير المخاطر**\n\n⏳ جارِ تحليل الصفقات النشطة...")
+
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        conn.row_factory = sqlite3.Row
+        
+        real_trades = [dict(row) for row in conn.cursor().execute("SELECT * FROM trades WHERE status = 'نشطة' AND trade_mode = 'real'").fetchall()]
+        virtual_trades = [dict(row) for row in conn.cursor().execute("SELECT * FROM trades WHERE status = 'نشطة' AND trade_mode = 'virtual'").fetchall()]
+        conn.close()
+
+        parts = ["**ρίск تقرير المخاطر الحالي**\n"]
+
+        def generate_risk_section(title, trades, portfolio_value):
+            if not trades:
+                return [f"\n--- **{title}** ---\n✅ لا توجد صفقات نشطة حالياً."]
+            
+            valid_trades = [t for t in trades if all(k in t and t[k] is not None for k in ['entry_value_usdt', 'entry_price', 'stop_loss', 'quantity'])]
+            
+            total_at_risk = sum(t['entry_value_usdt'] for t in valid_trades)
+            potential_loss = sum((t['entry_price'] - t['stop_loss']) * t['quantity'] for t in valid_trades)
+            symbol_concentration = Counter(t['symbol'] for t in valid_trades)
+
+            section_parts = [f"\n--- **{title}** ---"]
+            section_parts.append(f"- **عدد الصفقات:** {len(valid_trades)}")
+            section_parts.append(f"- **إجمالي رأس المال بالصفقات:** `${total_at_risk:,.2f}`")
+            if portfolio_value > 0:
+                section_parts.append(f"- **نسبة التعرض:** `{(total_at_risk / portfolio_value) * 100:.2f}%` من المحفظة")
+            section_parts.append(f"- **أقصى خسارة محتملة:** `$-{potential_loss:,.2f}` (إذا ضُرب كل الوقف)")
+            
+            if symbol_concentration:
+                most_common = symbol_concentration.most_common(1)[0]
+                section_parts.append(f"- **العملة الأكثر تركيزاً:** `{most_common[0]}` ({most_common[1]} صفقات)")
+            
+            return section_parts
+
+        real_portfolio_value = await get_total_real_portfolio_value_usdt()
+        parts.extend(generate_risk_section("🚨 المخاطر الحقيقية", real_trades, real_portfolio_value))
+        
+        virtual_portfolio_value = bot_state.settings['virtual_portfolio_balance_usdt']
+        parts.extend(generate_risk_section("📊 المخاطر الوهمية", virtual_trades, virtual_portfolio_value))
+
+        await target_message.edit_text("\n".join(parts), parse_mode=ParseMode.MARKDOWN)
+
+    except Exception as e:
+        logger.error(f"Error generating risk report: {e}", exc_info=True)
+        await target_message.edit_text(f"❌ **فشل:** حدث خطأ أثناء إعداد تقرير المخاطر.\n`{e}`")
+
+async def sync_portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_message = update.callback_query.message
+    
+    connected_exchanges = [ex for ex in bot_state.exchanges.values() if ex.apiKey]
+    if not connected_exchanges:
+        await target_message.edit_text("❌ **فشل:** لم يتم العثور على أي منصة متصلة بحساب حقيقي.")
+        return
+        
+    if len(connected_exchanges) == 1:
+        await process_sync_portfolio(update, context, connected_exchanges[0].id)
+    else:
+        keyboard = get_exchange_selection_keyboard("sync", "dashboard_refresh")
+        await target_message.edit_text(
+            "**🔄 مزامنة ومطابقة المحفظة**\n\nلديك أكثر من منصة متصلة. اختر المنصة للمزامنة:",
+            reply_markup=keyboard
+        )
+
+async def process_sync_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE, exchange_id: str):
+    target_message = update.callback_query.message
+    await target_message.edit_text(f"🔄 **مزامنة ومطابقة المحفظة**\n\n⏳ جارِ الاتصال بمنصة {exchange_id.capitalize()} ومقارنة البيانات...")
+    
+    exchange = bot_state.exchanges.get(exchange_id)
+    if not exchange:
+        await target_message.edit_text(f"❌ **فشل:** خطأ في العثور على منصة {exchange_id.capitalize()} المتصلة.")
+        return
+
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        bot_trades_raw = conn.cursor().execute("SELECT symbol FROM trades WHERE status = 'نشطة' AND trade_mode = 'real' AND exchange = ?", (exchange_id.capitalize(),)).fetchall()
+        bot_symbols = {item[0] for item in bot_trades_raw}
+        conn.close()
+
+        portfolio_data = await calculate_full_portfolio(exchange)
+        exchange_symbols = {f"{asset['currency']}/USDT" for asset in portfolio_data['assets'] if asset['currency'] != 'USDT'}
+
+        matched_symbols = bot_symbols.intersection(exchange_symbols)
+        bot_only_symbols = bot_symbols.difference(exchange_symbols)
+        exchange_only_symbols = exchange_symbols.difference(bot_symbols)
+
+        parts = [f"**🔄 تقرير مزامنة المحفظة ({exchange.id.capitalize()})**\n"]
+        parts.append(f"تمت مقارنة `{len(bot_symbols)}` صفقة مسجلة في البوت مع `{len(exchange_symbols)}` عملة مملوكة في المنصة.\n")
+
+        parts.append(f"--- ✅ **صفقات متطابقة** `({len(matched_symbols)})` ---")
+        if matched_symbols: parts.extend([f"- `{s}`" for s in matched_symbols])
+        else: parts.append("لا توجد صفقات متطابقة حالياً.")
+
+        parts.append(f"\n--- ⚠️ **صفقات في المنصة فقط** `({len(exchange_only_symbols)})` ---")
+        parts.append("*هذه صفقات قديمة أو تم شراؤها يدوياً.*")
+        if exchange_only_symbols: parts.extend([f"- `{s}`" for s in exchange_only_symbols])
+        else: parts.append("لا توجد صفقات غير مسجلة في البوت.")
+
+        parts.append(f"\n--- ❓ **صفقات في البوت فقط** `({len(bot_only_symbols)})` ---")
+        parts.append("*هذه الصفقات قد تكون أُغلقت يدوياً أو حدث خطأ.*")
+        if bot_only_symbols: parts.extend([f"- `{s}`" for s in bot_only_symbols])
+        else: parts.append("لا توجد صفقات غير متطابقة.")
+
+        await target_message.edit_text("\n".join(parts), parse_mode=ParseMode.MARKDOWN)
+
+    except Exception as e:
+        logger.error(f"Error during portfolio sync: {e}", exc_info=True)
         await target_message.edit_text(f"❌ **فشل:** حدث خطأ أثناء مزامنة المحفظة.\n`{e}`")
 
 
@@ -2588,7 +2704,7 @@ async def post_init(application: Application):
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
 
     logger.info("Jobs scheduled.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v5.9) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v6.1) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
 
 async def post_shutdown(application: Application):
     all_exchanges = list(bot_state.exchanges.values()) + list(bot_state.public_exchanges.values())
@@ -2623,11 +2739,9 @@ def main():
     logger.info("Application configured with all handlers. Starting polling...")
     application.run_polling()
 
-
 if __name__ == '__main__':
-    print("🚀 Starting Mineseper Bot v5.9 (Reliability & Precision)...")
+    print("🚀 Starting Mineseper Bot v6.1 (Intelligence & Priority)...")
     try:
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
-
