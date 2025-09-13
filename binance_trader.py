@@ -2944,8 +2944,7 @@ async def risk_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.error(f"Error generating risk report: {e}", exc_info=True)
         await target_message.edit_text(f"❌ **فشل:** حدث خطأ أثناء إعداد تقرير المخاطر.\n`{e}`")
 
-asynasync def sync_portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # [v6.2] This function is now the entry point for the smart sync tool
+async def sync_portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):    
     target_message = update.callback_query.message
     
     connected_exchanges = [ex for ex in bot_state.exchanges.values() if ex.apiKey]
@@ -3123,6 +3122,7 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
+
 
 
 
