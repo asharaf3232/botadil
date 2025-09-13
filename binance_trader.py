@@ -2192,7 +2192,7 @@ async def execute_manual_trade(exchange_id, symbol, amount_usdt, side, context: 
         logger.error(f"MANUAL TRADE FAILED: {error_msg} - {e}", exc_info=True)
         return {"success": False, "error": error_msg}
 
-async def buttonasync def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); data = query.data
     user_data = context.user_data
 
@@ -3123,6 +3123,7 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
+
 
 
 
