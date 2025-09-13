@@ -2341,7 +2341,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 await query.edit_message_text(f"✅ **تم قبول الاقتراح!**\n\nتم تغيير النمط بنجاح إلى `{preset_name}`.", parse_mode=ParseMode.MARKDOWN)
         elif action == "decline":
             await query.edit_message_text("👍 **تم تجاهل الاقتراح.**", parse_mode=ParseMode.MARKDOWN)
-_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); data = query.data
     user_data = context.user_data
 
@@ -3123,6 +3123,7 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
+
 
 
 
