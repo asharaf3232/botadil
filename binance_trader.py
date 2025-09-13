@@ -2856,9 +2856,16 @@ def main():
     load_settings()
     init_database()
 
-    limits = httpx.Limits(max_connections=30)
-    request = HTTPXRequest(connect_timeout=60.0, read_timeout=60.0, limits=limits)
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).request(request).post_init(post_init).post_shutdown(post_shutdown).build()
+    application = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .connect_timeout(60.0)
+        .read_timeout(60.0)
+        .connection_pool_size(50)  # زيادة سعة الاتصال لحل مشكلة الضغط
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
 
     # --- Registering all handlers ---
     application.add_handler(CommandHandler("start", start_command))
@@ -2881,5 +2888,6 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
+
 
 
