@@ -2777,7 +2777,7 @@ async def process_sync_portfolio(update: Update, context: ContextTypes.DEFAULT_T
 
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10)
-        bot_trades_raw = conn.cursor().execute("SELECT symbol FROM trades WHERE status = 'نشطة' AND trade_mode = 'real' AND exchange = ?", (exchange_id.capitalize(),)).fetchall()
+        bot_trades_raw = conn.cursor().execute("SELECT symbol FROM trades WHERE status = 'نشطة' AND trade_mode = 'real' AND LOWER(exchange) = ?", (exchange_id.lower(),)).fetchall()
         bot_symbols = {item[0] for item in bot_trades_raw}
         conn.close()
 
@@ -2888,6 +2888,7 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
+
 
 
 
