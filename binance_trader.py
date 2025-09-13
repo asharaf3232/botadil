@@ -658,7 +658,7 @@ SCANNERS = {
     # =======================================================================================
 # --- 🚑 [v6.2] New Helper Functions for Smart Sync & Rescue 🚑 ---
 # =======================================================================================
-
+}
 async def _calculate_weighted_average_price(trades: list) -> tuple:
     """
     Calculates the weighted average price from a list of buy trades.
@@ -3142,3 +3142,4 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
+
