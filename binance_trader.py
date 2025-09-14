@@ -217,7 +217,7 @@ class OcoAdapter(ExchangeAdapter):
         )
         return {"oco_id": new_oco_order['id']}
 
-class DualOrderAdapter(ExchangeAdapter):
+
 class DualOrderAdapter(ExchangeAdapter):
     """محول أساسي للمنصات التي تتطلب أمرين منفصلين للخروج (مثل KuCoin, MEXC)."""
     async def place_exit_orders(self, signal, verified_quantity):
