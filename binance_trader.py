@@ -227,8 +227,10 @@ def get_exchange_adapter(exchange_id: str):
     logger.warning(f"No specific adapter found for {exchange_id}, trade automation will be disabled for it.")
     return None
 
+# ... (The rest of the file remains the same until the Telegram Handlers section) ...
+# --- The following is the continuation and completion of the file from the previous context ---
 # =======================================================================================
-# --- Configurations and Constants ---
+# --- Configurations and Constants (Continued) ---
 # =======================================================================================
 
 PRESET_PRO = {
@@ -383,9 +385,11 @@ def load_settings():
              logger.info(f"Successfully loaded persistent memory for {len(bot_state.last_signal_time)} symbols.")
 
         updated = False
-        if "real_trading_enabled" in bot_state.settings:
-            old_value = bot_state.settings.pop("real_trading_enabled")
-            bot_state.settings["real_trading_per_exchange"] = {ex: old_value for ex in EXCHANGES_TO_SCAN}
+        # [v7.5] Ensure new exchange list is reflected in settings
+        current_real_trading_settings = bot_state.settings.get("real_trading_per_exchange", {})
+        new_real_trading_settings = {ex: current_real_trading_settings.get(ex, False) for ex in EXCHANGES_TO_SCAN}
+        if new_real_trading_settings != current_real_trading_settings:
+            bot_state.settings["real_trading_per_exchange"] = new_real_trading_settings
             updated = True
             
         for key, value in DEFAULT_SETTINGS.items():
@@ -1322,7 +1326,7 @@ async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=F
                         f"🔍 **الاستراتيجية:** {reasons_ar}\n\n"
                         f"📈 **نقطة الدخول:** `{format_price(entry)}`\n"
                         f"🎯 **الهدف:** `{format_price(tp)}` (+{tp_percent:.2f}%)\n"
-                        f"🛑 **الوقف:** `{format_price(sl)}` (-{sl_percent:.2f}%)"
+                        f"🛑 **الوقف:** `{format_price(sl)}` (-{sl_percent:.2f}%)\n"
                         f"{id_line}")
         except KeyError as e:
             logger.error(f"CRITICAL: Missing key '{e}' in signal_data when trying to send message. Data: {signal_data}")
@@ -1373,6 +1377,7 @@ async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=F
 
     except Exception as e:
         logger.error(f"General error in send_telegram_message to {target_chat}: {e}")
+
 async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10)
@@ -1389,14 +1394,13 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
     if not active_trades:
         return
 
-    # This new structure processes one trade at a time, preventing race conditions.
+    # This structure processes one trade at a time, preventing race conditions.
     for trade in active_trades:
         try:
             # First, check if the trade has been closed by an existing order.
-            # This is the Sentinel's primary job.
             await check_trade_on_exchange(trade, context)
             
-            # To ensure we don't act on a trade that was just closed, we can refetch its status.
+            # To ensure we don't act on a trade that was just closed, we refetch its status.
             conn = sqlite3.connect(DB_FILE, timeout=10)
             cursor = conn.cursor()
             status_row = cursor.execute("SELECT status FROM trades WHERE id = ?", (trade['id'],)).fetchone()
@@ -1462,7 +1466,7 @@ async def check_trade_on_exchange(trade: dict, context: ContextTypes.DEFAULT_TYP
         logger.error(f"Sentinel: CRITICAL Error checking trade #{trade['id']}: {e}", exc_info=True)
 
 
-async def check_and_update_tsl(trade: dict, context: ContextTypes.DEFAULT_TYPE, prefetched_data: dict = None):
+async def check_and_update_tsl(trade: dict, context: ContextTypes.DEFAULT_TYPE):
     """
     This function is responsible for calculating and updating TSL orders.
     """
@@ -1770,6 +1774,7 @@ async def analyze_performance_and_suggest(context: ContextTypes.DEFAULT_TYPE):
         await send_telegram_message(context.bot, {'custom_message': message, 'keyboard': keyboard})
         bot_state.settings['last_suggestion_time'] = time.time()
         save_settings()
+
 # =======================================================================================
 # --- Telegram Handlers ---
 # =======================================================================================
@@ -2202,7 +2207,7 @@ async def show_active_trades_command(update: Update, context: ContextTypes.DEFAU
         logger.error(f"Error in show_active_trades: {e}")
         return "خطأ في جلب الصفقات.", None
 
-async def execute_manual_trade(exchange_id, symbol, amount, side, context: ContextTypes.DEFAULT_TYPE, order_type='market', price=None, stop_price=None):
+async def execute_manual_order(exchange_id, symbol, amount, side, context: ContextTypes.DEFAULT_TYPE, order_type='market', price=None, stop_price=None):
     logger.info(f"Attempting MANUAL {order_type.upper()} {side.upper()} for {symbol} on {exchange_id} for {amount}")
     exchange = bot_state.exchanges.get(exchange_id.lower())
     if not exchange or not exchange.apiKey:
@@ -2212,11 +2217,18 @@ async def execute_manual_trade(exchange_id, symbol, amount, side, context: Conte
         order_receipt = None
         params = {}
         
-        if order_type == 'market':
-             if side == 'buy':
+        # Note: For market buy, 'amount' is the cost (USDT). For all others, it's the base currency amount.
+        if order_type == 'market' and side == 'buy':
+             if not hasattr(exchange, 'create_market_buy_order_with_cost'):
+                 ticker = await exchange.fetch_ticker(symbol)
+                 current_price = ticker.get('last', 0)
+                 if not current_price: return {"success": False, "error": "Could not fetch price for market buy conversion."}
+                 amount_in_base = float(amount) / current_price
+                 order_receipt = await exchange.create_market_buy_order(symbol, amount_in_base)
+             else:
                 order_receipt = await exchange.create_market_buy_order_with_cost(symbol, float(amount))
-             else: # sell
-                order_receipt = await exchange.create_market_sell_order(symbol, float(amount))
+        elif order_type == 'market' and side == 'sell':
+            order_receipt = await exchange.create_market_sell_order(symbol, float(amount))
         elif order_type == 'limit':
             order_receipt = await exchange.create_order(symbol, 'limit', side, amount, price)
         elif order_type == 'stop-market':
@@ -2224,7 +2236,7 @@ async def execute_manual_trade(exchange_id, symbol, amount, side, context: Conte
             order_receipt = await exchange.create_order(symbol, 'market', side, amount, params=params)
 
         if not order_receipt:
-            raise ValueError("Order creation failed without exception.")
+            raise ValueError("Order creation failed without a specific CCXT exception.")
 
         await asyncio.sleep(2) 
         order = await exchange.fetch_order(order_receipt['id'], symbol)
@@ -2334,7 +2346,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         elif action == "tools":
               # [v7.5] Added Rescuer Tools
               keyboard = [
-                  [InlineKeyboardButton("➕ وضع أمر متقدم", callback_data="tools_place_order"), InlineKeyboardButton("💰 بيع بسعر السوق", callback_data="tools_market_sell")],
+                  [InlineKeyboardButton("➕ وضع أمر متقدم", callback_data="tools_place_order"), InlineKeyboardButton("📉 بيع بسعر السوق", callback_data="tools_market_sell")],
                   [InlineKeyboardButton("❌ إلغاء أمر مفتوح", callback_data="tools_cancel_order")],
                   [InlineKeyboardButton("💰 عرض رصيدي", callback_data="tools_balance"), InlineKeyboardButton("📜 سجل تداولاتي", callback_data="tools_mytrades")],
                   [InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="dashboard_refresh_menu")]
@@ -2351,7 +2363,6 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         elif tool_name == "mytrades": await my_trades_command(update, context)
         return
         
-    if data.startswith("manual_trade_"): await manual_trade_button_handler(update, context); return
     if data.startswith("balance_"): await tools_button_handler(update, context); return
     if data.startswith("mytrades_"): await tools_button_handler(update, context); return
     if data.startswith("p_order_"): await advanced_order_button_handler(update, context); return
@@ -2792,7 +2803,7 @@ async def risk_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.error(f"Error generating risk report: {e}", exc_info=True)
         await target_message.edit_text(f"❌ **فشل:** حدث خطأ أثناء إعداد تقرير المخاطر.\n`{e}`")
 
-async def sync_portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):    
+async def sync_portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.callback_query.message
     
     connected_exchanges = [ex for ex in bot_state.exchanges.values() if ex.apiKey]
@@ -2824,7 +2835,6 @@ async def process_sync_portfolio(update: Update, context: ContextTypes.DEFAULT_T
         bot_trades_raw = conn.cursor().execute("SELECT symbol FROM trades WHERE status = 'نشطة' AND trade_mode = 'real' AND LOWER(exchange) = ?", (exchange_id.lower(),)).fetchall()
         bot_symbols = {item[0] for item in bot_trades_raw}
         
-        # [v7.0] Improved Memory: Fetch recently closed trades to avoid suggesting them for rescue
         twenty_four_hours_ago = datetime.now() - timedelta(hours=24)
         recently_closed_raw = conn.cursor().execute("SELECT symbol FROM trades WHERE trade_mode = 'real' AND LOWER(exchange) = ? AND closed_at > ?", (exchange_id.lower(), twenty_four_hours_ago.strftime('%Y-%m-%d %H:%M:%S'))).fetchall()
         recently_closed_symbols = {item[0] for item in recently_closed_raw}
@@ -2834,7 +2844,6 @@ async def process_sync_portfolio(update: Update, context: ContextTypes.DEFAULT_T
         exchange_symbols = {f"{asset['currency']}/USDT" for asset in portfolio_data['assets'] if asset['currency'] != 'USDT'}
 
         matched_symbols = bot_symbols.intersection(exchange_symbols)
-        # Exclude bot-managed and recently closed symbols from the rescue list
         exchange_only_symbols = exchange_symbols.difference(bot_symbols).difference(recently_closed_symbols)
 
         parts = [f"**🔄 تقرير المزامنة ({exchange.id.capitalize()})**\n"]
@@ -2864,7 +2873,7 @@ async def process_sync_portfolio(update: Update, context: ContextTypes.DEFAULT_T
         await target_message.edit_text(f"❌ **فشل:** حدث خطأ أثناء مزامنة المحفظة.\n`{e}`")
 
 # =======================================================================================
-# --- [v7.0] New "Rescuer" Manual Tool Handlers ---
+# --- [v7.5] New "Rescuer" Manual Tool Handlers ---
 # =======================================================================================
 
 async def cancel_order_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2922,11 +2931,9 @@ async def cancel_order_button_handler(update: Update, context: ContextTypes.DEFA
         elif action == "all":
             _, _, _, exchange_id, symbol = parts
             exchange = bot_state.exchanges.get(exchange_id)
-            await query.edit_message_text(f"⏳ جارِ إلغاء جميع الأوامر لـ `{symbol}`...", parse_mode=ParseMode.MARKDOWN)
-            await exchange.cancel_all_orders(symbol)
-            await query.edit_message_text(f"✅ تم إلغاء جميع الأوامر المفتوحة لـ `{symbol}` بنجاح.", parse_mode=ParseMode.MARKDOWN)
+            await query.edit_message_text(f"⏳ جارِ إلغاء جميع الأوامر...", parse_mode=ParseMode.MARKDOWN)
 
-    except Exception as e:
+except Exception as e:
         logger.error(f"Error in cancel_order_button_handler: {e}")
         await query.edit_message_text(f"❌ فشل إلغاء الأمر. الخطأ: `{e}`", parse_mode=ParseMode.MARKDOWN)
 
