@@ -218,6 +218,7 @@ class OcoAdapter(ExchangeAdapter):
         return {"oco_id": new_oco_order['id']}
 
 class DualOrderAdapter(ExchangeAdapter):
+class DualOrderAdapter(ExchangeAdapter):
     """محول أساسي للمنصات التي تتطلب أمرين منفصلين للخروج (مثل KuCoin, MEXC)."""
     async def place_exit_orders(self, signal, verified_quantity):
         symbol = signal['symbol']
@@ -229,7 +230,9 @@ class DualOrderAdapter(ExchangeAdapter):
         tp_order = await self.exchange.create_order(symbol, 'limit', 'sell', verified_quantity, price=tp_price)
         logger.info(f"{self.exchange.id} DualOrder: Take Profit order placed with ID: {tp_order['id']}")
         
-        sl_params = {'stopPrice': sl_trigger_price}
+        # --- START FIX ---
+        sl_params = {'stop': 'loss', 'stopPrice': sl_trigger_price} # More explicit params for KuCoin
+        # --- END FIX ---
         sl_order = await self.exchange.create_order(symbol, 'market', 'sell', verified_quantity, params=sl_params)
         logger.info(f"{self.exchange.id} DualOrder: Stop Loss (Market) order placed with ID: {sl_order['id']}")
         
@@ -257,7 +260,9 @@ class DualOrderAdapter(ExchangeAdapter):
         logger.info(f"{self.exchange.id} DualOrder: Creating new separate orders for {symbol} with new SL trigger: {sl_trigger_price}")
         new_tp_order = await self.exchange.create_order(symbol, 'limit', 'sell', quantity, price=tp_price)
         
-        new_sl_params = {'stopPrice': sl_trigger_price}
+        # --- START FIX ---
+        new_sl_params = {'stop': 'loss', 'stopPrice': sl_trigger_price} # More explicit params for KuCoin
+        # --- END FIX ---
         new_sl_order = await self.exchange.create_order(symbol, 'market', 'sell', quantity, params=new_sl_params)
         
         return {"tp_id": new_tp_order['id'], "sl_id": new_sl_order['id']}
@@ -1495,66 +1500,89 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
 
 async def check_trade_on_exchange(trade: dict, context: ContextTypes.DEFAULT_TYPE):
     """
-    [v7.0] The Sentinel Protocol Core: Checks the real status of exit orders on the exchange.
-    This is the ONLY function that can authorize closing a trade.
+    [v7.2 - Universal Sentinel] Checks order status reliably across all exchange types.
+    Uses robust property matching for DualOrder exchanges and reliable ID checking for OCO exchanges.
     """
-    if trade.get('trade_mode') != 'real': return # This logic is for real trades only
+    if trade.get('trade_mode') != 'real': return
 
     exchange_id = trade['exchange'].lower()
     symbol = trade['symbol']
     exchange = bot_state.exchanges.get(exchange_id)
-    if not exchange: 
-        logger.warning(f"Sentinel: Cannot check {symbol}, no private connection to {exchange_id}.")
+    if not exchange:
+        logger.warning(f"Sentinel: Cannot check {symbol}, no private connection for {exchange_id}.")
         return
 
     try:
-        exit_order_ids = json.loads(trade.get('exit_order_ids_json', '{}'))
-        if not exit_order_ids: 
-            # This can happen for rescued trades before TSL is active
-            logger.debug(f"Sentinel: No exit order IDs for trade #{trade['id']}, skipping status check.")
+        # First, always check for filled orders. This is universal and highly reliable.
+        # Ensure timestamp is parsed correctly from the trade dictionary
+        trade_timestamp_str = trade.get('timestamp')
+        if not trade_timestamp_str:
+            logger.error(f"Sentinel: Trade #{trade['id']} is missing a timestamp.")
             return
 
-        # Fetch recent filled orders for the symbol. This is more reliable than fetching by ID.
-        # It catches cases where an order is filled and disappears from 'open orders'.
-        since_timestamp = int((datetime.strptime(trade['timestamp'], '%Y-%m-%d %H:%M:%S') - timedelta(minutes=5)).timestamp() * 1000)
+        trade_start_time = datetime.strptime(trade_timestamp_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=EGYPT_TZ)
+        since_timestamp = int((trade_start_time - timedelta(minutes=5)).timestamp() * 1000)
+        
         recent_filled_orders = await exchange.fetch_my_trades(symbol, since=since_timestamp, limit=10)
         
-        filled_sell_order = None
+        exit_order_ids_from_db = json.loads(trade.get('exit_order_ids_json', '{}'))
         for filled_order in recent_filled_orders:
-             # Check if this filled order is a sell and corresponds to our trade's exit order IDs
-            if filled_order['side'] == 'sell' and filled_order['order'] in exit_order_ids.values():
-                filled_sell_order = filled_order
-                logger.info(f"Sentinel: FOUND filled exit order for trade #{trade['id']}! Order ID: {filled_order['order']}")
-                break
+            if filled_order['side'] == 'sell' and filled_order.get('order') in exit_order_ids_from_db.values():
+                logger.info(f"Sentinel: FOUND filled exit order for trade #{trade['id']} via ID! Closing trade.")
+                is_win = filled_order.get('price', 0) >= trade.get('take_profit', float('inf'))
+                await close_trade_in_db(context, trade, filled_order, is_win=is_win)
+                return
+
+        # Now, check for open orders based on the exchange type
+        open_orders = await exchange.fetch_open_orders(symbol)
+        are_orders_still_open = False
         
-        if filled_sell_order:
-            await close_trade_in_db(context, trade, filled_order, is_win=filled_sell_order['price'] >= trade['take_profit'])
+        is_dual_order_exchange = exchange_id in ['kucoin', 'mexc']
+
+        if is_dual_order_exchange:
+            # --- Smart property-matching logic for KuCoin/MEXC ---
+            def is_close(a, b, rel_tol=1e-5): return abs(a - b) <= rel_tol * max(abs(a), abs(b))
+            
+            # Ensure trade details are valid before comparison
+            db_quantity = trade.get('quantity')
+            db_tp_price = trade.get('take_profit')
+            db_sl_price = trade.get('stop_loss')
+
+            if db_quantity is None or db_tp_price is None or db_sl_price is None:
+                logger.error(f"Sentinel: Trade #{trade['id']} has invalid data for property matching.")
+                return
+
+            found_tp = any(
+                o['side'] == 'sell' and o['type'] == 'limit' and is_close(o['amount'], db_quantity) and is_close(o['price'], db_tp_price)
+                for o in open_orders
+            )
+            found_sl = any(
+                o['side'] == 'sell' and o.get('stopPrice') and is_close(o['amount'], db_quantity) and is_close(o['stopPrice'], db_sl_price)
+                for o in open_orders
+            )
+            # A single found protection order is enough to consider the trade active and not alert.
+            are_orders_still_open = found_tp or found_sl
+            
+        else:
+            # --- Standard, reliable ID-based logic for OCO exchanges (Binance, Bybit, etc.) ---
+            open_order_ids_on_exchange = {o['id'] for o in open_orders}
+            are_orders_still_open = any(db_id in open_order_ids_on_exchange for db_id in exit_order_ids_from_db.values())
+
+        if are_orders_still_open:
+            logger.debug(f"Sentinel: Orders for trade #{trade['id']} confirmed open on {exchange_id}.")
             return
 
-        # If no filled order was found, check if the orders are still open
-        are_orders_still_open = False
-        try:
-            open_orders = await exchange.fetch_open_orders(symbol)
-            open_order_ids = {o['id'] for o in open_orders}
-            for managed_id in exit_order_ids.values():
-                if managed_id in open_order_ids:
-                    are_orders_still_open = True
-                    break
-        except Exception as e:
-            logger.error(f"Sentinel: Could not fetch open orders for {symbol}: {e}")
-            return # Don't proceed if we can't be sure
+        # If we reach here, no open or filled orders were found. Apply grace period.
+        if (datetime.now(EGYPT_TZ) - trade_start_time).total_seconds() < 180:
+            logger.warning(f"Sentinel: Orders for NEW trade #{trade['id']} not yet visible. Waiting (API Lag).")
+            return
 
-        if not are_orders_still_open and not filled_sell_order:
-            # The orders are not open, but we couldn't find them in recent filled trades.
-            # This is a DANGER ZONE. It might be an exchange lag, or the orders were cancelled manually.
-            logger.critical(f"Sentinel ALERT: Exit orders for trade #{trade['id']} ({symbol}) are MISSING but not found in filled history.")
-            await send_telegram_message(context.bot, {'custom_message': f"**🚨🚨 إنذار حارس 🚨🚨**\n\n**صفقة:** `#{trade['id']} {symbol}`\n\n**الحالة:** لم أتمكن من العثور على أوامر الهدف/الوقف لهذه الصفقة على المنصة، ولم أجدها في سجل الأوامر المنفذة!\n\n**هذا يعني أن الصفقة قد تكون بدون حماية الآن!**\n\n**🔥 إجراء فوري مطلوب:**\n1. تحقق من حالة الصفقة على المنصة **فوراً**.\n2. إذا كانت لا تزال مفتوحة، ضع أمر وقف خسارة يدوياً لحمايتها.\n3. استخدم أدوات 'المنقذ' لإلغاء وإعادة وضع الأوامر إذا لزم الأمر."})
-            # To prevent spamming, we can add a flag to the DB later, but for now, this is critical.
+        logger.critical(f"Sentinel ALERT: Exit orders for trade #{trade['id']} ({symbol}) are MISSING.")
+        await send_telegram_message(context.bot, {'custom_message': f"**🚨🚨 إنذار حارس 🚨🚨**\n\n**صفقة:** `#{trade['id']} {symbol}`\n\n**الحالة:** لم أتمكن من العثور على أوامر الهدف/الوقف لهذه الصفقة على المنصة، ولم أجدها في سجل الأوامر المنفذة!\n\n**🔥 إجراء فوري مطلوب:**\n1. تحقق من حالة الصفقة على المنصة **فوراً**."})
 
-    except ccxt.NetworkError as e:
-        logger.warning(f"Sentinel: Network error checking trade #{trade['id']}: {e}")
     except Exception as e:
         logger.error(f"Sentinel: CRITICAL Error checking trade #{trade['id']}: {e}", exc_info=True)
+
 
 
 async def check_and_update_tsl(trade: dict, context: ContextTypes.DEFAULT_TYPE, prefetched_data: dict = None):
