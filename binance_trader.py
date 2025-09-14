@@ -1409,6 +1409,10 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
     for trade in active_trades:
         trades_by_exchange[trade['exchange'].lower()].append(trade)
 
+    # --- START DEBUG LOGGING ---
+    logger.info(f"DEBUG: Trades grouped by exchange: {json.dumps({k: [t['symbol'] for t in v] for k, v in trades_by_exchange.items()}, indent=2)}")
+    # --- END DEBUG LOGGING ---
+
     async def fetch_for_exchange(exchange_id, trades_on_exchange):
         exchange = bot_state.public_exchanges.get(exchange_id)
         if not exchange:
@@ -1467,6 +1471,11 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"GENERAL ERROR during batch fetch for {exchange_id}: {e}", exc_info=True)
 
     await asyncio.gather(*(fetch_for_exchange(ex_id, trades) for ex_id, trades in trades_by_exchange.items()))
+    
+    # --- START DEBUG LOGGING ---
+    logger.info(f"DEBUG: Prefetched data keys: {list(prefetched_data.keys())}")
+    # --- END DEBUG LOGGING ---
+    
     # --- [v6.4] END: BATCH DATA FETCHING REFACTOR ---
 
     tasks = [check_single_trade(trade, context, prefetched_data.get(trade['symbol'])) for trade in active_trades]
@@ -3062,3 +3071,4 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
+
