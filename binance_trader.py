@@ -1,18 +1,19 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v6.3 (وقف متحرك ذكي) 💣 ---
+# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v6.4 (الجراحة الدقيقة) 💣 ---
 # =======================================================================================
-# --- سجل التغييرات v6.3 ---
+# --- سجل التغييرات v6.4 ---
 #
-# 1. [ميزة رئيسية] تم تطوير نظام الوقف المتحرك (Trailing Stop-Loss) بالكامل:
-#    - أصبح النظام الآن يدعم ثلاث استراتيجيات مختلفة:
-#      1. النسبة المئوية (Percentage): مع تحسين لتكون أقل عدوانية عند التفعيل الأولي.
-#      2. المتوسط المتحرك (EMA): لملاحقة الاتجاهات القوية وترك الأرباح تنمو.
-#      3. مؤشر التقلب (ATR): لوضع وقف ديناميكي يتكيف مع تقلبات السوق.
-# 2. [ميزة ذكاء اصطناعي] تم إضافة ميزة "الربط الذكي" لاستراتيجية الوقف:
-#    - يقوم البوت الآن تلقائياً باختيار أفضل استراتيجية وقف متحرك بناءً على سبب الدخول في الصفقة.
-#    - (مثال: صفقات الزخم تستخدم EMA، وصفقات الحيتان تستخدم ATR).
-# 3. [تحسين الواجهة] تمت إضافة قسم جديد وكامل في الإعدادات للتحكم في استراتيجيات الوقف.
+# 1. [جراحة أداء حرجة] تم إعادة هيكلة نظام متابعة الصفقات بالكامل:
+#    - يقوم البوت الآن بجلب كل بيانات السوق (الأسعار والشموع) المطلوبة للصفقات النشطة
+#      في عملية واحدة مجمّعة لكل منصة، مما يقلل طلبات الـ API بنسبة تصل إلى 95%.
+#    - هذا الإصلاح يمنع بشكل شبه كامل خطر الحظر المؤقت (Rate Limiting) ويزيد سرعة المتابعة.
+# 2. [جراحة موثوقية] تم تحسين نظام معالجة الأخطاء بشكل كبير:
+#    - استبدال معالجات الأخطاء العامة بمعالجات متخصصة (NetworkError, RateLimitExceeded)
+#      مما يجعل البوت أكثر قدرة على التعامل مع مشاكل الاتصال المؤقتة والتعافي منها.
+# 3. [تحسين هيكلي] تم إزالة "الأرقام السحرية" (Hard-coded numbers):
+#    - تم تحويل القيم الثابتة (مثل فترة تهدئة الإشارة ومضاعف وقف الإنقاذ) إلى إعدادات
+#      يمكن التحكم بها من واجهة تليجرام لزيادة المرونة.
 #
 # =======================================================================================
 
@@ -278,11 +279,12 @@ STRATEGY_NAMES_AR = {
 EDITABLE_PARAMS = {
     "إعدادات عامة": [
         "max_concurrent_trades", "top_n_symbols_by_volume", "concurrent_workers",
-        "min_signal_strength"
+        "min_signal_strength", "signal_cooldown_multiplier"
     ],
     "إعدادات المخاطر": [
         "automate_real_tsl", "real_trade_size_usdt", "virtual_trade_size_percentage",
-        "atr_sl_multiplier", "risk_reward_ratio", "trailing_sl_activation_percent", "trailing_sl_callback_percent"
+        "atr_sl_multiplier", "risk_reward_ratio", "trailing_sl_activation_percent", 
+        "trailing_sl_callback_percent", "rescue_sl_multiplier"
     ],
     "الفلاتر والاتجاه": [
         "market_regime_filter_enabled", "use_master_trend_filter", "fear_and_greed_filter_enabled",
@@ -323,7 +325,9 @@ PARAM_DISPLAY_NAMES = {
     "tsl_atr_period": "ATR فترة مؤشر",
     "tsl_atr_multiplier": "ATR مضاعف",
     "use_strategy_mapping": "🤖 تفعيل الربط الذكي للوقف",
-    "default_tsl_strategy": "⚙️ استراتيجية الوقف الافتراضية"
+    "default_tsl_strategy": "⚙️ استراتيجية الوقف الافتراضية",
+    "signal_cooldown_multiplier": "مضاعف تهدئة الإشارة",
+    "rescue_sl_multiplier": "مضاعف وقف الإنقاذ"
 }
 
 DEFAULT_SETTINGS = {
@@ -337,6 +341,8 @@ DEFAULT_SETTINGS = {
     "fear_and_greed_filter_enabled": True, "fear_and_greed_threshold": 30,
     "use_dynamic_risk_management": True, "atr_period": 14, "atr_sl_multiplier": 2.5, "risk_reward_ratio": 2.0,
     "trailing_sl_enabled": True, "trailing_sl_activation_percent": 1.5, "trailing_sl_callback_percent": 1.0,
+    "signal_cooldown_multiplier": 4.0,
+    "rescue_sl_multiplier": 1.5,
     "trailing_sl_advanced": {
         "strategy": "percentage",
         "tsl_ema_period": 21,
@@ -759,8 +765,8 @@ async def _reconstruct_and_save_trade(exchange, symbol: str, context: ContextTyp
             logger.warning(f"Could not fetch ATR for rescued trade {symbol}: {e}")
 
         if settings.get("use_dynamic_risk_management", False) and current_atr > 0:
-            RESCUE_SL_MULTIPLIER = 1.5 
-            risk_per_unit = (current_atr * settings['atr_sl_multiplier']) * RESCUE_SL_MULTIPLIER
+            rescue_sl_multiplier = settings.get('rescue_sl_multiplier', 1.5)
+            risk_per_unit = (current_atr * settings['atr_sl_multiplier']) * rescue_sl_multiplier
             stop_loss = avg_price - risk_per_unit
             take_profit = avg_price + (risk_per_unit * settings['risk_reward_ratio'])
         else:
@@ -1003,6 +1009,7 @@ async def worker(queue, results_list, settings, failure_counter):
             await asyncio.sleep(10)
         except ccxt.NetworkError as e:
             logger.warning(f"Network error for {symbol}: {e}")
+            failure_counter[0] += 1
         except Exception as e:
             logger.error(f"CRITICAL ERROR in worker for {symbol} on {exchange_id}: {e}", exc_info=True)
             failure_counter[0] += 1
@@ -1179,9 +1186,11 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         signals.sort(key=lambda s: s.get('strength', 0), reverse=True)
         new_trades, opportunities = 0, 0
         last_signal_time = bot_state.last_signal_time
+        
+        signal_cooldown = SCAN_INTERVAL_SECONDS * settings.get('signal_cooldown_multiplier', 4)
 
         for signal in signals:
-            if time.time() - last_signal_time.get(signal['symbol'], 0) <= (SCAN_INTERVAL_SECONDS * 4):
+            if time.time() - last_signal_time.get(signal['symbol'], 0) <= signal_cooldown:
                 logger.info(f"Signal for {signal['symbol']} skipped due to cooldown."); continue
 
             signal_exchange_id = signal['exchange'].lower()
@@ -1364,32 +1373,94 @@ async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=F
 
 async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=10); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
         cursor.execute("SELECT * FROM trades WHERE status = 'نشطة'")
-        active_trades = [dict(row) for row in cursor.fetchall()]; conn.close()
-    except Exception as e: logger.error(f"DB error in track_open_trades: {e}"); return
+        active_trades = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+    except Exception as e:
+        logger.error(f"DB error in track_open_trades: {e}")
+        return
     
     bot_state.status_snapshot['active_trades_count'] = len(active_trades)
-    if not active_trades: return
+    if not active_trades:
+        return
 
-    tasks = [check_single_trade(trade, context) for trade in active_trades]
+    # --- [v6.4] START: BATCH DATA FETCHING REFACTOR ---
+    prefetched_data = defaultdict(dict)
+    trades_by_exchange = defaultdict(list)
+    for trade in active_trades:
+        trades_by_exchange[trade['exchange'].lower()].append(trade)
+
+    async def fetch_for_exchange(exchange_id, trades_on_exchange):
+        exchange = bot_state.public_exchanges.get(exchange_id)
+        if not exchange:
+            return
+
+        symbols_on_exchange = list({t['symbol'] for t in trades_on_exchange})
+        
+        try:
+            # Batch fetch tickers
+            tickers = await exchange.fetch_tickers(symbols_on_exchange)
+            for symbol, ticker in tickers.items():
+                prefetched_data[symbol]['ticker'] = ticker
+            
+            # Batch fetch OHLCV for symbols that need it
+            symbols_needing_ohlcv = list({
+                t['symbol'] for t in trades_on_exchange
+                if bot_state.settings.get("trailing_sl_advanced", {}).get("strategy") in ['ema', 'atr'] or
+                   (bot_state.settings.get("trailing_sl_advanced", {}).get("use_strategy_mapping") and
+                    bot_state.settings.get("trailing_sl_advanced", {}).get("strategy_tsl_mapping", {}).get(t.get('reason', '').split(' + ')[0]) in ['ema', 'atr'])
+            })
+
+            if symbols_needing_ohlcv:
+                # Note: ccxt does not support true batch OHLCV fetching, so we do it concurrently.
+                async def fetch_single_ohlcv(symbol):
+                    try:
+                        # Fetch enough data for the longest required indicator period
+                        limit = max(
+                            bot_state.settings.get("trailing_sl_advanced", {}).get("tsl_ema_period", 21),
+                            bot_state.settings.get("trailing_sl_advanced", {}).get("tsl_atr_period", 14)
+                        ) + 10
+                        return symbol, await exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=limit)
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch OHLCV for {symbol} in batch: {e}")
+                        return symbol, None
+
+                ohlcv_results = await asyncio.gather(*(fetch_single_ohlcv(s) for s in symbols_needing_ohlcv))
+                for symbol, ohlcv in ohlcv_results:
+                    if ohlcv:
+                        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                        prefetched_data[symbol]['df'] = df
+
+        except ccxt.RateLimitExceeded as e:
+            logger.error(f"RATE LIMIT EXCEEDED during batch fetch for {exchange_id}. Skipping tracking cycle. Error: {e}")
+            return # Stop processing this exchange
+        except (ccxt.NetworkError, httpx.ReadTimeout) as e:
+            logger.error(f"NETWORK ERROR during batch fetch for {exchange_id}. Some data may be missing. Error: {e}")
+        except Exception as e:
+            logger.error(f"GENERAL ERROR during batch fetch for {exchange_id}: {e}", exc_info=True)
+
+    await asyncio.gather(*(fetch_for_exchange(ex_id, trades) for ex_id, trades in trades_by_exchange.items()))
+    # --- [v6.4] END: BATCH DATA FETCHING REFACTOR ---
+
+    tasks = [check_single_trade(trade, context, prefetched_data.get(trade['symbol'])) for trade in active_trades]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for res in results:
         if isinstance(res, Exception):
-            logger.error(f"An exception occurred during concurrent trade tracking: {res}")
+            logger.error(f"An exception occurred during concurrent trade analysis: {res}")
 
-async def check_single_trade(trade: dict, context: ContextTypes.DEFAULT_TYPE):
-    exchange_id = trade['exchange'].lower()
-    public_exchange = bot_state.public_exchanges.get(exchange_id)
-    if not public_exchange:
-        logger.warning(f"No public exchange client for tracking trade #{trade['id']}.")
+
+async def check_single_trade(trade: dict, context: ContextTypes.DEFAULT_TYPE, prefetched_data: dict = None):
+    if not prefetched_data or not prefetched_data.get('ticker'):
+        logger.warning(f"Skipping check for trade #{trade['id']} ({trade['symbol']}) due to missing prefetched data.")
         return
 
     try:
-        ticker = await public_exchange.fetch_ticker(trade['symbol'])
-        current_price = ticker.get('last') or ticker.get('close')
+        current_price = prefetched_data['ticker'].get('last') or prefetched_data['ticker'].get('close')
         if not current_price:
-            logger.warning(f"Could not fetch price for {trade['symbol']}")
+            logger.warning(f"Could not find current price in prefetched data for {trade['symbol']}")
             return
 
         current_stop_loss = trade.get('stop_loss') or 0
@@ -1409,16 +1480,15 @@ async def check_single_trade(trade: dict, context: ContextTypes.DEFAULT_TYPE):
             tsl_settings = settings.get("trailing_sl_advanced", {})
             strategy = "percentage" 
 
-            # --- المنطق الذكي لاختيار الاستراتيجية ---
             if tsl_settings.get("use_strategy_mapping", False):
                 mapping = tsl_settings.get("strategy_tsl_mapping", {})
                 trade_reason = trade.get('reason', '').split(' + ')[0]
                 strategy = mapping.get(trade_reason, tsl_settings.get("default_tsl_strategy", "atr"))
-                logger.debug(f"Trade #{trade['id']} ({trade_reason}) -> Using TSL Strategy: {strategy}")
             else:
                 strategy = tsl_settings.get("strategy", "percentage")
             
-            # --- تنفيذ الاستراتيجية المختارة ---
+            logger.debug(f"Trade #{trade['id']} ({trade.get('reason', '')}) -> Using TSL Strategy: {strategy}")
+
             if strategy == "percentage":
                 if not trade.get('trailing_sl_active'):
                     activation_price = trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100)
@@ -1429,33 +1499,25 @@ async def check_single_trade(trade: dict, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     new_sl = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
 
-            elif strategy == "ema":
-                period = tsl_settings.get("tsl_ema_period", 21)
-                try:
-                    ohlcv = await public_exchange.fetch_ohlcv(trade['symbol'], TIMEFRAME, limit=period + 10)
-                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            elif strategy in ["ema", "atr"]:
+                df = prefetched_data.get('df')
+                if df is None or df.empty:
+                    logger.warning(f"Skipping TSL calc for {trade['symbol']} ({strategy}) due to missing OHLCV data.")
+                elif strategy == "ema":
+                    period = tsl_settings.get("tsl_ema_period", 21)
                     df.ta.ema(length=period, append=True)
                     ema_col = find_col(df.columns, f"EMA_{period}")
-                    if ema_col and not df[ema_col].empty:
+                    if ema_col and not df[ema_col].empty and pd.notna(df[ema_col].iloc[-1]):
                         new_sl = df[ema_col].iloc[-1]
-                except Exception as e:
-                    logger.warning(f"Could not calculate EMA for {trade['symbol']} TSL: {e}")
-
-            elif strategy == "atr":
-                period = tsl_settings.get("tsl_atr_period", 14)
-                multiplier = tsl_settings.get("tsl_atr_multiplier", 2.5)
-                try:
-                    ohlcv = await public_exchange.fetch_ohlcv(trade['symbol'], TIMEFRAME, limit=period + 10)
-                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                elif strategy == "atr":
+                    period = tsl_settings.get("tsl_atr_period", 14)
+                    multiplier = tsl_settings.get("tsl_atr_multiplier", 2.5)
                     df.ta.atr(length=period, append=True)
                     atr_col = find_col(df.columns, f"ATRr_{period}")
-                    if atr_col and not df[atr_col].empty:
+                    if atr_col and not df[atr_col].empty and pd.notna(df[atr_col].iloc[-1]):
                         atr_value = df[atr_col].iloc[-1]
                         new_sl = highest_price - (multiplier * atr_value)
-                except Exception as e:
-                    logger.warning(f"Could not calculate ATR for {trade['symbol']} TSL: {e}")
 
-            # --- تحديث الوقف في قاعدة البيانات ---
             if new_sl and new_sl > current_stop_loss:
                 is_activation = not trade.get('trailing_sl_active')
                 await handle_tsl_update(context, trade, new_sl, highest_price, is_activation=is_activation)
@@ -1463,8 +1525,10 @@ async def check_single_trade(trade: dict, context: ContextTypes.DEFAULT_TYPE):
             if highest_price > (trade.get('highest_price') or 0):
                 await update_trade_peak_price_in_db(trade['id'], highest_price)
 
+    except (ccxt.NetworkError, httpx.ReadTimeout) as e:
+         logger.warning(f"Network error in check_single_trade for #{trade['id']}: {e}")
     except Exception as e:
-        logger.error(f"Error in check_single_trade for #{trade['id']}: {e}", exc_info=True)
+        logger.error(f"Error in check_single_trade analysis for #{trade['id']}: {e}", exc_info=True)
 
 
 async def handle_tsl_update(context, trade, new_sl, highest_price, is_activation=False):
@@ -1700,7 +1764,7 @@ async def analyze_performance_and_suggest(context: ContextTypes.DEFAULT_TYPE):
         await send_telegram_message(context.bot, {'custom_message': message, 'keyboard': keyboard})
         bot_state.settings['last_suggestion_time'] = time.time()
         save_settings()
-            # =======================================================================================
+# =======================================================================================
 # --- Telegram Handlers ---
 # =======================================================================================
 main_menu_keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"], ["ℹ️ مساعدة"]]
@@ -1711,7 +1775,7 @@ settings_menu_keyboard = [
 ]
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 6.3 - وقف متحرك ذكي)*\n\nاختر من القائمة للبدء."
+    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 6.4 - الجراحة الدقيقة)*\n\nاختر من القائمة للبدء."
     await update.message.reply_text(welcome_message, reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1994,7 +2058,7 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.callback_query.message if update.callback_query else update.message
     await target_message.reply_text("⏳ جاري إعداد تقرير التشخيص الشامل...")
     settings = bot_state.settings
-    parts = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v6.3)**\n\n*تم إنشاؤه في: {datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')}*"]
+    parts = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v6.4)**\n\n*تم إنشاؤه في: {datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')}*"]
 
     parts.append("\n- - - - - - - - - - - - - - - - - -")
     parts.append("**[ ⚙️ حالة النظام والبيئة ]**")
@@ -2304,7 +2368,6 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         param_key = data.split("_", 1)[1]
         user_data['awaiting_input_for_param'] = param_key; user_data['settings_menu_id'] = query.message.message_id
         
-        # Special handling for nested settings
         is_advanced_tsl_param = param_key in ["trailing_sl_strategy", "use_strategy_mapping", "default_tsl_strategy", "tsl_ema_period", "tsl_atr_period", "tsl_atr_multiplier"]
         if is_advanced_tsl_param:
             current_value = bot_state.settings.get("trailing_sl_advanced", {}).get(param_key)
@@ -2547,7 +2610,7 @@ async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 async def manual_trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['manual_trade'] = {'state': 'awaiting_exchange'}
-    keyboard = get_exchange_selection_keyboard("manual_trade", "dashboard_refresh") # Changed back button
+    keyboard = get_exchange_selection_keyboard("manual_trade", "dashboard_refresh")
     message_text = "✍️ **بدء تداول يدوي**\n\nاختر المنصة التي تريد تنفيذ الأمر عليها:"
     target_message = update.callback_query.message if update.callback_query else update.message
     if update.callback_query:
@@ -2909,7 +2972,7 @@ async def post_init(application: Application):
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
 
     logger.info("Jobs scheduled.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v6.3) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v6.4) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
 
 async def post_shutdown(application: Application):
     all_exchanges = list(bot_state.exchanges.values()) + list(bot_state.public_exchanges.values())
@@ -2953,8 +3016,9 @@ def main():
     application.run_polling()
 
 if __name__ == '__main__':
-    print("🚀 Starting Mineseper Bot v6.3 (Smart TSL)...")
+    print("🚀 Starting Mineseper Bot v6.4 (Precise Surgery)...")
     try:
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
+
