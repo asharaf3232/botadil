@@ -264,7 +264,7 @@ async def worker(queue, results_list, settings, failure_counter):
 
 
 async def place_real_trade(signal):
-    from telegram_bot import send_telegram_message # Local import
+    from binance_trader import send_telegram_message # Local import
     exchange_id = signal['exchange'].lower()
     adapter = get_exchange_adapter(exchange_id)
     if not adapter:
