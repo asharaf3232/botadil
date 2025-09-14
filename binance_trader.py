@@ -1,19 +1,18 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v6.2 (الإنقاذ الذكي والتحسينات) 💣 ---
+# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v6.3 (وقف متحرك ذكي) 💣 ---
 # =======================================================================================
-# --- سجل التغييرات v6.2 ---
+# --- سجل التغييرات v6.3 ---
 #
-# 1. [ميزة رئيسية] تمت ترقية أداة "المزامنة" إلى "المزامنة والإنقاذ الذكي":
-#    - تقوم الأداة الآن تلقائياً باكتشاف الصفقات "اليتيمة" (الموجودة في المنصة وغير المسجلة).
-#    - يمكن استيراد أي صفقة يتيمة بضغطة زر.
-#    - يقوم البوت بالبحث في سجل التداول لحساب متوسط سعر الشراء بدقة وإعادة بناء الصفقة.
-#    - تبدأ متابعة الصفقة المستوردة فوراً، مما يحل مشكلة فقدان البيانات عند إعادة التشغيل.
-# 2. [تحسين وظيفي] تم تفعيل زر التحديث (🔄) في لوحة التحكم:
-#    - يقوم الزر الآن ببدء عملية فحص يدوي فوري للسوق عند الطلب.
-# 3. [تحسين الواجهة] تم تحسين تقرير التشخيص:
-#    - يعرض الآن الوقت المتبقي للعمليات المجدولة (الفحص والمتابعة) كعد تنازلي.
-#    - يعرض حالة "يعمل الآن" إذا كانت المهمة قيد التنفيذ لمزيد من الوضوح.
+# 1. [ميزة رئيسية] تم تطوير نظام الوقف المتحرك (Trailing Stop-Loss) بالكامل:
+#    - أصبح النظام الآن يدعم ثلاث استراتيجيات مختلفة:
+#      1. النسبة المئوية (Percentage): مع تحسين لتكون أقل عدوانية عند التفعيل الأولي.
+#      2. المتوسط المتحرك (EMA): لملاحقة الاتجاهات القوية وترك الأرباح تنمو.
+#      3. مؤشر التقلب (ATR): لوضع وقف ديناميكي يتكيف مع تقلبات السوق.
+# 2. [ميزة ذكاء اصطناعي] تم إضافة ميزة "الربط الذكي" لاستراتيجية الوقف:
+#    - يقوم البوت الآن تلقائياً باختيار أفضل استراتيجية وقف متحرك بناءً على سبب الدخول في الصفقة.
+#    - (مثال: صفقات الزخم تستخدم EMA، وصفقات الحيتان تستخدم ATR).
+# 3. [تحسين الواجهة] تمت إضافة قسم جديد وكامل في الإعدادات للتحكم في استراتيجيات الوقف.
 #
 # =======================================================================================
 
@@ -289,6 +288,14 @@ EDITABLE_PARAMS = {
         "market_regime_filter_enabled", "use_master_trend_filter", "fear_and_greed_filter_enabled",
         "master_adx_filter_level", "master_trend_filter_ma_period", "trailing_sl_enabled", "fear_and_greed_threshold",
         "fundamental_analysis_enabled"
+    ],
+    "استراتيجية الوقف المتحرك": [
+        "trailing_sl_strategy", 
+        "use_strategy_mapping", 
+        "default_tsl_strategy",
+        "tsl_ema_period", 
+        "tsl_atr_period", 
+        "tsl_atr_multiplier"
     ]
 }
 PARAM_DISPLAY_NAMES = {
@@ -311,6 +318,12 @@ PARAM_DISPLAY_NAMES = {
     "fear_and_greed_filter_enabled": "فلتر الخوف والطمع",
     "fear_and_greed_threshold": "حد مؤشر الخوف",
     "fundamental_analysis_enabled": "فلتر الأخبار والبيانات",
+    "trailing_sl_strategy": "⚙️ الاستراتيجية اليدوية",
+    "tsl_ema_period": "EMA فترة متوسط",
+    "tsl_atr_period": "ATR فترة مؤشر",
+    "tsl_atr_multiplier": "ATR مضاعف",
+    "use_strategy_mapping": "🤖 تفعيل الربط الذكي للوقف",
+    "default_tsl_strategy": "⚙️ استراتيجية الوقف الافتراضية"
 }
 
 DEFAULT_SETTINGS = {
@@ -324,6 +337,22 @@ DEFAULT_SETTINGS = {
     "fear_and_greed_filter_enabled": True, "fear_and_greed_threshold": 30,
     "use_dynamic_risk_management": True, "atr_period": 14, "atr_sl_multiplier": 2.5, "risk_reward_ratio": 2.0,
     "trailing_sl_enabled": True, "trailing_sl_activation_percent": 1.5, "trailing_sl_callback_percent": 1.0,
+    "trailing_sl_advanced": {
+        "strategy": "percentage",
+        "tsl_ema_period": 21,
+        "tsl_atr_period": 14,
+        "tsl_atr_multiplier": 2.5,
+        "use_strategy_mapping": True,
+        "default_tsl_strategy": "atr",
+        "strategy_tsl_mapping": {
+            "momentum_breakout": "ema",
+            "breakout_squeeze_pro": "ema",
+            "sniper_pro": "ema",
+            "whale_radar": "atr",
+            "support_rebound": "percentage",
+            "Rescued/Imported": "atr"
+        }
+    },
     "momentum_breakout": {"vwap_period": 14, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9, "bbands_period": 20, "bbands_stddev": 2.0, "rsi_period": 14, "rsi_max_level": 68, "volume_spike_multiplier": 1.5},
     "breakout_squeeze_pro": {"bbands_period": 20, "bbands_stddev": 2.0, "keltner_period": 20, "keltner_atr_multiplier": 1.5, "volume_confirmation_enabled": True},
     "sniper_pro": {"compression_hours": 6, "max_volatility_percent": 12.0},
@@ -342,7 +371,6 @@ DEFAULT_SETTINGS = {
 # =======================================================================================
 # --- Helper Functions (Settings, DB, Analysis, etc.) ---
 # =======================================================================================
-
 def load_settings():
     try:
         if os.path.exists(SETTINGS_FILE):
@@ -436,20 +464,15 @@ def log_recommendation_to_db(signal):
             logger.error(f"Attempted to log trade for {signal['symbol']} with missing quantity.")
             return None
 
-        # --- START OF FIX ---
-        # 1. Get the timestamp object (either from signal or the current time)
         timestamp_obj = signal.get('timestamp', datetime.now(EGYPT_TZ))
 
-        # 2. Convert the timestamp object to a string in the correct format
-        # Handle cases where timestamp might already be a string
         if isinstance(timestamp_obj, str):
             timestamp_str = timestamp_obj
         else:
             timestamp_str = timestamp_obj.strftime('%Y-%m-%d %H:%M:%S')
-        # --- END OF FIX ---
 
         params = (
-            timestamp_str, # Use the guaranteed string variable here
+            timestamp_str,
             signal['exchange'],
             signal['symbol'],
             signal.get('entry_price'),
@@ -683,14 +706,12 @@ async def _calculate_weighted_average_price(trades: list) -> tuple:
     if not trades:
         return 0, 0, None
 
-    # 1. Find the index of the last 'sell' trade
     last_sell_index = -1
     for i in range(len(trades) - 1, -1, -1):
         if trades[i].get('side') == 'sell':
             last_sell_index = i
             break
 
-    # 2. Isolate buy trades that occurred after the last sell
     buy_trades = [
         trade for trade in trades[last_sell_index + 1:] 
         if trade.get('side') == 'buy' and trade.get('cost', 0) > 0 and trade.get('amount', 0) > 0
@@ -699,17 +720,13 @@ async def _calculate_weighted_average_price(trades: list) -> tuple:
     if not buy_trades:
         return 0, 0, None
 
-    # 3. Calculate total cost and total amount for the current open position
     total_cost = sum(t['cost'] for t in buy_trades)
     total_amount = sum(t['amount'] for t in buy_trades)
 
     if total_amount == 0:
         return 0, 0, None
 
-    # 4. Calculate the weighted average price
     average_price = total_cost / total_amount
-    
-    # 5. Get the timestamp of the first buy trade in the current position
     first_trade_timestamp = datetime.fromtimestamp(buy_trades[0]['timestamp'] / 1000, tz=EGYPT_TZ)
 
     return average_price, total_amount, first_trade_timestamp
@@ -742,18 +759,16 @@ async def _reconstruct_and_save_trade(exchange, symbol: str, context: ContextTyp
             logger.warning(f"Could not fetch ATR for rescued trade {symbol}: {e}")
 
         if settings.get("use_dynamic_risk_management", False) and current_atr > 0:
-            # Give rescued trades a wider initial berth to avoid instant SL triggers
             RESCUE_SL_MULTIPLIER = 1.5 
             risk_per_unit = (current_atr * settings['atr_sl_multiplier']) * RESCUE_SL_MULTIPLIER
             stop_loss = avg_price - risk_per_unit
             take_profit = avg_price + (risk_per_unit * settings['risk_reward_ratio'])
-        else: # Fallback to percentage if ATR fails
-            sl_percent = 7.0  # Increased significantly to 7%
-            tp_percent = 14.0 # Keep R:R ratio
+        else:
+            sl_percent = 7.0
+            tp_percent = 14.0
             stop_loss = avg_price * (1 - sl_percent / 100)
             take_profit = avg_price * (1 + tp_percent / 100)
 
-        # Reconstruct signal object to log it
         rescued_signal = {
             'exchange': exchange.id.capitalize(),
             'symbol': symbol,
@@ -768,7 +783,7 @@ async def _reconstruct_and_save_trade(exchange, symbol: str, context: ContextTyp
             'is_real_trade': True,
             'timestamp': first_trade_time.strftime('%Y-%m-%d %H:%M:%S'),
             'entry_order_id': 'imported',
-            'exit_order_ids_json': '{}' # No exit orders initially
+            'exit_order_ids_json': '{}'
         }
         
         if trade_id := log_recommendation_to_db(rescued_signal):
@@ -820,7 +835,6 @@ async def initialize_exchanges():
 
 
 async def aggregate_top_movers():
-    # [v6.1] This function is completely rewritten for the new hybrid priority logic.
     all_tickers = []
     async def fetch(ex_id, ex):
         try:
@@ -837,7 +851,6 @@ async def aggregate_top_movers():
     excluded_bases = settings['stablecoin_filter']['exclude_bases']
     min_volume = settings['liquidity_filters']['min_quote_volume_24h_usd']
     
-    # 1. Initial Filtering
     usdt_tickers = [
         t for t in all_tickers if t.get('symbol') and t['symbol'].upper().endswith('/USDT') and 
         t['symbol'].split('/')[0] not in excluded_bases and 
@@ -845,29 +858,23 @@ async def aggregate_top_movers():
         not any(k in t['symbol'].upper() for k in ['UP','DOWN','3L','3S','BEAR','BULL'])
     ]
 
-    # 2. Group by symbol
     grouped_symbols = defaultdict(list)
     for ticker in usdt_tickers:
         grouped_symbols[ticker['symbol']].append(ticker)
 
-    # 3. Apply Priority Logic
     final_list = []
     real_trading_exchanges = {ex for ex, enabled in settings.get("real_trading_per_exchange", {}).items() if enabled}
     
     for symbol, tickers in grouped_symbols.items():
-        # Priority 1: Check for exchanges with real trading enabled
         real_trade_options = [t for t in tickers if t['exchange'] in real_trading_exchanges]
         
         if real_trade_options:
-            # If multiple real trading exchanges have the same coin, pick the one with higher volume
             best_option = max(real_trade_options, key=lambda t: t.get('quoteVolume', 0))
             final_list.append(best_option)
         else:
-            # Priority 2: If no real trading, pick the one with the highest volume
             best_option = max(tickers, key=lambda t: t.get('quoteVolume', 0))
             final_list.append(best_option)
 
-    # 4. Sort the final unique list by volume and take the top N
     final_list.sort(key=lambda t: t.get('quoteVolume', 0), reverse=True)
     top_markets = final_list[:settings['top_n_symbols_by_volume']]
     
@@ -892,7 +899,7 @@ async def worker(queue, results_list, settings, failure_counter):
     while not queue.empty():
         market_info = await queue.get()
         symbol = market_info.get('symbol', 'N/A')
-        exchange_id = market_info.get('exchange') # Keep the id as a string
+        exchange_id = market_info.get('exchange')
         exchange = bot_state.public_exchanges.get(exchange_id)
         if not exchange or not settings.get('active_scanners'):
             queue.task_done()
@@ -1396,18 +1403,62 @@ async def check_single_trade(trade: dict, context: ContextTypes.DEFAULT_TYPE):
 
         settings = bot_state.settings
         if settings.get('trailing_sl_enabled', True):
-            highest_price = max(trade.get('highest_price', current_price) or current_price, current_price)
+            highest_price = max(trade.get('highest_price', 0) or current_price, current_price)
+            new_sl = None
             
-            if not trade.get('trailing_sl_active'):
-                activation_price = trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100)
-                if current_price >= activation_price:
-                    new_sl = trade['entry_price']
-                    if new_sl > current_stop_loss:
-                        await handle_tsl_update(context, trade, new_sl, highest_price, is_activation=True)
-            elif trade.get('trailing_sl_active'):
-                new_sl = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
-                if new_sl > current_stop_loss:
-                    await handle_tsl_update(context, trade, new_sl, highest_price)
+            tsl_settings = settings.get("trailing_sl_advanced", {})
+            strategy = "percentage" 
+
+            # --- المنطق الذكي لاختيار الاستراتيجية ---
+            if tsl_settings.get("use_strategy_mapping", False):
+                mapping = tsl_settings.get("strategy_tsl_mapping", {})
+                trade_reason = trade.get('reason', '').split(' + ')[0]
+                strategy = mapping.get(trade_reason, tsl_settings.get("default_tsl_strategy", "atr"))
+                logger.debug(f"Trade #{trade['id']} ({trade_reason}) -> Using TSL Strategy: {strategy}")
+            else:
+                strategy = tsl_settings.get("strategy", "percentage")
+            
+            # --- تنفيذ الاستراتيجية المختارة ---
+            if strategy == "percentage":
+                if not trade.get('trailing_sl_active'):
+                    activation_price = trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100)
+                    if current_price >= activation_price:
+                        original_sl = trade['stop_loss']
+                        entry_price = trade['entry_price']
+                        new_sl = original_sl + (entry_price - original_sl) / 2
+                else:
+                    new_sl = highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
+
+            elif strategy == "ema":
+                period = tsl_settings.get("tsl_ema_period", 21)
+                try:
+                    ohlcv = await public_exchange.fetch_ohlcv(trade['symbol'], TIMEFRAME, limit=period + 10)
+                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    df.ta.ema(length=period, append=True)
+                    ema_col = find_col(df.columns, f"EMA_{period}")
+                    if ema_col and not df[ema_col].empty:
+                        new_sl = df[ema_col].iloc[-1]
+                except Exception as e:
+                    logger.warning(f"Could not calculate EMA for {trade['symbol']} TSL: {e}")
+
+            elif strategy == "atr":
+                period = tsl_settings.get("tsl_atr_period", 14)
+                multiplier = tsl_settings.get("tsl_atr_multiplier", 2.5)
+                try:
+                    ohlcv = await public_exchange.fetch_ohlcv(trade['symbol'], TIMEFRAME, limit=period + 10)
+                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    df.ta.atr(length=period, append=True)
+                    atr_col = find_col(df.columns, f"ATRr_{period}")
+                    if atr_col and not df[atr_col].empty:
+                        atr_value = df[atr_col].iloc[-1]
+                        new_sl = highest_price - (multiplier * atr_value)
+                except Exception as e:
+                    logger.warning(f"Could not calculate ATR for {trade['symbol']} TSL: {e}")
+
+            # --- تحديث الوقف في قاعدة البيانات ---
+            if new_sl and new_sl > current_stop_loss:
+                is_activation = not trade.get('trailing_sl_active')
+                await handle_tsl_update(context, trade, new_sl, highest_price, is_activation=is_activation)
             
             if highest_price > (trade.get('highest_price') or 0):
                 await update_trade_peak_price_in_db(trade['id'], highest_price)
@@ -1440,32 +1491,25 @@ async def update_real_trade_sl(context, trade, new_sl, highest_price, is_activat
     logger.info(f"TSL AUTOMATION: Attempting for trade #{trade['id']} ({symbol}). New SL: {new_sl}")
 
     try:
-        # Step 1: Proactively cancel ALL existing open orders for this symbol to ensure a clean slate.
-        # This is the most robust way to handle TSL updates, manual interventions, or partially filled orders.
         try:
             open_orders = await adapter.exchange.fetch_open_orders(symbol)
             if open_orders:
                 logger.warning(f"Found {len(open_orders)} existing open order(s) for {symbol}. Cancelling them to place updated TSL.")
                 await adapter.exchange.cancel_all_orders(symbol)
-                await asyncio.sleep(2) # Give the exchange a moment to process cancellations
+                await asyncio.sleep(2)
         except Exception as e:
-            # If cancellation fails, we log it but still proceed. The balance might be free.
             logger.error(f"Could not cancel existing orders for {symbol} during TSL update, but proceeding anyway. Error: {e}")
 
-        # Step 2: Place the new set of exit orders with the updated stop loss.
         updated_signal = {
             'symbol': trade['symbol'],
-            'take_profit': trade['take_profit'], # The take profit remains the same
-            'stop_loss': new_sl, # The stop loss is updated
+            'take_profit': trade['take_profit'],
+            'stop_loss': new_sl,
         }
         new_exit_ids = await adapter.place_exit_orders(updated_signal, trade['quantity'])
 
-        # Step 3: Update the database with the new SL and the new order IDs.
-        # We make it silent to prevent double messaging, and send the activation message manually.
         await update_trade_sl_in_db(context, trade, new_sl, highest_price, is_activation=is_activation, new_exit_ids_json=json.dumps(new_exit_ids), silent=True)
         logger.info(f"TSL automation successful for trade #{trade['id']}. New orders placed: {new_exit_ids}")
 
-        # Step 4: Notify the user only on the first activation for clarity.
         if is_activation:
             await send_telegram_message(context.bot, {**trade, "new_sl": new_sl}, update_type='tsl_activation')
 
@@ -1477,11 +1521,10 @@ async def update_real_trade_sl(context, trade, new_sl, highest_price, is_activat
 async def close_trade_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict, exit_price: float, is_win: bool):
     pnl_usdt = (exit_price - trade['entry_price']) * trade['quantity']
     
-    # [v6.1] New Status Logic
     status = ""
     if is_win:
         status = 'ناجحة (تحقيق هدف)'
-    else: # Hit stop loss
+    else:
         if pnl_usdt > 0:
             status = 'ناجحة (وقف ربح)'
         else:
@@ -1657,8 +1700,7 @@ async def analyze_performance_and_suggest(context: ContextTypes.DEFAULT_TYPE):
         await send_telegram_message(context.bot, {'custom_message': message, 'keyboard': keyboard})
         bot_state.settings['last_suggestion_time'] = time.time()
         save_settings()
-
-# =======================================================================================
+            # =======================================================================================
 # --- Telegram Handlers ---
 # =======================================================================================
 main_menu_keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"], ["ℹ️ مساعدة"]]
@@ -1669,7 +1711,7 @@ settings_menu_keyboard = [
 ]
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 6.2 - الإنقاذ الذكي)*\n\nاختر من القائمة للبدء."
+    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 6.3 - وقف متحرك ذكي)*\n\nاختر من القائمة للبدء."
     await update.message.reply_text(welcome_message, reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1745,7 +1787,13 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
             button_row = []
             for param_key in row:
                 display_name = PARAM_DISPLAY_NAMES.get(param_key, param_key)
-                current_value = settings.get(param_key, "N/A")
+                
+                # Special handling for nested settings
+                if param_key in ["trailing_sl_strategy", "use_strategy_mapping", "default_tsl_strategy", "tsl_ema_period", "tsl_atr_period", "tsl_atr_multiplier"]:
+                     current_value = settings.get("trailing_sl_advanced", {}).get(param_key, "N/A")
+                else:
+                     current_value = settings.get(param_key, "N/A")
+
                 text = f"{display_name}: {'مُفعّل ✅' if current_value else 'مُعطّل ❌'}" if isinstance(current_value, bool) else f"{display_name}: {current_value}"
                 button_row.append(InlineKeyboardButton(text, callback_data=f"param_{param_key}"))
             keyboard.append(button_row)
@@ -1790,7 +1838,6 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trad
             counts[status] = count
             pnl[status] = p or 0
 
-        # [v6.1] Group success statuses together for calculation
         successful = counts['ناجحة (تحقيق هدف)'] + counts['ناجحة (وقف ربح)']
         failed = counts['فاشلة (وقف خسارة)']
         active = counts['نشطة']
@@ -1860,7 +1907,6 @@ def generate_performance_report_string(trade_mode_filter='all'):
             reasons = [r.strip() for r in trade['reason'].split('+')]
             for reason in reasons:
                 stats = strategy_stats[reason]
-                # [v6.1] Check if status starts with 'ناجحة'
                 if trade['status'].startswith('ناجحة'):
                     stats['wins'] += 1
                 elif trade['status'].startswith('فاشلة'):
@@ -1948,7 +1994,7 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.callback_query.message if update.callback_query else update.message
     await target_message.reply_text("⏳ جاري إعداد تقرير التشخيص الشامل...")
     settings = bot_state.settings
-    parts = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v6.2)**\n\n*تم إنشاؤه في: {datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')}*"]
+    parts = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v6.3)**\n\n*تم إنشاؤه في: {datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')}*"]
 
     parts.append("\n- - - - - - - - - - - - - - - - - -")
     parts.append("**[ ⚙️ حالة النظام والبيئة ]**")
@@ -1992,13 +2038,11 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             scan_job = context.job_queue.get_jobs_by_name('perform_scan')
             track_job = context.job_queue.get_jobs_by_name('track_open_trades')
 
-            # [v6.2] New logic for countdown timer
             def get_next_run_str(job):
                 if not job or not job[0].next_t: return 'N/A'
                 now = datetime.now(EGYPT_TZ)
                 next_t = job[0].next_t.astimezone(EGYPT_TZ)
                 if next_t < now:
-                    # Check if the job is currently running
                     if job[0].enabled:
                          return 'يعمل الآن أو سيبدأ خلال ثوانٍ'
                     else:
@@ -2157,7 +2201,6 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query; await query.answer(); data = query.data
     user_data = context.user_data
 
-    # [v6.2] New Rescue Handler
     if data.startswith("rescue_"):
         _, exchange_id, symbol = data.split("_", 2)
         exchange = bot_state.exchanges.get(exchange_id)
@@ -2169,9 +2212,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         
         result_message = await _reconstruct_and_save_trade(exchange, symbol, context)
         
-        # After rescue, refresh the sync report
         await query.message.reply_text(result_message, parse_mode=ParseMode.MARKDOWN)
-        await process_sync_portfolio(update, context, exchange_id) # Refresh the sync list
+        await process_sync_portfolio(update, context, exchange_id)
         return
 
     if data.startswith("dashboard_") and data.endswith(('_all', '_real', '_virtual')):
@@ -2260,10 +2302,21 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             await query.edit_message_text("✅ تم تفعيل النمط.", reply_markup=get_presets_keyboard())
     elif data.startswith("param_"):
         param_key = data.split("_", 1)[1]
-        context.user_data['awaiting_input_for_param'] = param_key; context.user_data['settings_menu_id'] = query.message.message_id
-        current_value = bot_state.settings.get(param_key)
+        user_data['awaiting_input_for_param'] = param_key; user_data['settings_menu_id'] = query.message.message_id
+        
+        # Special handling for nested settings
+        is_advanced_tsl_param = param_key in ["trailing_sl_strategy", "use_strategy_mapping", "default_tsl_strategy", "tsl_ema_period", "tsl_atr_period", "tsl_atr_multiplier"]
+        if is_advanced_tsl_param:
+            current_value = bot_state.settings.get("trailing_sl_advanced", {}).get(param_key)
+        else:
+            current_value = bot_state.settings.get(param_key)
+
         if isinstance(current_value, bool):
-            bot_state.settings[param_key] = not current_value
+            if is_advanced_tsl_param:
+                bot_state.settings["trailing_sl_advanced"][param_key] = not current_value
+            else:
+                bot_state.settings[param_key] = not current_value
+
             bot_state.settings["active_preset_name"] = "Custom"; save_settings()
             await query.answer(f"✅ تم تبديل '{PARAM_DISPLAY_NAMES.get(param_key, param_key)}'")
             await show_parameters_menu(update, context)
@@ -2465,13 +2518,23 @@ async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_T
         await context.bot.delete_message(chat_id=chat_id, message_id=update.message.message_id)
         settings = bot_state.settings
         try:
-            current_type = type(settings.get(param, ''))
+            # Special handling for nested settings
+            is_advanced_tsl_param = param in ["trailing_sl_strategy", "use_strategy_mapping", "default_tsl_strategy", "tsl_ema_period", "tsl_atr_period", "tsl_atr_multiplier"]
+            if is_advanced_tsl_param:
+                target_dict = settings.get("trailing_sl_advanced", {})
+                current_type = type(target_dict.get(param, ''))
+            else:
+                target_dict = settings
+                current_type = type(settings.get(param, ''))
+
             new_value = current_type(value_str)
-            if isinstance(settings.get(param), bool):
+            if isinstance(target_dict.get(param), bool):
                 new_value = value_str.lower() in ['true', '1', 'yes', 'on', 'نعم', 'تفعيل']
-            settings[param] = new_value
+            
+            target_dict[param] = new_value
             settings["active_preset_name"] = "Custom"
             save_settings()
+            
             if settings_menu_id: context.user_data['settings_menu_id'] = settings_menu_id
             await show_parameters_menu(update, context)
             confirm_msg = await update.message.reply_text(f"✅ تم تحديث **{PARAM_DISPLAY_NAMES.get(param, param)}** إلى `{new_value}`.", parse_mode=ParseMode.MARKDOWN)
@@ -2775,7 +2838,6 @@ async def sync_portfolio_command(update: Update, context: ContextTypes.DEFAULT_T
         )
 
 async def process_sync_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE, exchange_id: str):
-    # [v6.2] Major overhaul to support trade rescue/import
     target_message = update.callback_query.message
     await target_message.edit_text(f"🔄 **المزامنة والإنقاذ الذكي**\n\n⏳ جارِ الاتصال بمنصة {exchange_id.capitalize()} ومقارنة البيانات...", parse_mode=ParseMode.MARKDOWN)
     
@@ -2795,7 +2857,7 @@ async def process_sync_portfolio(update: Update, context: ContextTypes.DEFAULT_T
 
         matched_symbols = bot_symbols.intersection(exchange_symbols)
         bot_only_symbols = bot_symbols.difference(exchange_symbols)
-        exchange_only_symbols = exchange_symbols.difference(bot_symbols) # These are the "orphaned" trades
+        exchange_only_symbols = exchange_symbols.difference(bot_symbols)
 
         parts = [f"**🔄 تقرير المزامنة ({exchange.id.capitalize()})**\n"]
         parts.append(f"تمت مقارنة `{len(bot_symbols)}` صفقة مُدارة بواسطة البوت مع `{len(exchange_symbols)}` عملة مملوكة في المنصة.\n")
@@ -2810,7 +2872,6 @@ async def process_sync_portfolio(update: Update, context: ContextTypes.DEFAULT_T
         keyboard_buttons = []
         if exchange_only_symbols:
             for symbol in exchange_only_symbols:
-                # Add a button for each orphaned trade
                 keyboard_buttons.append([InlineKeyboardButton(f"➕ استيراد ومتابعة {symbol}", callback_data=f"rescue_{exchange_id}_{symbol}")])
         else:
             parts.append("لا توجد صفقات يتيمة لاستيرادها. كل شيء متزامن!")
@@ -2848,7 +2909,7 @@ async def post_init(application: Application):
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
 
     logger.info("Jobs scheduled.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v6.2) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v6.3) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
 
 async def post_shutdown(application: Application):
     all_exchanges = list(bot_state.exchanges.values()) + list(bot_state.public_exchanges.values())
@@ -2870,7 +2931,7 @@ def main():
         .token(TELEGRAM_BOT_TOKEN)
         .connect_timeout(60.0)
         .read_timeout(60.0)
-        .connection_pool_size(50)  # زيادة سعة الاتصال لحل مشكلة الضغط
+        .connection_pool_size(50)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()
@@ -2892,13 +2953,8 @@ def main():
     application.run_polling()
 
 if __name__ == '__main__':
-    print("🚀 Starting Mineseper Bot v6.2 (Smart Rescue & Refinements)...")
+    print("🚀 Starting Mineseper Bot v6.3 (Smart TSL)...")
     try:
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
-
-
-
-
-
