@@ -1,19 +1,17 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v6.4 (الجراحة الدقيقة) 💣 ---
+# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v6.5 (الجراحة المتقدمة) 💣 ---
 # =======================================================================================
-# --- سجل التغييرات v6.4 ---
+# --- سجل التغييرات v6.5 ---
 #
-# 1. [جراحة أداء حرجة] تم إعادة هيكلة نظام متابعة الصفقات بالكامل:
-#    - يقوم البوت الآن بجلب كل بيانات السوق (الأسعار والشموع) المطلوبة للصفقات النشطة
-#      في عملية واحدة مجمّعة لكل منصة، مما يقلل طلبات الـ API بنسبة تصل إلى 95%.
-#    - هذا الإصلاح يمنع بشكل شبه كامل خطر الحظر المؤقت (Rate Limiting) ويزيد سرعة المتابعة.
-# 2. [جراحة موثوقية] تم تحسين نظام معالجة الأخطاء بشكل كبير:
-#    - استبدال معالجات الأخطاء العامة بمعالجات متخصصة (NetworkError, RateLimitExceeded)
-#      مما يجعل البوت أكثر قدرة على التعامل مع مشاكل الاتصال المؤقتة والتعافي منها.
-# 3. [تحسين هيكلي] تم إزالة "الأرقام السحرية" (Hard-coded numbers):
-#    - تم تحويل القيم الثابتة (مثل فترة تهدئة الإشارة ومضاعف وقف الإنقاذ) إلى إعدادات
-#      يمكن التحكم بها من واجهة تليجرام لزيادة المرونة.
+# 1. [جراحة الذاكرة] تم زرع ذاكرة دائمة للبوت:
+#    - يقوم البوت الآن بحفظ سجل "تهدئة الإشارات" (last_signal_time) في ملف الإعدادات.
+#    - عند إعادة التشغيل، يستعيد البوت ذاكرته ويمنع فتح صفقات مكررة لنفس العملة.
+# 2. [جراحة الشريان التاجي] تم بناء آلية احتياطية لنقاط الفشل الوحيدة:
+#    - فلتر الاتجاه العام للسوق لم يعد يعتمد على Binance فقط.
+#    - سيحاول البوت الآن جلب بيانات BTC من قائمة منصات احتياطية (يمكن تخصيصها)
+#      في حال فشل الاتصال بالمنصة الأساسية، مما يضمن استمرارية العمل.
+# 3. [تحسين هيكلي] تم تحسين منطق تحميل وحفظ الإعدادات ليدعم الذاكرة الدائمة.
 #
 # =======================================================================================
 
@@ -338,6 +336,7 @@ DEFAULT_SETTINGS = {
     "market_regime_filter_enabled": True, "fundamental_analysis_enabled": True,
     "active_scanners": ["momentum_breakout", "breakout_squeeze_pro", "support_rebound", "whale_radar", "sniper_pro"],
     "use_master_trend_filter": True, "master_trend_filter_ma_period": 50, "master_adx_filter_level": 22,
+    "btc_trend_source_exchanges": ["binance", "bybit", "kucoin"], # [v6.5] New setting for redundancy
     "fear_and_greed_filter_enabled": True, "fear_and_greed_threshold": 30,
     "use_dynamic_risk_management": True, "atr_period": 14, "atr_sl_multiplier": 2.5, "risk_reward_ratio": 2.0,
     "trailing_sl_enabled": True, "trailing_sl_activation_percent": 1.5, "trailing_sl_callback_percent": 1.0,
@@ -358,6 +357,9 @@ DEFAULT_SETTINGS = {
             "support_rebound": "percentage",
             "Rescued/Imported": "atr"
         }
+    },
+    "_internal_state": { # [v6.5] New section for persistent state
+        "last_signal_time": {}
     },
     "momentum_breakout": {"vwap_period": 14, "macd_fast": 12, "macd_slow": 26, "macd_signal": 9, "bbands_period": 20, "bbands_stddev": 2.0, "rsi_period": 14, "rsi_max_level": 68, "volume_spike_multiplier": 1.5},
     "breakout_squeeze_pro": {"bbands_period": 20, "bbands_stddev": 2.0, "keltner_period": 20, "keltner_atr_multiplier": 1.5, "volume_confirmation_enabled": True},
@@ -385,8 +387,14 @@ def load_settings():
         else:
             bot_state.settings = DEFAULT_SETTINGS.copy()
             save_settings()
-            return
         
+        # [v6.5] Memory Surgery: Load persistent state into the running bot state
+        internal_state = bot_state.settings.get('_internal_state', {})
+        bot_state.last_signal_time = internal_state.get('last_signal_time', {})
+        if bot_state.last_signal_time:
+             logger.info(f"Successfully loaded persistent memory for {len(bot_state.last_signal_time)} symbols.")
+
+        # --- Migration and default value checks ---
         updated = False
         if "real_trading_enabled" in bot_state.settings:
             old_value = bot_state.settings.pop("real_trading_enabled")
@@ -404,15 +412,22 @@ def load_settings():
             save_settings()
         
         logger.info(f"Settings loaded successfully into BotState.")
+
     except Exception as e:
-        logger.error(f"Failed to load settings: {e}")
+        logger.error(f"Failed to load settings: {e}", exc_info=True)
         bot_state.settings = DEFAULT_SETTINGS.copy()
+        bot_state.last_signal_time = {}
+
 
 def save_settings():
     try:
+        # [v6.5] Memory Surgery: Ensure the latest in-memory state is part of the settings before saving
+        bot_state.settings['_internal_state'] = {
+            "last_signal_time": bot_state.last_signal_time
+        }
         with open(SETTINGS_FILE, 'w') as f:
             json.dump(bot_state.settings, f, indent=4)
-        logger.info(f"Settings saved successfully from BotState.")
+        logger.info(f"Settings and persistent state saved successfully.")
     except Exception as e:
         logger.error(f"Failed to save settings: {e}")
 
@@ -1185,12 +1200,11 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         total_signals_found = len(signals)
         signals.sort(key=lambda s: s.get('strength', 0), reverse=True)
         new_trades, opportunities = 0, 0
-        last_signal_time = bot_state.last_signal_time
         
         signal_cooldown = SCAN_INTERVAL_SECONDS * settings.get('signal_cooldown_multiplier', 4)
 
         for signal in signals:
-            if time.time() - last_signal_time.get(signal['symbol'], 0) <= signal_cooldown:
+            if time.time() - bot_state.last_signal_time.get(signal['symbol'], 0) <= signal_cooldown:
                 logger.info(f"Signal for {signal['symbol']} skipped due to cooldown."); continue
 
             signal_exchange_id = signal['exchange'].lower()
@@ -1252,8 +1266,11 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                     opportunities += 1
 
             await asyncio.sleep(0.5)
-            last_signal_time[signal['symbol']] = time.time()
+            bot_state.last_signal_time[signal['symbol']] = time.time()
         
+        # [v6.5] Memory Surgery: Persist the updated cooldown timer state
+        save_settings()
+
         failures = failure_counter[0]
         logger.info(f"Scan complete. Found: {total_signals_found}, Entered: {new_trades}, Opportunities: {opportunities}, Failures: {failures}.")
         
@@ -1370,7 +1387,6 @@ async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=F
 
     except Exception as e:
         logger.error(f"General error in send_telegram_message to {target_chat}: {e}")
-
 async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10)
@@ -1402,26 +1418,34 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
         
         try:
             # Batch fetch tickers
-            tickers = await exchange.fetch_tickers(symbols_on_exchange)
-            for symbol, ticker in tickers.items():
-                prefetched_data[symbol]['ticker'] = ticker
+            if symbols_on_exchange:
+                tickers = await exchange.fetch_tickers(symbols_on_exchange)
+                for symbol, ticker in tickers.items():
+                    prefetched_data[symbol]['ticker'] = ticker
             
-            # Batch fetch OHLCV for symbols that need it
-            symbols_needing_ohlcv = list({
-                t['symbol'] for t in trades_on_exchange
-                if bot_state.settings.get("trailing_sl_advanced", {}).get("strategy") in ['ema', 'atr'] or
-                   (bot_state.settings.get("trailing_sl_advanced", {}).get("use_strategy_mapping") and
-                    bot_state.settings.get("trailing_sl_advanced", {}).get("strategy_tsl_mapping", {}).get(t.get('reason', '').split(' + ')[0]) in ['ema', 'atr'])
-            })
+            # Identify symbols that need OHLCV data for their TSL strategy
+            symbols_needing_ohlcv = set()
+            tsl_adv_settings = bot_state.settings.get("trailing_sl_advanced", {})
+            use_mapping = tsl_adv_settings.get("use_strategy_mapping", False)
+            manual_strategy = tsl_adv_settings.get("strategy")
+            mapping = tsl_adv_settings.get("strategy_tsl_mapping", {})
+
+            for t in trades_on_exchange:
+                strategy_for_trade = manual_strategy
+                if use_mapping:
+                    trade_reason = t.get('reason', '').split(' + ')[0]
+                    strategy_for_trade = mapping.get(trade_reason, tsl_adv_settings.get("default_tsl_strategy"))
+                
+                if strategy_for_trade in ['ema', 'atr']:
+                    symbols_needing_ohlcv.add(t['symbol'])
 
             if symbols_needing_ohlcv:
-                # Note: ccxt does not support true batch OHLCV fetching, so we do it concurrently.
+                # ccxt does not support true batch OHLCV fetching, so we do it concurrently.
                 async def fetch_single_ohlcv(symbol):
                     try:
-                        # Fetch enough data for the longest required indicator period
                         limit = max(
-                            bot_state.settings.get("trailing_sl_advanced", {}).get("tsl_ema_period", 21),
-                            bot_state.settings.get("trailing_sl_advanced", {}).get("tsl_atr_period", 14)
+                            tsl_adv_settings.get("tsl_ema_period", 21),
+                            tsl_adv_settings.get("tsl_atr_period", 14)
                         ) + 10
                         return symbol, await exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=limit)
                     except Exception as e:
@@ -1436,7 +1460,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
 
         except ccxt.RateLimitExceeded as e:
             logger.error(f"RATE LIMIT EXCEEDED during batch fetch for {exchange_id}. Skipping tracking cycle. Error: {e}")
-            return # Stop processing this exchange
+            return
         except (ccxt.NetworkError, httpx.ReadTimeout) as e:
             logger.error(f"NETWORK ERROR during batch fetch for {exchange_id}. Some data may be missing. Error: {e}")
         except Exception as e:
@@ -1700,24 +1724,41 @@ async def get_fear_and_greed_index():
 
 async def check_market_regime():
     settings = bot_state.settings
-    is_technically_bullish, is_sentiment_bullish, fng_index = True, True, "N/A"
-    try:
-        if binance := bot_state.public_exchanges.get('binance'):
-            ohlcv = await binance.fetch_ohlcv('BTC/USDT', '4h', limit=55)
+    fng_index = "N/A"
+    
+    # --- [v6.5] Coronary Artery Bypass: Redundancy for BTC trend ---
+    btc_trend_data = None
+    source_exchanges = settings.get("btc_trend_source_exchanges", ["binance"])
+    for ex_id in source_exchanges:
+        exchange = bot_state.public_exchanges.get(ex_id)
+        if not exchange:
+            continue
+        try:
+            ohlcv = await exchange.fetch_ohlcv('BTC/USDT', '4h', limit=55)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['sma50'] = ta.sma(df['close'], length=50)
-            is_technically_bullish = df['close'].iloc[-1] > df['sma50'].iloc[-1]
-    except Exception as e:
-        logger.error(f"Error checking BTC trend: {e}")
-    if settings.get("fear_and_greed_filter_enabled", True):
-        if (fng_value := await get_fear_and_greed_index()) is not None:
-            fng_index = fng_value
-            is_sentiment_bullish = fng_index >= settings.get("fear_and_greed_threshold", 30)
-    if not is_technically_bullish:
+            btc_trend_data = df['close'].iloc[-1] > df['sma50'].iloc[-1]
+            logger.info(f"Successfully fetched BTC trend from {ex_id}. Bullish: {btc_trend_data}")
+            break # Success, exit loop
+        except Exception as e:
+            logger.warning(f"Could not fetch BTC trend from {ex_id}, trying next... Error: {e}")
+    
+    if btc_trend_data is None:
+        return False, "فشل جلب بيانات BTC من كل المصادر المتاحة."
+
+    if not btc_trend_data:
         return False, "اتجاه BTC هابط (تحت متوسط 50 على 4 ساعات)."
-    if not is_sentiment_bullish:
-        return False, f"مشاعر خوف شديد (مؤشر F&G: {fng_index} تحت الحد {settings.get('fear_and_greed_threshold')})."
+
+    # --- Fear & Greed check remains the same ---
+    if settings.get("fear_and_greed_filter_enabled", True):
+        fng_value = await get_fear_and_greed_index()
+        if fng_value is not None:
+            fng_index = fng_value
+            if fng_index < settings.get("fear_and_greed_threshold", 30):
+                return False, f"مشاعر خوف شديد (مؤشر F&G: {fng_index} تحت الحد {settings.get('fear_and_greed_threshold')})."
+    
     return True, "وضع السوق مناسب لصفقات الشراء."
+
 
 async def analyze_performance_and_suggest(context: ContextTypes.DEFAULT_TYPE):
     settings = bot_state.settings
@@ -1764,7 +1805,7 @@ async def analyze_performance_and_suggest(context: ContextTypes.DEFAULT_TYPE):
         await send_telegram_message(context.bot, {'custom_message': message, 'keyboard': keyboard})
         bot_state.settings['last_suggestion_time'] = time.time()
         save_settings()
-# =======================================================================================
+        # =======================================================================================
 # --- Telegram Handlers ---
 # =======================================================================================
 main_menu_keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"], ["ℹ️ مساعدة"]]
@@ -1775,7 +1816,7 @@ settings_menu_keyboard = [
 ]
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 6.4 - الجراحة الدقيقة)*\n\nاختر من القائمة للبدء."
+    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 6.5 - الجراحة المتقدمة)*\n\nاختر من القائمة للبدء."
     await update.message.reply_text(welcome_message, reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2058,7 +2099,7 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.callback_query.message if update.callback_query else update.message
     await target_message.reply_text("⏳ جاري إعداد تقرير التشخيص الشامل...")
     settings = bot_state.settings
-    parts = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v6.4)**\n\n*تم إنشاؤه في: {datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')}*"]
+    parts = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v6.5)**\n\n*تم إنشاؤه في: {datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')}*"]
 
     parts.append("\n- - - - - - - - - - - - - - - - - -")
     parts.append("**[ ⚙️ حالة النظام والبيئة ]**")
@@ -2972,7 +3013,7 @@ async def post_init(application: Application):
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
 
     logger.info("Jobs scheduled.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v6.4) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v6.5) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
 
 async def post_shutdown(application: Application):
     all_exchanges = list(bot_state.exchanges.values()) + list(bot_state.public_exchanges.values())
@@ -3016,9 +3057,8 @@ def main():
     application.run_polling()
 
 if __name__ == '__main__':
-    print("🚀 Starting Mineseper Bot v6.4 (Precise Surgery)...")
+    print("🚀 Starting Mineseper Bot v6.5 (Advanced Surgery)...")
     try:
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
-
