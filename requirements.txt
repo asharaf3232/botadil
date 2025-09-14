@@ -1,9 +1,0 @@
-ccxt
-pandas
-pandas-ta
-feedparser
-nltk
-requests
-python-telegram-bot
-scipy
-aiohttp
