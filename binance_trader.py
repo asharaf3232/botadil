@@ -346,7 +346,7 @@ DEFAULT_SETTINGS = {
             "sniper_pro": "ema",
             "whale_radar": "atr",
             "support_rebound": "percentage",
-            "Rescued/Imported": "atr"
+            "Resced/Imported": "atr"
         }
     },
     "_internal_state": { 
@@ -358,7 +358,7 @@ DEFAULT_SETTINGS = {
     "whale_radar": {"wall_threshold_usdt": 30000},
     "liquidity_filters": {"min_quote_volume_24h_usd": 1_000_000, "max_spread_percent": 0.5, "rvol_period": 20, "min_rvol": 1.5},
     "volatility_filters": {"atr_period_for_filter": 14, "min_atr_percent": 0.8},
-    "stablecoin_filter": {"exclude_bases": ["USDT","USDC","DAI","FDUSD","TUSD","USDE","PYUSD","GUSD","EURT","USDJ"]},
+    "stablecoin_filter": {"exclude_bases": ["BTC", "ETH", "BNB", "OKB", "KCS", "GT", "MX", "MNT", "USDT","USDC","DAI","FDUSD","TUSD","USDE","PYUSD","GUSD","EURT","USDJ"]},
     "ema_trend_filter": {"enabled": True, "ema_period": 200},
     "min_tp_sl_filter": {"min_tp_percent": 1.0, "min_sl_percent": 0.5},
     "min_signal_strength": 1,
@@ -366,6 +366,7 @@ DEFAULT_SETTINGS = {
     "last_market_mood": {"timestamp": "N/A", "mood": "UNKNOWN", "reason": "No scan performed yet."},
     "last_suggestion_time": 0
 }
+
 
 # =======================================================================================
 # --- Helper Functions (Settings, DB, Analysis, etc.) ---
