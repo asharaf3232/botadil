@@ -1,9 +1,13 @@
 name: Deploy Botadil
 
 on:
+  # المشغل الأول: يعمل تلقائياً عند أي تحديث لفرع main
   push:
     branches:
-      - main # أو اسم الفرع الرئيسي لديك
+      - main
+
+  # المشغل الثاني: يسمح لك بالتشغيل اليدوي من صفحة Actions
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -18,4 +22,5 @@ jobs:
         script: |
           cd /root/bots/botadil
           git pull
+          pip install -r requirements.txt
           pm2 reload BinanceTraderBot
