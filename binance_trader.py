@@ -2932,9 +2932,15 @@ async def cancel_order_button_handler(update: Update, context: ContextTypes.DEFA
             _, _, _, exchange_id, symbol = parts
             exchange = bot_state.exchanges.get(exchange_id)
             await query.edit_message_text(f"⏳ جارِ إلغاء جميع الأوامر...", parse_mode=ParseMode.MARKDOWN)
+            # ملاحظة: يبدو أنك لم تكمل الكود هنا لإلغاء جميع الأوامر
 
-         except Exception as e:
+    # تم تصحيح المسافة البادئة هنا
+    except Exception as e:
         logger.error(f"Error in cancel_order_button_handler: {e}")
+        try:
+            await query.edit_message_text(f"❌ فشل إلغاء الأمر. الخطأ: `{e}`", parse_mode=ParseMode.MARKDOWN)
+        except Exception as inner_e:
+            logger.error(f"Failed to even send error message to user: {inner_e}")
         await query.edit_message_text(f"❌ فشل إلغاء الأمر. الخطأ: `{e}`", parse_mode=ParseMode.MARKDOWN)
 
 
