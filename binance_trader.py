@@ -399,14 +399,37 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
             {'tpTriggerPx': tp_price_str, 'tpOrdPx': '-1', 'side': 'sell'},
             {'slTriggerPx': sl_price_str, 'slOrdPx': '-1', 'side': 'sell'}
         ]
-        params = {'tdMode': 'cash', 'attachAlgoOrds': attached_algo_orders, 'clOrdId': f'mastermind{int(time.time()*1000)}'}
         
-        order_receipt = await exchange.create_order(symbol=symbol, type='market', side='buy', amount=quantity_to_buy, params=params)
-        logger.debug(f"Atomic order request for {symbol} sent. Receipt: {json.dumps(order_receipt, default=str)}")
+        # --- [START] MODIFIED BLOCK FOR RELIABLE ORDER PLACEMENT ---
+        # Build the request body manually to match OKX API specifications
+        request_body = {
+            'instId': exchange.market_id(symbol),
+            'tdMode': 'cash',
+            'side': 'buy',
+            'ordType': 'market',
+            'sz': exchange.amount_to_precision(symbol, quantity_to_buy),
+            'clOrdId': f'mastermind{int(time.time()*1000)}',
+            'attachAlgoOrds': attached_algo_orders
+        }
+        
+        # Use the direct API endpoint instead of the generic create_order
+        order_receipt = await exchange.private_post_trade_order(request_body)
+        logger.debug(f"Direct API request for {symbol} sent. Receipt: {json.dumps(order_receipt, default=str)}")
+        
+        # Handle the specific response structure from the direct endpoint
+        if order_receipt and order_receipt.get('data') and order_receipt['data'][0].get('sCode') == '0':
+            order_id = order_receipt['data'][0]['ordId']
+            # Add the order ID to the receipt object so the verification code below can find it
+            order_receipt['id'] = order_id 
+        else:
+            # If the order failed at placement, raise a clear exception
+            raise ccxt.ExchangeError(f"OKX API Error on order placement: {json.dumps(order_receipt)}")
+        # --- [END] MODIFIED BLOCK ---
 
         max_retries = 10
         for i in range(max_retries):
             await asyncio.sleep(2.5)
+            # Use the extracted order_id for verification
             verified_order = await exchange.fetch_order(order_receipt.get('id'), symbol)
             if verified_order and verified_order.get('status') == 'filled':
                 logger.info(f"✅ VERIFIED: Main order {verified_order.get('id')} for {symbol} is filled.")
@@ -528,7 +551,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         exchange = bot_state.exchange
         try:
             tickers = await exchange.fetch_tickers()
-            usdt_markets = [m for m in tickers.values() if m.get('symbol', '').endswith('/USDT') and not any(k in m['symbol'] for k in ['-SWAP', 'UP', 'DOWN', '3L', '3S']) and m.get('quoteVolume', 0) > settings['liquidity_filters']['min_quote_volume_24h_usd']]
+            usdt_markets = [m for m in tickers.values() if m.get('symbol', '').endswith('/USDT') and not any(k in m['symbol'] for k in ['-SWAP', 'UP', 'DOWN', '3L', '3S']) and m.get('quoteVolume', 0) > settings['liquidity_filters']['min_quote_volume_2d_usd']]
             usdt_markets.sort(key=lambda m: m.get('quoteVolume', 0), reverse=True)
             top_markets = usdt_markets[:settings['top_n_symbols_by_volume']]
             bot_state.scan_stats['markets_scanned'] = len(top_markets)
@@ -572,7 +595,6 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         scan_summary += f"- **✅ صفقات جديدة فُتحت:** {new_trades}\n"
         scan_summary += f"- **⚠️ أخطاء في التحليل:** {bot_state.scan_stats['failures']}"
         await bot.send_message(TELEGRAM_CHAT_ID, scan_summary, parse_mode=ParseMode.MARKDOWN)
-
 # =======================================================================================
 # --- 📱 واجهة التحكم عبر تليجرام (النسخة الكاملة) 📱 ---
 # =======================================================================================
