@@ -144,41 +144,51 @@ class OcoAdapter(ExchangeAdapter):
 
         tp_price = self.exchange.price_to_precision(symbol, signal['take_profit'])
         sl_price = self.exchange.price_to_precision(symbol, signal['stop_loss'])
+if self.exchange.id == 'okx':
+    logger.info(f"OKX: Placing OCO algorithm order for {symbol}")
+    try:
+        inst_id = self.exchange.market_id(symbol)
+        base_ccy, _ = symbol.split('/')
 
-        if self.exchange.id == 'okx':
-            logger.info(f"OKX: Placing OCO algorithm order for {symbol}")
-            try:
-                inst_id = self.exchange.market_id(symbol)
-                base_ccy, _ = symbol.split('/')
-                payload = {
-                    'instId': inst_id,
-                    'tdMode': 'cash',
-                    'ccy': base_ccy,
-                    'side': 'sell',
-                    'ordType': 'oco',
-                    'sz': str(self.exchange.amount_to_precision(symbol, verified_quantity)),
-                    'posSide': 'net',
-                    'tpTriggerPx': tp_price,
-                    'tpOrdPx': tp_price,
-                    'slTriggerPx': sl_price,
-                    'slOrdPx': '-1',
-                }
-                logger.debug(f"OKX OCO payload: {payload}")
-                trigger_order = await self.exchange.private_post_trade_order_algo(payload)
-                logger.info(f"OKX OCO response: {trigger_order}")
-                algo_id = None
-                data = trigger_order.get('data') or trigger_order.get('order') or trigger_order.get('result')
-                if isinstance(data, list) and data:
-                    algo_id = data[0].get('algoId') or data[0].get('algo_id')
-                elif isinstance(data, dict):
-                    algo_id = data.get('algoId') or data.get('algo_id')
-                if not algo_id:
-                    raise ccxt.ExchangeError(f"OKX failed to return a valid algoId for the OCO order. Response: {trigger_order}")
-                logger.info(f"OKX: OCO Algorithm order placed with algoId: {algo_id}")
-                return {"algo_id": algo_id}
-            except Exception as e:
-                logger.error(f"Failed to place OKX OCO order: {e}", exc_info=True)
-                raise
+        payload = {
+            'instId': inst_id,
+            'tdMode': 'cash',
+            'ccy': base_ccy,
+            'side': 'sell',
+            'ordType': 'oco',
+            'sz': str(self.exchange.amount_to_precision(symbol, verified_quantity)),
+            'posSide': 'net',
+            'tpTriggerPx': tp_price,
+            'tpOrdPx': tp_price,
+            'slTriggerPx': sl_price,
+            'slOrdPx': '-1',
+        }
+
+        logger.debug(f"OKX OCO payload: {payload}")
+        trigger_order = await self.exchange.private_post_trade_order_algo(payload)
+        logger.info(f"OKX OCO response: {trigger_order}")
+
+        # اجمع كل الاحتمالات للـ algoId
+        algo_id = None
+        data = trigger_order.get('data') or trigger_order.get('order') or trigger_order.get('result')
+        if isinstance(data, list) and data:
+            algo_id = data[0].get('algoId') or data[0].get('algo_id') or data[0].get('ordId')
+        elif isinstance(data, dict):
+            algo_id = data.get('algoId') or data.get('algo_id') or data.get('ordId')
+
+        if not algo_id:
+            raise ccxt.ExchangeError(
+                f"OKX failed to return a valid algoId for the OCO order. Response: {trigger_order}"
+            )
+
+        # هنا بترجع الـ algo_id علشان الكود اللى بينادى الدالة يسجّله فى الصفقة
+        logger.info(f"OKX: OCO Algorithm order placed with algoId: {algo_id}")
+        return {"algo_id": algo_id}
+
+    except Exception as e:
+        logger.error(f"Failed to place OKX OCO order: {e}", exc_info=True)
+        raise
+
 
         logger.info(f"{self.exchange.id} OCO: Placing for {symbol}. TP: {tp_price}, SL: {sl_price}")
         params = {}
