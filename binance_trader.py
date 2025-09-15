@@ -63,6 +63,7 @@ class BotState:
         self.last_signal_time = {}
         self.market_mood = {"mood": "UNKNOWN", "reason": "تحليل لم يتم بعد", "btc_mood": "UNKNOWN", "fng": "N/A", "news": "N/A"}
         self.scan_stats = {"last_start": None, "last_duration": "N/A", "markets_scanned": 0, "failures": 0}
+        self.ws_manager = None
 
 bot_state = BotState()
 scan_lock = asyncio.Lock()
@@ -253,13 +254,12 @@ class WebSocketManager:
     """
     def __init__(self, bot_state):
         self.ws_url = "wss://ws.okx.com:8443/ws/v5/public"
-        self.bot_state = bot_state  # لتحديث الحالة المشتركة
+        self.bot_state = bot_state
         self.subscriptions = []
         self.websocket = None
         self.is_connected = asyncio.Event()
 
     async def _send_subscription(self):
-        """يرسل طلبات الاشتراك عند الاتصال."""
         if not self.subscriptions:
             return
         try:
@@ -270,33 +270,27 @@ class WebSocketManager:
             logger.error(f"🔥 [WS] فشل إرسال الاشتراك: {e}")
 
     async def _message_handler(self, message):
-        """يعالج الرسائل الواردة من الـ WebSocket."""
         if message == 'ping':
             await self.websocket.send('pong')
             return
 
         data = json.loads(message)
 
-        # تحديث بيانات الأسعار اللحظية
         if 'data' in data and data.get('arg', {}).get('channel') == 'tickers':
             for ticker_data in data['data']:
                 symbol = ticker_data['instId'].replace('-', '/')
-                # تخزين آخر سعر فقط لتسهيل الوصول إليه
                 self.bot_state.live_tickers[symbol] = float(ticker_data['last'])
 
     async def run(self):
-        """الدالة الرئيسية التي تحافظ على الاتصال وإعادة الاتصال."""
         while True:
             try:
                 async with websockets.connect(self.ws_url) as websocket:
                     self.websocket = websocket
-                    self.is_connected.set() # إعلام بأن الاتصال تم
+                    self.is_connected.set()
                     logger.info("✅ [WS] تم الاتصال بنجاح بـ OKX WebSocket.")
                     
-                    # إعادة الاشتراك عند الاتصال
                     await self._send_subscription()
 
-                    # حلقة استماع للرسائل
                     async for message in websocket:
                         await self._message_handler(message)
 
@@ -309,9 +303,7 @@ class WebSocketManager:
             await asyncio.sleep(5)
 
     def subscribe_to_tickers(self, symbols: list):
-        """للاشتراك في أسعار عملات محددة."""
         for symbol in symbols:
-            # تحويل الصيغة من 'BTC/USDT' إلى 'BTC-USDT'
             inst_id = symbol.replace('/', '-')
             sub = {"channel": "tickers", "instId": inst_id}
             if sub not in self.subscriptions:
@@ -406,7 +398,6 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
 
     for trade in active_trades:
         try:
-            # ملاحظة: في المستقبل، سنستبدل هذا السطر بالبيانات اللحظية من الـ WebSocket
             ticker = await exchange.fetch_ticker(trade['symbol'])
             current_price = ticker.get('last')
             if not current_price: continue
@@ -844,12 +835,15 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 async with aiosqlite.connect(DB_FILE) as conn:
                     total_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades")).fetchone())[0]
                     active_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")).fetchone())[0]
+                ws_status = 'غير متصل ❌'
+                if bot_state.ws_manager and bot_state.ws_manager.is_connected.is_set():
+                    ws_status = 'متصل ✅'
                 report = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v5.5)**\n",
                           f"--- **📊 حالة السوق الحالية** ---\n- **المزاج العام:** {mood['mood']} ({escape_markdown(mood['reason'])})\n- **مؤشر BTC:** {mood['btc_mood']}\n- **الخوف والطمع:** {mood['fng']}\n",
                           f"--- **🔬 أداء آخر فحص** ---\n- **وقت البدء:** {scan['last_start'].strftime('%Y-%m-%d %H:%M') if scan['last_start'] else 'N/A'}\n- **المدة:** {scan['last_duration']}\n- **العملات المفحوصة:** {scan['markets_scanned']}\n- **فشل في تحليل:** {scan['failures']} عملات\n",
                           f"--- **🔧 الإعدادات النشطة** ---\n- **النمط الحالي:** {settings['active_preset']}\n- **الماسحات المفعلة:** {escape_markdown(', '.join(settings['active_scanners']))}\n",
                           f"--- **🔩 حالة العمليات الداخلية** ---\n- **قاعدة البيانات:** متصلة ✅ ({total_trades} صفقة / {active_trades} نشطة)\n"
-                          f"- **الاتصال اللحظي (WS):** {'متصل ✅' if bot_state.ws_manager and bot_state.ws_manager.is_connected.is_set() else 'غير متصل ❌'}"]
+                          f"- **الاتصال اللحظي (WS):** {ws_status}"]
                 await query.message.reply_text("\n".join(report), parse_mode=ParseMode.MARKDOWN)
 
         elif data.startswith("toggle_scanner_"):
@@ -913,7 +907,7 @@ async def main():
     
     # --- [تعديل] إنشاء وتشغيل مدير الـ WebSocket في الخلفية ---
     ws_manager = WebSocketManager(bot_state)
-    bot_state.ws_manager = ws_manager # لتسهيل الوصول إليه لاحقاً
+    bot_state.ws_manager = ws_manager
     ws_manager.subscribe_to_tickers(['BTC/USDT', 'ETH/USDT']) 
     ws_task = asyncio.create_task(ws_manager.run())
     logger.info("🚀 [WS] تم تشغيل مدير الاتصال اللحظي في الخلفية.")
@@ -950,7 +944,7 @@ async def main():
         except Exception as tg_e:
             logger.warning(f"Could not send startup failure message to Telegram: {tg_e}")
         await bot_state.exchange.close()
-        ws_task.cancel() # إيقاف مهمة الـ WS عند الفشل
+        ws_task.cancel()
         return
 
     app.add_handler(CommandHandler("start", start_command))
@@ -972,15 +966,17 @@ async def main():
             await app.updater.start_polling()
             logger.info("Bot is now running and polling for updates...")
             
-            await asyncio.gather(ws_task) # تأكد من أن مهمة الـ WS تعمل مع البوت
+            # This makes sure the bot and the websocket task run concurrently
+            await asyncio.gather(ws_task) 
                 
     except (KeyboardInterrupt, SystemExit):
         logger.info("Bot shutting down gracefully...")
     except Exception as e:
         logger.critical(f"An unhandled error occurred in main loop: {e}", exc_info=True)
     finally:
+        # Graceful shutdown
         ws_task.cancel()
-        if app.updater and app.updater.is_running:
+        if app.updater and app.updater._running: # <-- Fixed the AttributeError
             await app.updater.stop()
         if app.running:
             await app.stop()
@@ -994,4 +990,3 @@ if __name__ == '__main__':
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped by user.")
-
