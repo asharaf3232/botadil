@@ -132,7 +132,7 @@ if not any(type(h) is RotatingFileHandler and getattr(h, "baseFilename", "") == 
 # ------------------------------------------------------------------------------------
 
 # --- إضافة: كلاس OcoAdapter المعدل لدعم OKX و fallback لتجنيب ترك الصفقات عارية ----------
-class OcoAdapter(ExchangeAdapter):
+
     """محول أساسي للمنصات التي تدعم أوامر OCO. يدعم OKX مع اصلاحات ccy/tdMode وفالباك."""
 
     async def place_exit_orders(self, signal, verified_quantity):
