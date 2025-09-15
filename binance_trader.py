@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 بوت OKX القناص v5.2 (The Mastermind - Patched) - النسخة النهائية المتكاملة 🚀 ---
+# --- 🚀 بوت OKX القناص v5.3 (The Mastermind - Stable) - النسخة النهائية المتكاملة 🚀 ---
 # =======================================================================================
 # هذا الإصدار هو إصدار تصحيحي شامل بناءً على الملاحظات الحية:
 # - [إصلاح حاسم] إصلاح الخطأ البرمجي (AttributeError) الذي كان يمنع بدء تشغيل البوت.
@@ -724,17 +724,19 @@ async def post_init(app: Application):
         logger.critical("FATAL: API keys or Bot Token are not set."); return
 
     # [FIX v5.2] The correct, safe way to monkey-patch ccxt
-    original_fetch2 = ccxt.async_support.base.exchange.Exchange.fetch2
+    original_fetch2 = ccxt.base.exchange.Exchange.fetch2
     def patched_fetch2(self, path, api='public', method='GET', params=None, headers=None, body=None, config=None, context=None):
         params = params or {}
         if self.id == 'okx':
             if (path == 'trade/order-algo') or (path == 'trade/order' and 'attachAlgoOrds' in params):
                 if params.get("side") == "sell":
                     params.pop("tgtCcy", None)
-        return original_fetch2(self, path, api, method, params, headers, body, config, context)
-    
-    ccxt.async_support.base.exchange.Exchange.fetch2 = patched_fetch2
-    logger.info("Applied STABLE monkey-patch for CCXT.")
+        # Call the original stored method with all its arguments
+        return original_fetch2(self, path, api, method, params, headers, body, config)
+
+    # Apply the patch to the class, not the instance
+    ccxt.okx.fetch2 = patched_fetch2
+    logger.info("Applied STABLE monkey-patch for CCXT OKX.")
     
     bot_state.exchange = ccxt.okx({'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 'password': OKX_API_PASSPHRASE, 'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
     
@@ -750,7 +752,8 @@ def main():
     init_database()
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^[+-]?\d*\.?\d+$'), text_handler))
+    # Regex updated to better handle various inputs and avoid conflicts
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^[+-]?(\d*\.\d+|\d+\.?\d*)([eE][+-]?\d+)?$'), text_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, input_handler))
     app.add_handler(CallbackQueryHandler(button_callback_handler))
     app.run_polling()
