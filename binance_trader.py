@@ -525,10 +525,10 @@ async def worker(queue, signals_list, failure_counter):
                     stop_loss, take_profit = entry_price - risk, entry_price + (risk * settings['risk_reward_ratio'])
                     if (take_profit/entry_price - 1)*100 >= settings['min_tp_sl_filter']['min_tp_percent'] and (1 - stop_loss/entry_price)*100 >= settings['min_tp_sl_filter']['min_sl_percent']:
                         signals_list.append({"symbol": symbol, "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "reason": reason_str})
-        except Exception as e:
+             except Exception as e:
             logger.debug(f"Worker error for {symbol}: {e}")
             failure_counter[0] += 1
-        finally:
+            finally:
             queue.task_done()
 
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
