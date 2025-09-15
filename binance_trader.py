@@ -400,7 +400,7 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
         
         # --- انتظار تأكيد تنفيذ أمر الشراء ---
         verified_order = None
-        max_retries = 12 # Wait up to 30 seconds
+        max_retries = 24 # Wait up to 60 seconds  <--- <<< تم التعديل هنا
         for i in range(max_retries):
             await asyncio.sleep(2.5)
             order_status = await exchange.fetch_order(buy_order['id'], symbol)
@@ -410,15 +410,12 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
                 break
         
         if not verified_order:
-            # If order is not filled, cancel it (if possible) and raise error
-            # await exchange.cancel_order(buy_order['id'], symbol)
             raise Exception("Market buy order did not fill in time. Manual check required.")
 
         # --- الخطوة 2: حساب ووضع أمر الحماية OCO ---
         avg_price = verified_order.get('average', signal['entry_price'])
         filled_qty = verified_order.get('filled', 0)
         
-        # Recalculate TP/SL based on the actual average fill price
         original_risk = signal['entry_price'] - signal['stop_loss']
         final_sl = avg_price - original_risk
         final_tp = avg_price + (original_risk * settings['risk_reward_ratio'])
@@ -432,9 +429,9 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
             'ordType': 'oco',
             'sz': exchange.amount_to_precision(symbol, filled_qty),
             'tpTriggerPx': exchange.price_to_precision(symbol, final_tp),
-            'tpOrdPx': '-1',  # Execute at market price when TP is triggered
+            'tpOrdPx': '-1',
             'slTriggerPx': exchange.price_to_precision(symbol, final_sl),
-            'slOrdPx': '-1'   # Execute at market price when SL is triggered
+            'slOrdPx': '-1'
         }
         
         oco_receipt = await exchange.private_post_trade_order_algo(oco_params)
@@ -466,7 +463,6 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
 
     except Exception as e:
         logger.critical(f"CRITICAL FAILURE during 2-step trade for {symbol}: {e}", exc_info=True)
-        # Try to clean up any open orders if something fails mid-way
         try:
             open_orders = await exchange.fetch_open_orders(symbol)
             if open_orders:
