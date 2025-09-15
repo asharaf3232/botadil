@@ -752,106 +752,110 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             pass
 
 
+# =# =======================================================================================
+# --- 🚀 نقطة انطلاق البوت (بنية جديدة ومستقرة) 🚀 ---
 # =======================================================================================
-# --- 🚀 نقطة انطلاق البوت 🚀 ---
-# =======================================================================================
-# [NEW] Helper function for connection test
-async def test_okx_connection(exchange):
-    try:
-        ticker = await exchange.fetch_ticker('BTC/USDT')
-        _ = await exchange.fetch_balance()
-        logger.info(f"✅ OKX connection test SUCCEEDED. BTC last price: {ticker.get('last')}")
-        return True
-    except ccxt.AuthenticationError as e:
-        logger.critical(f"❌ OKX connection test FAILED: AuthenticationError. Check your API key, secret, and passphrase. Error: {e}")
-        return False
-    except Exception as e:
-        logger.critical(f"❌ OKX connection test FAILED: {e}", exc_info=True)
-        return False
-
-# [MODIFIED] Major overhaul of the startup sequence
-async def post_init(app: Application):
-    logger.info("🚀 Starting OKX Mastermind v5.3 (Hardened)...")
+async def main():
+    """الدالة الرئيسية الجديدة التي تبدأ وتدير البوت بشكل مستقر."""
     
-    # NLTK data download
-    if NLTK_AVAILABLE:
-        try: nltk.data.find('sentiment/vader_lexicon.zip')
-        except LookupError: logger.info("Downloading NLTK data..."); nltk.download('vader_lexicon')
+    # 1. التحقق من وجود المتغيرات الأساسية
+    required_vars = {
+        'OKX_API_KEY': OKX_API_KEY, 'OKX_API_SECRET': OKX_API_SECRET, 
+        'OKX_API_PASSPHRASE': OKX_API_PASSPHRASE, 'TELEGRAM_BOT_TOKEN': TELEGRAM_BOT_TOKEN, 
+        'TELEGRAM_CHAT_ID': TELEGRAM_CHAT_ID
+    }
+    if any(not v for v in required_vars.values()):
+        missing = [key for key, value in required_vars.items() if not value]
+        logger.critical(f"FATAL: The following environment variables are not set: {', '.join(missing)}. Exiting.")
+        return
 
-    # [MODIFIED] Correct, async-safe monkey-patch
-    original_request = bot_state.exchange.request # bound async method
+    # 2. تحميل الإعدادات وتهيئة قاعدة البيانات
+    load_settings()
+    await init_database()
+    
+    # 3. بناء كائن التطبيق (البوت)
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
+    # --- دمج منطق post_init هنا مباشرة ---
+    # 4. تهيئة الاتصال بالمنصة وتطبيق الـ Patch
+    bot_state.exchange = ccxt.okx({
+        'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 
+        'password': OKX_API_PASSPHRASE, 'enableRateLimit': True, 
+        'options': {'defaultType': 'spot'}
+    })
+
+    original_request = bot_state.exchange.request
     async def patched_request(self, path, api='public', method='GET', params=None, headers=None, body=None, config=None):
         params = params or {}
-        # This patch is very specific, wrap in try/except to prevent it from ever breaking a request
         try:
             if (path == 'trade/order-algo') or (path == 'trade/order' and 'attachAlgoOrds' in params):
                 if params.get("side") == "sell":
                     params.pop("tgtCcy", None)
         except Exception as e:
-            logger.warning(f"Monkey-patch failed to modify params, proceeding with original. Error: {e}")
-        
-        # original_request is a bound coroutine - call it and await
+            logger.warning(f"Monkey-patch failed to modify params, proceeding. Error: {e}")
         return await original_request(path, api=api, method=method, params=params, headers=headers, body=body, config=config)
-
-    # Bind the patched method to the instance
     bot_state.exchange.request = types.MethodType(patched_request, bot_state.exchange)
-    logger.info("Applied async-safe monkey-patch for OKX 'tgtCcy' parameter issue.")
-    
-    # [NEW] Perform connection test
-    if not await test_okx_connection(bot_state.exchange):
+    logger.info("Applied async-safe monkey-patch for OKX.")
+
+    # 5. اختبار الاتصال بالمنصة
+    try:
+        ticker = await bot_state.exchange.fetch_ticker('BTC/USDT')
+        _ = await bot_state.exchange.fetch_balance()
+        logger.info(f"✅ OKX connection test SUCCEEDED. BTC last price: {ticker.get('last')}")
+    except Exception as e:
+        logger.critical(f"❌ OKX connection test FAILED: {e}", exc_info=True)
         try:
-            await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="❌ **فشل حرج في الاتصال بـ OKX.**\n\nتحقق من مفاتيح API أو الشبكة. سيتم إيقاف البوت.", parse_mode=ParseMode.MARKDOWN)
-        except (BadRequest, Forbidden) as e:
-            logger.error(f"Could not send startup failure message to Telegram (Chat ID: {TELEGRAM_CHAT_ID}). Error: {e}")
-        return # Stop initialization
-    
-    # Schedule jobs
+            await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="❌ فشل الاتصال بـ OKX. تحقق من مفاتيح API.")
+        except Exception as tg_e:
+            logger.warning(f"Could not send startup failure message to Telegram: {tg_e}")
+        await bot_state.exchange.close()
+        return
+
+    # 6. إضافة المعالجات (Handlers)
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^[+-]?\d*\.?\d+$'), text_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, input_handler))
+    app.add_handler(CallbackQueryHandler(button_callback_handler))
+
+    # 7. جدولة المهام المتكررة
     scan_interval = bot_state.settings.get("scan_interval_seconds", 900)
     track_interval = bot_state.settings.get("track_interval_seconds", 60)
     app.job_queue.run_repeating(perform_scan, interval=scan_interval, first=10, name="perform_scan")
     app.job_queue.run_repeating(track_open_trades, interval=track_interval, first=30, name="track_trades")
     logger.info(f"Jobs scheduled: Scan every {scan_interval}s, Tracker every {track_interval}s.")
     
-    # [MODIFIED] Protected startup message
+    # 8. تشغيل البوت بطريقة مستقرة (غير حاجزة)
     try:
-        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت OKX The Mastermind v5.3 بدأ العمل بنجاح...*", parse_mode=ParseMode.MARKDOWN)
-    except (BadRequest, Forbidden) as e:
-        logger.critical(f"Bot started but could not send startup message to Telegram (Chat ID: {TELEGRAM_CHAT_ID}). Check CHAT_ID. Error: {e}")
-
-# [MODIFIED] Main function is now async
-async def main():
-    # [MODIFIED] Strict check for credentials
-    required_vars = {'OKX_API_KEY': OKX_API_KEY, 'OKX_API_SECRET': OKX_API_SECRET, 'OKX_API_PASSPHRASE': OKX_API_PASSPHRASE, 'TELEGRAM_BOT_TOKEN': TELEGRAM_BOT_TOKEN, 'TELEGRAM_CHAT_ID': TELEGRAM_CHAT_ID}
-    if any(not v for v in required_vars.values()):
-        missing = [key for key, value in required_vars.items() if not value]
-        logger.critical(f"FATAL: The following environment variables are not set: {', '.join(missing)}. Exiting.")
-        return
-
-    load_settings()
-    await init_database()
-    
-    # Instantiate the exchange and add to bot_state
-    bot_state.exchange = ccxt.okx({'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 'password': OKX_API_PASSPHRASE, 'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
-    
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
-    
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^[+-]?\d*\.?\d+$'), text_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, input_handler))
-    app.add_handler(CallbackQueryHandler(button_callback_handler))
-    
-    try:
-        await app.run_polling()
+        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت OKX The Mastermind v5.3 بدأ العمل (بنية مستقرة)...*", parse_mode=ParseMode.MARKDOWN)
+        
+        # استخدام async with يضمن الإغلاق الآمن للتطبيق
+        async with app:
+            await app.start()
+            await app.updater.start_polling()
+            logger.info("Bot is now running and polling for updates...")
+            
+            # حلقة لا نهائية لإبقاء البرنامج يعمل
+            while True:
+                await asyncio.sleep(3600) # يمكن أن تكون أي مدة طويلة
+                
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot shutting down gracefully...")
+    except Exception as e:
+        logger.critical(f"An unhandled error occurred in main loop: {e}", exc_info=True)
     finally:
+        # الإغلاق الآمن عند الخروج
+        if app.updater and app.updater.is_running:
+            await app.updater.stop()
+        if app.running:
+            await app.stop()
         if bot_state.exchange:
             await bot_state.exchange.close()
             logger.info("CCXT exchange connection closed.")
+        logger.info("Bot has been shut down.")
 
 if __name__ == '__main__':
-    # [MODIFIED] Run the main async function
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Bot stopped manually.")
+        logger.info("Bot stopped by user.")
 
