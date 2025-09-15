@@ -389,82 +389,91 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
 # [MODIFIED] Passing `bot` object explicitly
 async def execute_atomic_trade(signal, bot: "telegram.Bot"):
     symbol, settings, exchange = signal['symbol'], bot_state.settings, bot_state.exchange
-    logger.info(f"Attempting ATOMIC trade for {symbol} using attachAlgoOrds.")
+    logger.info(f"Executing 2-step trade for {symbol}: 1. Market Buy, 2. OCO Protection.")
+    
     try:
+        # --- الخطوة 1: تنفيذ أمر الشراء بسعر السوق ---
         quantity_to_buy = settings['real_trade_size_usdt'] / signal['entry_price']
-        tp_price_str = exchange.price_to_precision(symbol, signal['take_profit'])
-        sl_price_str = exchange.price_to_precision(symbol, signal['stop_loss'])
+        logger.info(f"Step 1: Placing Market Buy order for {quantity_to_buy:.6f} {symbol.split('/')[0]}")
+        buy_order = await exchange.create_market_buy_order(symbol, quantity_to_buy)
         
-        attached_algo_orders = [
-            {'tpTriggerPx': tp_price_str, 'tpOrdPx': '-1', 'side': 'sell'},
-            {'slTriggerPx': sl_price_str, 'slOrdPx': '-1', 'side': 'sell'}
-        ]
-        
-        # --- [START] MODIFIED BLOCK FOR RELIABLE ORDER PLACEMENT ---
-        # Build the request body manually to match OKX API specifications
-        request_body = {
-            'instId': exchange.market_id(symbol),
-            'tdMode': 'cash',
-            'side': 'buy',
-            'ordType': 'market',
-            'sz': exchange.amount_to_precision(symbol, quantity_to_buy),
-            'clOrdId': f'mastermind{int(time.time()*1000)}',
-            'attachAlgoOrds': attached_algo_orders
-        }
-        
-        # Use the direct API endpoint instead of the generic create_order
-        order_receipt = await exchange.private_post_trade_order(request_body)
-        logger.debug(f"Direct API request for {symbol} sent. Receipt: {json.dumps(order_receipt, default=str)}")
-        
-        # Handle the specific response structure from the direct endpoint
-        if order_receipt and order_receipt.get('data') and order_receipt['data'][0].get('sCode') == '0':
-            order_id = order_receipt['data'][0]['ordId']
-            # Add the order ID to the receipt object so the verification code below can find it
-            order_receipt['id'] = order_id 
-        else:
-            # If the order failed at placement, raise a clear exception
-            raise ccxt.ExchangeError(f"OKX API Error on order placement: {json.dumps(order_receipt)}")
-        # --- [END] MODIFIED BLOCK ---
-
-        max_retries = 10
+        # --- انتظار تأكيد تنفيذ أمر الشراء ---
+        verified_order = None
+        max_retries = 12 # Wait up to 30 seconds
         for i in range(max_retries):
             await asyncio.sleep(2.5)
-            # Use the extracted order_id for verification
-            verified_order = await exchange.fetch_order(order_receipt.get('id'), symbol)
-            if verified_order and verified_order.get('status') == 'filled':
-                logger.info(f"✅ VERIFIED: Main order {verified_order.get('id')} for {symbol} is filled.")
-                await asyncio.sleep(1) # Give exchange time to register algo orders
-                
-                open_orders = await exchange.fetch_open_orders(symbol)
-                # Find the algo order linked to our main market order
-                algo_order = next((o for o in open_orders if o.get('clOrdId') == verified_order.get('clOrdId')), None)
-                algo_id = algo_order.get('id') if algo_order else 'unknown_algo_id'
-
-                avg_price = verified_order.get('average', signal['entry_price'])
-                original_risk = signal['entry_price'] - signal['stop_loss']
-                signal['final_sl'] = avg_price - original_risk
-                signal['final_tp'] = avg_price + (original_risk * settings['risk_reward_ratio'])
-                
-                trade_id = await log_trade_to_db(signal, verified_order, algo_id)
-                tp_percent = (signal['final_tp'] - avg_price) / avg_price * 100 if avg_price > 0 else 0
-                sl_percent = (avg_price - signal['final_sl']) / avg_price * 100 if avg_price > 0 else 0
-                
-                success_msg = (
-                    f"**✅ صفقة ذرية ناجحة | {symbol} (ID: {trade_id})**\n"
-                    f"------------------------------------\n"
-                    f"🔍 **الاستراتيجية:** {signal['reason']}\n\n"
-                    f"📈 **متوسط الشراء:** `{avg_price:,.4f}`\n"
-                    f"🎯 **الهدف:** `{signal['final_tp']:,.4f}` (+{tp_percent:.2f}%)\n"
-                    f"🛑 **الوقف:** `{signal['final_sl']:,.4f}` (-{sl_percent:.2f}%)\n\n"
-                    f"***الصفقة مؤمنة بالكامل بشكل ذري.***")
-                await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=success_msg, parse_mode=ParseMode.MARKDOWN)
-                return
+            order_status = await exchange.fetch_order(buy_order['id'], symbol)
+            if order_status and order_status.get('status') == 'filled':
+                verified_order = order_status
+                logger.info(f"✅ Market Buy order {verified_order['id']} for {symbol} is FILLED.")
+                break
         
-        raise Exception("Failed to verify order and protection status after multiple retries.")
-    except Exception as e:
-        logger.critical(f"CRITICAL FAILURE during atomic trade for {symbol}: {e}", exc_info=True)
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"**🔥🔥🔥 فشل ذري حرج - {symbol}**\n\n**الخطأ:** `{str(e)}`", parse_mode=ParseMode.MARKDOWN)
+        if not verified_order:
+            # If order is not filled, cancel it (if possible) and raise error
+            # await exchange.cancel_order(buy_order['id'], symbol)
+            raise Exception("Market buy order did not fill in time. Manual check required.")
 
+        # --- الخطوة 2: حساب ووضع أمر الحماية OCO ---
+        avg_price = verified_order.get('average', signal['entry_price'])
+        filled_qty = verified_order.get('filled', 0)
+        
+        # Recalculate TP/SL based on the actual average fill price
+        original_risk = signal['entry_price'] - signal['stop_loss']
+        final_sl = avg_price - original_risk
+        final_tp = avg_price + (original_risk * settings['risk_reward_ratio'])
+
+        logger.info(f"Step 2: Placing OCO protection for {filled_qty} of {symbol} with TP={final_tp:.4f} and SL={final_sl:.4f}")
+        
+        oco_params = {
+            'instId': exchange.market_id(symbol),
+            'tdMode': 'cash',
+            'side': 'sell',
+            'ordType': 'oco',
+            'sz': exchange.amount_to_precision(symbol, filled_qty),
+            'tpTriggerPx': exchange.price_to_precision(symbol, final_tp),
+            'tpOrdPx': '-1',  # Execute at market price when TP is triggered
+            'slTriggerPx': exchange.price_to_precision(symbol, final_sl),
+            'slOrdPx': '-1'   # Execute at market price when SL is triggered
+        }
+        
+        oco_receipt = await exchange.private_post_trade_order_algo(oco_params)
+        
+        algo_id = None
+        if oco_receipt and oco_receipt.get('data') and oco_receipt['data'][0].get('sCode') == '0':
+            algo_id = oco_receipt['data'][0]['algoId']
+            logger.info(f"✅ OCO protection order placed successfully. Algo ID: {algo_id}")
+        else:
+            raise ccxt.ExchangeError(f"Failed to place OCO protection order: {json.dumps(oco_receipt)}")
+
+        # --- تسجيل الصفقة في قاعدة البيانات ---
+        signal['final_tp'] = final_tp
+        signal['final_sl'] = final_sl
+        trade_id = await log_trade_to_db(signal, verified_order, algo_id)
+        
+        tp_percent = (final_tp / avg_price - 1) * 100 if avg_price > 0 else 0
+        sl_percent = (1 - final_sl / avg_price) * 100 if avg_price > 0 else 0
+        
+        success_msg = (
+            f"**✅ صفقة ناجحة ومتكاملة | {symbol} (ID: {trade_id})**\n"
+            f"------------------------------------\n"
+            f"🔍 **الاستراتيجية:** {signal['reason']}\n\n"
+            f"📈 **متوسط الشراء:** `{avg_price:,.4f}`\n"
+            f"🎯 **الهدف:** `{final_tp:,.4f}` (+{tp_percent:.2f}%)\n"
+            f"🛑 **الوقف:** `{final_sl:,.4f}` (-{sl_percent:.2f}%)\n\n"
+            f"***تم تأمين الصفقة بأمر حماية OCO.***")
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=success_msg, parse_mode=ParseMode.MARKDOWN)
+
+    except Exception as e:
+        logger.critical(f"CRITICAL FAILURE during 2-step trade for {symbol}: {e}", exc_info=True)
+        # Try to clean up any open orders if something fails mid-way
+        try:
+            open_orders = await exchange.fetch_open_orders(symbol)
+            if open_orders:
+                logger.warning(f"Found {len(open_orders)} open orders for {symbol} after failure. Manual check advised.")
+        except Exception as cleanup_e:
+            logger.error(f"Failed to check for open orders during cleanup: {cleanup_e}")
+            
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"**🔥🔥🔥 فشل حرج - {symbol}**\n\n**الخطأ:** `{str(e)}`\n\nيرجى التحقق من المنصة يدوياً.", parse_mode=ParseMode.MARKDOWN)
 async def worker(queue, signals_list, failure_counter):
     settings, exchange = bot_state.settings, bot_state.exchange
     while not queue.empty():
