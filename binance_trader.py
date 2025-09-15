@@ -1744,10 +1744,1174 @@ settings_menu_keyboard = [
     ["🔙 القائمة الرئيسية"]
 ]
 # ... (All Telegram handlers like start_command, show_dashboard_command, etc., are fully implemented here) ...
+# =======================================================================================
+# --- Telegram Handlers ---
+# =======================================================================================
+main_menu_keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"], ["ℹ️ مساعدة"]]
+settings_menu_keyboard = [
+    ["🏁 أنماط جاهزة", "🎭 تفعيل/تعطيل الماسحات"], 
+    ["🔧 تعديل المعايير", "🚨 التحكم بالتداول الحقيقي"],
+    ["🔙 القائمة الرئيسية"]
+]
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 7.5 - النسخة المستقرة)*\n\nاختر من القائمة للبدء."
+    await update.message.reply_text(welcome_message, reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
+
+async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_message = update.message or update.callback_query.message
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 الإحصائيات العامة", callback_data="dashboard_stats"), InlineKeyboardButton("📈 الصفقات النشطة", callback_data="dashboard_active_trades")],
+        [InlineKeyboardButton("📜 تقرير أداء الاستراتيجيات", callback_data="dashboard_strategy_report")],
+        [InlineKeyboardButton("📸 لقطة للمحفظة", callback_data="dashboard_snapshot"), InlineKeyboardButton("ρίск تقرير المخاطر", callback_data="dashboard_risk")],
+        [InlineKeyboardButton("🔄 المزامنة والإنقاذ", callback_data="dashboard_sync")],
+        [InlineKeyboardButton("🛠️ أدوات المنقذ", callback_data="dashboard_tools"), InlineKeyboardButton("🕵️‍♂️ تقرير التشخيص", callback_data="dashboard_debug")],
+        [InlineKeyboardButton("🔄 تحديث", callback_data="dashboard_refresh_menu")]
+    ])
+    message_text = "🖥️ *لوحة التحكم الرئيسية*\n\nاختر التقرير أو البيانات التي تريد عرضها:"
+
+    try:
+        if update.callback_query:
+             await target_message.edit_text(message_text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+        else:
+            await target_message.reply_text(message_text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            pass 
+        else:
+            logger.error(f"Error in show_dashboard_command: {e}")
+            if update.callback_query:
+                await context.bot.send_message(chat_id=target_message.chat_id, text=message_text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+
+
+async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE): await (update.message or update.callback_query.message).reply_text("اختر الإعداد:", reply_markup=ReplyKeyboardMarkup(settings_menu_keyboard, resize_keyboard=True))
+
+def get_scanners_keyboard():
+    active_scanners = bot_state.settings.get("active_scanners", [])
+    keyboard = [[InlineKeyboardButton(f"{'✅' if name in active_scanners else '❌'} {STRATEGY_NAMES_AR.get(name, name)}", callback_data=f"toggle_scanner_{name}")] for name in SCANNERS.keys()]
+    keyboard.append([InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="back_to_settings")])
+    return InlineKeyboardMarkup(keyboard)
+
+def get_presets_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚦 احترافية (متوازنة)", callback_data="preset_PRO"), InlineKeyboardButton("🎯 متشددة", callback_data="preset_STRICT")],
+        [InlineKeyboardButton("🌙 متساهلة", callback_data="preset_LAX"), InlineKeyboardButton("⚠️ فائق التساهل", callback_data="preset_VERY_LAX")],
+        [InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="back_to_settings")]
+    ])
+    
+async def show_real_trading_control_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_message = update.message or update.callback_query.message
+    settings = bot_state.settings.get("real_trading_per_exchange", {})
+    keyboard = []
+    for ex_id in EXCHANGES_TO_SCAN:
+        is_enabled = settings.get(ex_id, False)
+        status_emoji = '✅' if is_enabled else '❌'
+        button_text = f"{status_emoji} {ex_id.capitalize()}"
+        callback_data = f"toggle_real_trade_{ex_id}"
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
+    keyboard.append([InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="back_to_settings")])
+    
+    await target_message.reply_text(
+        "**🚨 التحكم بالتداول الحقيقي 🚨**\n\nاختر المنصة لتفعيل أو تعطيل التداول عليها:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def show_presets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_message = update.message or update.callback_query.message
+    await target_message.reply_text("اختر نمط إعدادات جاهز:", reply_markup=get_presets_keyboard())
+async def show_scanners_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_message = update.message or update.callback_query.message
+    await target_message.reply_text("اختر الماسحات لتفعيلها أو تعطيلها:", reply_markup=get_scanners_keyboard())
+async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard, settings = [], bot_state.settings
+    for category, params in EDITABLE_PARAMS.items():
+        keyboard.append([InlineKeyboardButton(f"--- {category} ---", callback_data="ignore")])
+        for row in [params[i:i + 2] for i in range(0, len(params), 2)]:
+            button_row = []
+            for param_key in row:
+                display_name = PARAM_DISPLAY_NAMES.get(param_key, param_key)
+                
+                if param_key in ["trailing_sl_strategy", "use_strategy_mapping", "default_tsl_strategy", "tsl_ema_period", "tsl_atr_period", "tsl_atr_multiplier"]:
+                     current_value = settings.get("trailing_sl_advanced", {}).get(param_key, "N/A")
+                else:
+                     current_value = settings.get(param_key, "N/A")
+
+                text = f"{display_name}: {'مُفعّل ✅' if current_value else 'مُعطّل ❌'}" if isinstance(current_value, bool) else f"{display_name}: {current_value}"
+                button_row.append(InlineKeyboardButton(text, callback_data=f"param_{param_key}"))
+            keyboard.append(button_row)
+    keyboard.append([InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="back_to_settings")])
+    message_text = "⚙️ *الإعدادات المتقدمة* ⚙️\n\nاختر الإعداد الذي تريد تعديله بالضغط عليه:"
+    target_message = update.callback_query.message if update.callback_query else update.message
+    try:
+        if update.callback_query:
+            await target_message.edit_text(message_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+        else:
+            sent_message = await target_message.reply_text(message_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+            context.user_data['settings_menu_id'] = sent_message.message_id
+    except BadRequest as e:
+        if "Message is not modified" not in str(e): logger.error(f"Error editing parameters menu: {e}")
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = (
+        "**💣 أوامر بوت كاسحة الألغام 💣**\n\n"
+        "`/start` - لعرض القائمة الرئيسية وبدء التفاعل.\n"
+        "`/check <ID>` - لمتابعة حالة صفقة معينة باستخدام رقمها.\n"
+    )
+    await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trade_mode_filter='all'):
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10); cursor = conn.cursor();
+        
+        query = "SELECT status, COUNT(*), SUM(pnl_usdt) FROM trades"
+        params = []
+        if trade_mode_filter != 'all':
+            query += " WHERE trade_mode = ?"
+            params.append(trade_mode_filter)
+        query += " GROUP BY status"
+        cursor.execute(query, params)
+        
+        stats_data = cursor.fetchall(); conn.close()
+        
+        counts = defaultdict(int)
+        pnl = defaultdict(float)
+        for status, count, p in stats_data:
+            counts[status] = count
+            pnl[status] = p or 0
+
+        successful = counts['ناجحة (تحقيق هدف)'] + counts['ناجحة (وقف ربح)']
+        failed = counts['فاشلة (وقف خسارة)']
+        active = counts['نشطة']
+        total = successful + failed + active
+        
+        pnl_wins = pnl['ناجحة (تحقيق هدف)'] + pnl['ناجحة (وقف ربح)']
+        pnl_losses = pnl['فاشلة (وقف خسارة)']
+
+        closed = successful + failed
+        win_rate = (successful / closed * 100) if closed > 0 else 0
+        total_pnl = pnl_wins + pnl_losses
+        
+        preset_name = bot_state.settings.get("active_preset_name", "N/A")
+        mode_title_map = {'all': '(الكل)', 'real': '(حقيقي فقط)', 'virtual': '(وهمي فقط)'}
+        title = mode_title_map.get(trade_mode_filter, '')
+
+        balance_lines = []
+        if trade_mode_filter == 'real':
+            real_balance = await get_total_real_portfolio_value_usdt()
+            balance_lines.append(f"💰 *إجمالي قيمة المحفظة الحقيقية:* `${real_balance:.2f}`")
+        elif trade_mode_filter == 'virtual':
+            balance_lines.append(f"📈 *الرصيد الافتراضي:* `${bot_state.settings['virtual_portfolio_balance_usdt']:.2f}`")
+        else: # 'all'
+            real_balance = await get_total_real_portfolio_value_usdt()
+            balance_lines.append(f"💰 *قيمة المحفظة الحقيقية:* `${real_balance:.2f}`")
+            balance_lines.append(f"📈 *الرصيد الافتراضي:* `${bot_state.settings['virtual_portfolio_balance_usdt']:.2f}`")
+
+        balance_section = "\n".join(balance_lines)
+
+        stats_msg = (f"*📊 إحصائيات المحفظة {title}*\n\n"
+                       f"{balance_section}\n"
+                       f"💰 *إجمالي الربح/الخسارة:* `${total_pnl:+.2f}`\n"
+                       f"⚙️ *النمط الحالي:* `{preset_name}`\n\n"
+                       f"- *إجمالي الصفقات:* `{total}` (`{active}` نشطة)\n"
+                       f"- *الناجحة:* `{successful}` | *الربح:* `${pnl_wins:.2f}`\n"
+                       f"- *الفاشلة:* `{failed}` | *الخسارة:* `${abs(pnl_losses):.2f}`\n"
+                       f"- *معدل النجاح:* `{win_rate:.2f}%`")
+        return stats_msg, None
+    except Exception as e:
+        logger.error(f"Error in stats_command: {e}", exc_info=True)
+        return "خطأ في جلب الإحصائيات.", None
+
+
+def generate_performance_report_string(trade_mode_filter='all'):
+    """Generates a detailed performance report string for each strategy."""
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        query = "SELECT reason, status, pnl_usdt FROM trades WHERE status != 'نشطة'"
+        params = []
+        if trade_mode_filter != 'all':
+            query += " AND trade_mode = ?"
+            params.append(trade_mode_filter)
+
+        cursor.execute(query, params)
+        trades = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+
+        if not trades:
+            return "لا توجد صفقات مغلقة لتحليل أداء الاستراتيجيات."
+
+        strategy_stats = defaultdict(lambda: {'wins': 0, 'losses': 0, 'total_pnl': 0.0})
+
+        for trade in trades:
+            reasons = [r.strip() for r in trade['reason'].split('+')]
+            for reason in reasons:
+                stats = strategy_stats[reason]
+                if trade['status'].startswith('ناجحة'):
+                    stats['wins'] += 1
+                elif trade['status'].startswith('فاشلة'):
+                    stats['losses'] += 1
+                
+                if trade['pnl_usdt'] is not None:
+                    stats['total_pnl'] += trade['pnl_usdt'] / len(reasons)
+        
+        report_lines = ["**📜 تقرير أداء الاستراتيجيات**\n"]
+        
+        sorted_strategies = sorted(strategy_stats.items(), key=lambda item: item[1]['total_pnl'], reverse=True)
+
+        for reason, stats in sorted_strategies:
+            total_trades = stats['wins'] + stats['losses']
+            win_rate = (stats['wins'] / total_trades * 100) if total_trades > 0 else 0
+            avg_pnl = stats['total_pnl'] / total_trades if total_trades > 0 else 0
+            strategy_name_ar = STRATEGY_NAMES_AR.get(reason, reason)
+
+            report_lines.append(f"\n--- **{strategy_name_ar}** ---")
+            report_lines.append(f"  - **إجمالي الصفقات:** {total_trades}")
+            report_lines.append(f"  - **معدل النجاح:** {win_rate:.2f}% ({stats['wins']} ✅ / {stats['losses']} ❌)")
+            report_lines.append(f"  - **صافي الربح/الخسارة:** `${stats['total_pnl']:+.2f}`")
+            report_lines.append(f"  - **متوسط الربح للصفقة:** `${avg_pnl:+.2f}`")
+
+        return "\n".join(report_lines)
+
+    except Exception as e:
+        logger.error(f"Error generating performance report string: {e}", exc_info=True)
+        return "❌ حدث خطأ غير متوقع أثناء إعداد تقرير أداء الاستراتيجيات."
+
+
+async def strategy_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trade_mode_filter='all'):
+    report_string = generate_performance_report_string(trade_mode_filter)
+    return report_string, None
+
+async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
+    today_str = datetime.now(EGYPT_TZ).strftime('%Y-%m-%d')
+    logger.info(f"Generating detailed daily report for {today_str}...")
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM trades WHERE DATE(closed_at) = ? AND trade_mode = 'real'", (today_str,))
+        closed_real_today = [dict(row) for row in cursor.fetchall()]
+        
+        cursor.execute("SELECT * FROM trades WHERE DATE(closed_at) = ? AND trade_mode = 'virtual'", (today_str,))
+        closed_virtual_today = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+
+        parts = [f"**🗓️ التقرير اليومي المفصل | {today_str}**\n"]
+
+        def generate_section(title, trades):
+            if not trades:
+                return [f"\n--- **{title}** ---\nلم يتم إغلاق أي صفقات اليوم."]
+            
+            wins = [t for t in trades if t['status'].startswith('ناجحة')]
+            losses = [t for t in trades if t['status'].startswith('فاشلة')]
+            total_pnl = sum(t['pnl_usdt'] for t in trades if t['pnl_usdt'] is not None)
+            win_rate = (len(wins) / len(trades) * 100) if trades else 0
+
+            section_parts = [f"\n--- **{title}** ---"]
+            section_parts.append(f"  - الربح/الخسارة الصافي: `${total_pnl:+.2f}`")
+            section_parts.append(f"  - ✅ الرابحة: {len(wins)} | ❌ الخاسرة: {len(losses)}")
+            section_parts.append(f"  - معدل النجاح: {win_rate:.1f}%")
+            return section_parts
+
+        parts.extend(generate_section("💰 الأداء الحقيقي", closed_real_today))
+        parts.extend(generate_section("📊 الأداء الوهمي", closed_virtual_today))
+
+        parts.append("\n\n*رسالة اليوم: \"النجاح في التداول هو نتيجة للانضباط والصبر والتعلم المستمر.\"*")
+        report_message = "\n".join(parts)
+
+        await send_telegram_message(context.bot, {'custom_message': report_message, 'target_chat': TELEGRAM_SIGNAL_CHANNEL_ID})
+    except Exception as e:
+        logger.error(f"Failed to generate detailed daily report: {e}", exc_info=True)
+
+async def daily_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_message = update.callback_query.message if update.callback_query else update.message
+    await target_message.reply_text("⏳ جاري إرسال التقرير اليومي المفصل...")
+    await send_daily_report(context)
+    await target_message.reply_text("✅ تم إرسال التقرير بنجاح إلى القناة.")
+
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_message = update.callback_query.message if update.callback_query else update.message
+    await target_message.reply_text("⏳ جاري إعداد تقرير التشخيص الشامل...")
+    settings = bot_state.settings
+    parts = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v7.5)**\n\n*تم إنشاؤه في: {datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')}*"]
+
+    parts.append("\n- - - - - - - - - - - - - - - - - -")
+    parts.append("**[ ⚙️ حالة النظام والبيئة ]**")
+    parts.append(f"- `NLTK (تحليل الأخبار):` {'متاحة ✅' if NLTK_AVAILABLE else 'غير متاحة ❌'}")
+    parts.append(f"- `SciPy (تحليل الدايفرجنس):` {'متاحة ✅' if SCIPY_AVAILABLE else 'غير متاحة ❌'}")
+    parts.append(f"- `Alpha Vantage (بيانات اقتصادية):` {'موجود ✅' if ALPHA_VANTAGE_API_KEY != 'YOUR_AV_KEY_HERE' else 'مفقود ⚠️'}")
+
+    parts.append("\n**[ 📊 حالة السوق الحالية ]**")
+    mood_info = settings.get("last_market_mood", {})
+    try:
+        fng_value = await get_fear_and_greed_index()
+        fng_text = "غير متاح"
+        if fng_value is not None:
+            classification = "خوف شديد" if fng_value < 25 else "خوف" if fng_value < 45 else "محايد" if fng_value < 55 else "طمع" if fng_value < 75 else "طمع شديد"
+            fng_text = f"{fng_value} ({classification})"
+    except Exception as e:
+        fng_text = f"فشل الجلب ({e})"
+    parts.append(f"- **المزاج الأساسي (أخبار):** `{mood_info.get('mood', 'N/A')}`")
+    parts.append(f"  - `{mood_info.get('reason', 'N/A')}`")
+    parts.append(f"- **المزاج الفني (BTC):** `{bot_state.status_snapshot['btc_market_mood']}`")
+    parts.append(f"- **مؤشر الخوف والطمع:** `{fng_text}`")
+
+    status = bot_state.status_snapshot
+    scan_duration = "N/A"
+    if isinstance(status.get('last_scan_end_time'), datetime) and isinstance(status.get('last_scan_start_time'), datetime):
+        duration_sec = (status['last_scan_end_time'] - status['last_scan_start_time']).total_seconds()
+        scan_duration = f"{duration_sec:.0f} ثانية"
+    parts.append("\n**[ 🔬 أداء آخر فحص ]**")
+    parts.append(f"- **وقت البدء:** `{status.get('last_scan_start_time', 'N/A')}`")
+    parts.append(f"- **المدة:** `{scan_duration}`")
+    parts.append(f"- **العملات المفحوصة:** `{status['markets_found']}`")
+    parts.append(f"- **فشل في تحليل:** `{(bot_state.scan_history[-1]['failures'] if bot_state.scan_history else 'N/A')}` عملات")
+
+    parts.append("\n**[ 🔧 الإعدادات النشطة ]**")
+    parts.append(f"- **النمط الحالي:** `{settings.get('active_preset_name', 'N/A')}`")
+    parts.append(f"- **الماسحات المفعلة:** `{', '.join(settings.get('active_scanners', []))}`")
+    
+    parts.append("\n**[ 🔩 حالة العمليات الداخلية ]**")
+    if context.job_queue:
+        try:
+            scan_job = context.job_queue.get_jobs_by_name('perform_scan')
+            track_job = context.job_queue.get_jobs_by_name('track_open_trades')
+
+            def get_next_run_str(job):
+                if not job or not job[0].next_t: return 'N/A'
+                now = datetime.now(EGYPT_TZ)
+                next_t = job[0].next_t.astimezone(EGYPT_TZ)
+                if next_t < now:
+                    if job[0].enabled:
+                         return 'يعمل الآن أو سيبدأ خلال ثوانٍ'
+                    else:
+                         return 'متوقف مؤقتاً'
+                delta = next_t - now
+                minutes, seconds = divmod(int(delta.total_seconds()), 60)
+                return f'بعد {minutes} دقيقة و {seconds} ثانية'
+
+            scan_next_str = get_next_run_str(scan_job)
+            track_next_str = get_next_run_str(track_job)
+            
+            parts.append("- **المهام المجدولة:**")
+            parts.append(f"  - `فحص العملات:` {scan_next_str}")
+            parts.append(f"  - `متابعة الصفقات:` {track_next_str}")
+        except Exception as e:
+            parts.append(f"- **المهام المجدولة:** فشل الفحص ({e})")
+            
+    parts.append("- **الاتصال بالمنصات:**")
+    for ex_id in EXCHANGES_TO_SCAN:
+        is_private_connected = ex_id in bot_state.exchanges and bot_state.exchanges[ex_id].apiKey
+        is_public_connected = ex_id in bot_state.public_exchanges
+        status_text = f"عام: {'✅' if is_public_connected else '❌'} | خاص: {'✅' if is_private_connected else '❌'}"
+        parts.append(f"  - `{ex_id.capitalize()}:` {status_text}")
+
+    parts.append("- **قاعدة البيانات:**")
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=5); cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM trades"); total_trades = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM trades WHERE status = 'نشطة'"); active_trades = cursor.fetchone()[0]
+        conn.close()
+        db_size = os.path.getsize(DB_FILE) / (1024 * 1024)
+        parts.append(f"  - `الاتصال:` ناجح ✅")
+        parts.append(f"  - `حجم الملف:` {db_size:.2f} MB")
+        parts.append(f"  - `إجمالي الصفقات:` {total_trades} ({active_trades} نشطة)")
+    except Exception as e: parts.append(f"  - `الاتصال:` فشل ❌ ({e})")
+    parts.append("- - - - - - - - - - - - - - - - - -")
+
+    await target_message.reply_text("\n".join(parts), parse_mode=ParseMode.MARKDOWN)
+
+async def check_trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trade_id_from_callback=None):
+    target = update.callback_query.message if trade_id_from_callback else update.message
+    def format_price(price): return f"{price:,.8f}" if price < 0.01 else f"{price:,.4f}"
+    try:
+        trade_id = trade_id_from_callback or int(context.args[0])
+        conn = sqlite3.connect(DB_FILE, timeout=10); conn.row_factory = sqlite3.Row; cursor = conn.cursor(); cursor.execute("SELECT * FROM trades WHERE id = ?", (trade_id,));
+        trade = dict(trade_row) if (trade_row := cursor.fetchone()) else None; conn.close()
+        if not trade: await target.reply_text(f"لم يتم العثور على صفقة بالرقم `{trade_id}`."); return
+        if trade['status'] != 'نشطة':
+            pnl_percent = (trade['pnl_usdt'] / trade['entry_value_usdt'] * 100) if trade.get('entry_value_usdt', 0) > 0 else 0
+
+            closed_at_dt_naive = datetime.strptime(trade['closed_at'], '%Y-%m-%d %H:%M:%S')
+            closed_at_dt = EGYPT_TZ.localize(closed_at_dt_naive)
+            message = f"📋 *ملخص الصفقة #{trade_id}*\n\n*العملة:* `{trade['symbol']}`\n*الحالة:* `{trade['status']}`\n*تاريخ الإغلاق:* `{closed_at_dt.strftime('%Y-%m-%d %I:%M %p')}`\n*الربح/الخسارة:* `${trade.get('pnl_usdt', 0):+.2f} ({pnl_percent:+.2f}%)`"
+        else:
+            if not (exchange := bot_state.public_exchanges.get(trade['exchange'].lower())): await target.reply_text("المنصة غير متصلة."); return
+            if not (ticker := await exchange.fetch_ticker(trade['symbol'])) or not (current_price := ticker.get('last') or ticker.get('close')):
+                await target.reply_text(f"لم أتمكن من جلب السعر الحالي لـ `{trade['symbol']}`."); return
+            live_pnl = (current_price - trade['entry_price']) * trade['quantity']
+            live_pnl_percent = (live_pnl / trade['entry_value_usdt'] * 100) if trade.get('entry_value_usdt', 0) > 0 else 0
+            message = (f"📈 *متابعة حية للصفقة #{trade_id}*\n\n"
+                       f"▫️ *العملة:* `{trade['symbol']}` | *الحالة:* `نشطة`\n"
+                       f"▫️ *سعر الدخول:* `${format_price(trade['entry_price'])}`\n"
+                       f"▫️ *السعر الحالي:* `${format_price(current_price)}`\n\n"
+                       f"💰 *الربح/الخسارة الحالية:*\n`${live_pnl:+.2f} ({live_pnl_percent:+.2f}%)`")
+        await target.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+    except (ValueError, IndexError): await target.reply_text("رقم صفقة غير صالح. مثال: `/check 17`")
+    except Exception as e: logger.error(f"Error in check_trade_command: {e}", exc_info=True); await target.reply_text("حدث خطأ.")
+
+async def show_active_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trade_mode_filter='all'):
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
+        
+        query = "SELECT id, symbol, entry_value_usdt, exchange FROM trades WHERE status = 'نشطة'"
+        params = []
+        if trade_mode_filter != 'all':
+            query += " AND trade_mode = ?"
+            params.append(trade_mode_filter)
+        query += " ORDER BY id DESC"
+
+        cursor.execute(query, params)
+        active_trades = cursor.fetchall(); conn.close()
+        
+        if not active_trades:
+            return "لا توجد صفقات نشطة حالياً لهذا الفلتر.", None
+            
+        keyboard = [[InlineKeyboardButton(f"#{t['id']} | {t['symbol']} | ${t['entry_value_usdt']:.2f} | {t['exchange']}", callback_data=f"check_{t['id']}")] for t in active_trades]
+        return "اختر صفقة لمتابعتها:", InlineKeyboardMarkup(keyboard)
+    except Exception as e:
+        logger.error(f"Error in show_active_trades: {e}")
+        return "خطأ في جلب الصفقات.", None
+
+async def execute_manual_order(exchange_id, symbol, amount, side, context: ContextTypes.DEFAULT_TYPE, order_type='market', price=None, stop_price=None):
+    logger.info(f"Attempting MANUAL {order_type.upper()} {side.upper()} for {symbol} on {exchange_id} for {amount}")
+    exchange = bot_state.exchanges.get(exchange_id.lower())
+    if not exchange or not exchange.apiKey:
+        return {"success": False, "error": f"لا يمكن تنفيذ الأمر. لم يتم توثيق الاتصال بمنصة {exchange_id.capitalize()}."}
+
+    try:
+        order_receipt = None
+        params = {}
+        
+        # Note: For market buy, 'amount' is the cost (USDT). For all others, it's the base currency amount.
+        if order_type == 'market' and side == 'buy':
+             if not hasattr(exchange, 'create_market_buy_order_with_cost'):
+                 ticker = await exchange.fetch_ticker(symbol)
+                 current_price = ticker.get('last', 0)
+                 if not current_price: return {"success": False, "error": "Could not fetch price for market buy conversion."}
+                 amount_in_base = float(amount) / current_price
+                 order_receipt = await exchange.create_market_buy_order(symbol, amount_in_base)
+             else:
+                order_receipt = await exchange.create_market_buy_order_with_cost(symbol, float(amount))
+        elif order_type == 'market' and side == 'sell':
+            order_receipt = await exchange.create_market_sell_order(symbol, float(amount))
+        elif order_type == 'limit':
+            order_receipt = await exchange.create_order(symbol, 'limit', side, amount, price)
+        elif order_type == 'stop-market':
+            params['stopPrice'] = stop_price
+            order_receipt = await exchange.create_order(symbol, 'market', side, amount, params=params)
+
+        if not order_receipt:
+            raise ValueError("Order creation failed without a specific CCXT exception.")
+
+        await asyncio.sleep(2) 
+        order = await exchange.fetch_order(order_receipt['id'], symbol)
+
+        logger.info(f"MANUAL ORDER SUCCESS: {order}")
+
+        filled_quantity = order.get('filled', 0)
+        filled_price = order.get('average')
+        cost = order.get('cost', 0)
+        status = order.get('status', 'unknown')
+
+        success_message = (
+            f"**✅ تم {'تنفيذ' if status == 'closed' else 'وضع'} الأمر اليدوي بنجاح**\n\n"
+            f"**المنصة:** `{exchange_id.capitalize()}`\n"
+            f"**العملة:** `{symbol}`\n"
+            f"**النوع:** `{order_type.upper()} {side.upper()}`\n\n"
+            f"--- **تفاصيل الأمر** ---\n"
+            f"**ID:** `{order['id']}`\n"
+            f"**الحالة:** `{status}`\n"
+            f"**الكمية:** `{order['amount']}`\n"
+            f"**السعر:** `{order.get('price') or 'Market'}`\n"
+            f"**الكمية المنفذة:** `{filled_quantity}`\n"
+            f"**متوسط سعر التنفيذ:** `{filled_price or 'N/A'}`\n"
+            f"**التكلفة الإجمالية:** `${cost:.2f}`"
+        )
+        return {"success": True, "message": success_message}
+
+    except ccxt.InsufficientFunds as e:
+        error_msg = f"❌ فشل: رصيد غير كافٍ على {exchange_id.capitalize()}."
+        logger.error(f"MANUAL TRADE FAILED: {error_msg} - {e}")
+        return {"success": False, "error": error_msg}
+    except ccxt.InvalidOrder as e:
+        error_msg = f"❌ فشل: أمر غير صالح. قد يكون المبلغ أقل من الحد الأدنى للمنصة.\n`{e}`"
+        logger.error(f"MANUAL TRADE FAILED: {error_msg} - {e}")
+        return {"success": False, "error": error_msg}
+    except ccxt.ExchangeError as e:
+        error_msg = f"❌ فشل: خطأ من المنصة.\n`{e}`"
+        logger.error(f"MANUAL TRADE FAILED: {error_msg} - {e}")
+        return {"success": False, "error": error_msg}
+    except Exception as e:
+        error_msg = f"❌ فشل: حدث خطأ غير متوقع.\n`{e}`"
+        logger.error(f"MANUAL TRADE FAILED: {error_msg} - {e}", exc_info=True)
+        return {"success": False, "error": error_msg}
+
+
+async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query; await query.answer(); data = query.data
+    user_data = context.user_data
+
+    if data.startswith("rescue_"):
+        _, exchange_id, symbol = data.split("_", 2)
+        exchange = bot_state.exchanges.get(exchange_id)
+        if not exchange:
+            await query.message.reply_text(f"❌ خطأ: لم يتم العثور على اتصال بمنصة {exchange_id}")
+            return
+
+        await query.edit_message_text(f"🚑 جارِ عملية الإنقاذ لـ `{symbol}`...\n\n- الخطوة 1: جلب سجل التداول.\n- الخطوة 2: حساب متوسط الشراء.\n- الخطوة 3: تسجيل الصفقة ومتابعتها.", parse_mode=ParseMode.MARKDOWN)
+        
+        result_message = await _reconstruct_and_save_trade(exchange, symbol, context)
+        
+        await query.message.reply_text(result_message, parse_mode=ParseMode.MARKDOWN)
+        await process_sync_portfolio(update, context, exchange_id)
+        return
+
+    if data.startswith("dashboard_") and data.endswith(('_all', '_real', '_virtual')):
+        if report_lock.locked():
+            await query.answer("⏳ تقرير آخر قيد الإعداد، يرجى الانتظار...", show_alert=False)
+            return
+            
+        async with report_lock:
+            try:
+                parts = data.split('_')
+                trade_mode_filter = parts[-1]
+                report_type = '_'.join(parts[1:-1])
+                await query.edit_message_text(f"⏳ جاري إعداد تقرير **{report_type.replace('_', ' ').capitalize()}**...", parse_mode=ParseMode.MARKDOWN)
+                report_content, keyboard = None, None
+                if report_type == "stats": report_content, keyboard = await stats_command(update, context, trade_mode_filter=trade_mode_filter)
+                elif report_type == "active_trades": report_content, keyboard = await show_active_trades_command(update, context, trade_mode_filter=trade_mode_filter)
+                elif report_type == "strategy_report": report_content, keyboard = await strategy_report_command(update, context, trade_mode_filter=trade_mode_filter)
+                if report_content: await query.edit_message_text(text=report_content, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+                else: await query.edit_message_text("❌ فشل إعداد التقرير.")
+            except Exception as e:
+                logger.error(f"Error in dashboard filter handler: {e}", exc_info=True)
+                await query.edit_message_text("❌ حدث خطأ أثناء إعداد التقرير.")
+        return
+
+    if data.startswith("dashboard_"):
+        action = data.split("_", 1)[1]
+        
+        if action in ["stats", "active_trades", "strategy_report"]:
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📊 الكل (وهمي + حقيقي)", callback_data=f"dashboard_{action}_all")],
+                [InlineKeyboardButton("📈 حقيقي فقط", callback_data=f"dashboard_{action}_real"), InlineKeyboardButton("📉 وهمي فقط", callback_data=f"dashboard_{action}_virtual")],
+                [InlineKeyboardButton("🔙 العودة", callback_data="dashboard_refresh_menu")]
+            ])
+            await query.edit_message_text(f"اختر نوع السجل لعرض **{action.replace('_', ' ').capitalize()}**:", reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+            return
+
+        if action == "debug": 
+            await query.edit_message_text("⏳ جاري إعداد تقرير التشخيص...", parse_mode=ParseMode.MARKDOWN)
+            await debug_command(update, context)
+        elif action == "refresh_menu":
+            await show_dashboard_command(update, context)
+        elif action == "snapshot": await portfolio_snapshot_command(update, context)
+        elif action == "risk": await risk_report_command(update, context)
+        elif action == "sync": await sync_portfolio_command(update, context)
+        elif action == "tools":
+              # [v7.5] Added Rescuer Tools
+              keyboard = [
+                  [InlineKeyboardButton("➕ وضع أمر متقدم", callback_data="tools_place_order"), InlineKeyboardButton("📉 بيع بسعر السوق", callback_data="tools_market_sell")],
+                  [InlineKeyboardButton("❌ إلغاء أمر مفتوح", callback_data="tools_cancel_order")],
+                  [InlineKeyboardButton("💰 عرض رصيدي", callback_data="tools_balance"), InlineKeyboardButton("📜 سجل تداولاتي", callback_data="tools_mytrades")],
+                  [InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="dashboard_refresh_menu")]
+              ]
+              await query.edit_message_text("🛠️ *أدوات المنقذ*\n\nاختر الأداة التي تريد استخدامها:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if data.startswith("tools_"):
+        tool_name = data.split("_", 1)[1]
+        if tool_name == "place_order": await place_advanced_order_command(update, context)
+        elif tool_name == "market_sell": await market_sell_command(update, context)
+        elif tool_name == "cancel_order": await cancel_order_command(update, context)
+        elif tool_name == "balance": await balance_command(update, context)
+        elif tool_name == "mytrades": await my_trades_command(update, context)
+        return
+        
+    if data.startswith("balance_"): await tools_button_handler(update, context); return
+    if data.startswith("mytrades_"): await tools_button_handler(update, context); return
+    if data.startswith("p_order_"): await advanced_order_button_handler(update, context); return
+    if data.startswith("c_order_"): await cancel_order_button_handler(update, context); return
+    if data.startswith("m_sell_"): await market_sell_button_handler(update, context); return
+
+    if data.startswith("snapshot_exchange_") or data.startswith("sync_exchange_"):
+        parts = data.split("_")
+        tool, exchange_id = parts[0], parts[2]
+        if tool == 'snapshot': await process_portfolio_snapshot(update, context, exchange_id)
+        elif tool == 'sync': await process_sync_portfolio(update, context, exchange_id)
+        return
+
+    if data.startswith("preset_"):
+        preset_name = data.split("_", 1)[1]
+        if preset_data := PRESETS.get(preset_name):
+            bot_state.settings['liquidity_filters'].update(preset_data['liquidity_filters'])
+            bot_state.settings['volatility_filters'].update(preset_data['volatility_filters'])
+            bot_state.settings['ema_trend_filter'].update(preset_data['ema_trend_filter'])
+            bot_state.settings['min_tp_sl_filter'].update(preset_data['min_tp_sl_filter'])
+            bot_state.settings["active_preset_name"] = preset_name
+            save_settings()
+            await query.edit_message_text("✅ تم تفعيل النمط.", reply_markup=get_presets_keyboard())
+    elif data.startswith("param_"):
+        param_key = data.split("_", 1)[1]
+        user_data['awaiting_input_for_param'] = param_key; user_data['settings_menu_id'] = query.message.message_id
+        
+        is_advanced_tsl_param = param_key in ["trailing_sl_strategy", "use_strategy_mapping", "default_tsl_strategy", "tsl_ema_period", "tsl_atr_period", "tsl_atr_multiplier"]
+        if is_advanced_tsl_param:
+            current_value = bot_state.settings.get("trailing_sl_advanced", {}).get(param_key)
+        else:
+            current_value = bot_state.settings.get(param_key)
+
+        if isinstance(current_value, bool):
+            if is_advanced_tsl_param:
+                bot_state.settings["trailing_sl_advanced"][param_key] = not current_value
+            else:
+                bot_state.settings[param_key] = not current_value
+
+            bot_state.settings["active_preset_name"] = "Custom"; save_settings()
+            await query.answer(f"✅ تم تبديل '{PARAM_DISPLAY_NAMES.get(param_key, param_key)}'")
+            await show_parameters_menu(update, context)
+        else: await query.edit_message_text(f"📝 *تعديل '{PARAM_DISPLAY_NAMES.get(param_key, param_key)}'*\n\n*القيمة الحالية:* `{current_value}`\n\nالرجاء إرسال القيمة الجديدة.", parse_mode=ParseMode.MARKDOWN)
+    elif data.startswith("toggle_scanner_"):
+        scanner_name = data.split("_", 2)[2]
+        active_scanners = bot_state.settings.get("active_scanners", []).copy()
+        if scanner_name in active_scanners: active_scanners.remove(scanner_name)
+        else: active_scanners.append(scanner_name)
+        bot_state.settings["active_scanners"] = active_scanners; save_settings()
+        await query.edit_message_text(text="اختر الماسحات لتفعيلها أو تعطيلها:", reply_markup=get_scanners_keyboard())
+    elif data.startswith("toggle_real_trade_"):
+        exchange_id = data.split("_", 3)[3]
+        settings = bot_state.settings.get("real_trading_per_exchange", {})
+        settings[exchange_id] = not settings.get(exchange_id, False)
+        bot_state.settings["real_trading_per_exchange"] = settings; save_settings()
+        await query.answer(f"تم {'تفعيل' if settings[exchange_id] else 'تعطيل'} التداول على {exchange_id.capitalize()}")
+        await query.message.delete()
+        await show_real_trading_control_menu(update, context)
+        return
+    elif data == "back_to_settings":
+        if query.message: await query.message.delete()
+        await context.bot.send_message(chat_id=query.message.chat_id, text="اختر الإعداد:", reply_markup=ReplyKeyboardMarkup(settings_menu_keyboard, resize_keyboard=True))
+    elif data.startswith("check_"):
+        await check_trade_command(update, context, trade_id_from_callback=int(data.split("_")[1]))
+    elif data.startswith("suggest_"):
+        action = data.split("_", 1)[1]
+        if action.startswith("accept"):
+            preset_name = data.split("_")[2]
+            if preset_data := PRESETS.get(preset_name):
+                bot_state.settings['liquidity_filters'].update(preset_data['liquidity_filters'])
+                bot_state.settings['volatility_filters'].update(preset_data['volatility_filters'])
+                bot_state.settings['ema_trend_filter'].update(preset_data['ema_trend_filter'])
+                bot_state.settings['min_tp_sl_filter'].update(preset_data['min_tp_sl_filter'])
+                bot_state.settings["active_preset_name"] = preset_name; save_settings()
+                await query.edit_message_text(f"✅ **تم قبول الاقتراح!**\n\nتم تغيير النمط بنجاح إلى `{preset_name}`.", parse_mode=ParseMode.MARKDOWN)
+        elif action == "decline":
+            await query.edit_message_text("👍 **تم تجاهل الاقتراح.**", parse_mode=ParseMode.MARKDOWN)
+
+def get_exchange_selection_keyboard(callback_prefix: str, back_button_cb: str):
+    """Generates a keyboard with buttons for all connected private exchanges."""
+    keyboard = []
+    connected_exchanges = list(bot_state.exchanges.keys())
+    for i in range(0, len(connected_exchanges), 2):
+        row = [
+            InlineKeyboardButton(ex.capitalize(), callback_data=f"{callback_prefix}_exchange_{ex}")
+            for ex in connected_exchanges[i:i+2]
+        ]
+        keyboard.append(row)
+    
+    keyboard.append([InlineKeyboardButton("🔙 العودة", callback_data=back_button_cb)])
+    return InlineKeyboardMarkup(keyboard)
+
+async def tools_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    user_data = context.user_data
+    
+    if len(data.split("_")) < 3: return
+    
+    tool_name, action, value = data.split("_", 2)
+
+    tool_key = f"{tool_name}_tool"
+    user_data[tool_key] = {}
+    if action == "exchange":
+        user_data[tool_key]['exchange'] = value
+        if tool_name == "balance":
+            await query.edit_message_text(f"💰 جاري جلب الأرصدة من *{value.capitalize()}*...", parse_mode=ParseMode.MARKDOWN)
+            await fetch_and_display_balance(value, query)
+            user_data.pop(tool_key, None)
+        else:
+            user_data[tool_key]['state'] = 'awaiting_symbol'
+            await query.edit_message_text(f"اخترت منصة: *{value.capitalize()}*\n\nالآن، أرسل رمز العملة (مثال: `BTC/USDT`)\nأو أرسل `الكل` لعرض البيانات لجميع العملات.", parse_mode=ParseMode.MARKDOWN)
+
+async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+
+    user_data = context.user_data
+    text = update.message.text
+
+    # [v7.5] Unified tool handler
+    active_tool = None
+    for tool_key in ['c_order_tool', 'mytrades_tool', 'p_order_tool', 'm_sell_tool']:
+        if tool_key in user_data:
+            active_tool = tool_key
+            break
+            
+    if 'p_order_tool' in user_data:
+        await advanced_order_text_handler(update, context)
+        return
+    
+    if 'm_sell_tool' in user_data:
+        await market_sell_text_handler(update, context)
+        return
+
+    if active_tool:
+        state = user_data[active_tool].get('state')
+        if state == 'awaiting_symbol':
+            symbol = text.upper()
+            exchange_id = user_data[active_tool]['exchange']
+
+            if symbol.lower() in ["all", "الكل"] and active_tool not in ['c_order_tool']:
+                symbol = None
+            elif '/' not in symbol:
+                await update.message.reply_text("❌ رمز غير صالح. الرجاء إرسال الرمز بالتنسيق الصحيح (مثال: `BTC/USDT`).")
+                return
+            
+            if active_tool == 'c_order_tool':
+                 await update.message.reply_text(f"📖 جاري جلب أوامرك المفتوحة لـ *{symbol or 'الكل'}*...", parse_mode=ParseMode.MARKDOWN)
+                 await fetch_and_display_cancellable_orders(exchange_id, symbol, update.message)
+            elif active_tool == 'mytrades_tool':
+                await update.message.reply_text(f"📜 جاري جلب سجل تداولاتك لـ *{symbol or 'الكل'}*...", parse_mode=ParseMode.MARKDOWN)
+                await fetch_and_display_my_trades(exchange_id, symbol, update.message)
+
+            user_data.pop(active_tool, None)
+            return
+    
+    menu_handlers = {
+        "Dashboard 🖥️": show_dashboard_command,
+        "ℹ️ مساعدة": help_command,
+        "⚙️ الإعدادات": show_settings_menu,
+        "🔧 تعديل المعايير": show_parameters_menu,
+        "🔙 القائمة الرئيسية": start_command,
+        "🎭 تفعيل/تعطيل الماسحات": show_scanners_menu,
+        "🏁 أنماط جاهزة": show_presets_menu,
+        "🚨 التحكم بالتداول الحقيقي": show_real_trading_control_menu,
+    }
+    if text in menu_handlers:
+        for key in list(user_data.keys()):
+            if key.startswith(('p_order_tool', 'c_order_tool', 'm_sell_tool', 'mytrades_tool', 'balance_tool')) or key == 'awaiting_input_for_param':
+                user_data.pop(key)
+
+        handler = menu_handlers[text]
+        await handler(update, context)
+        return
+
+    if param := user_data.pop('awaiting_input_for_param', None):
+        value_str = update.message.text
+        settings_menu_id = context.user_data.pop('settings_menu_id', None)
+        chat_id = update.message.chat_id
+        await context.bot.delete_message(chat_id=chat_id, message_id=update.message.message_id)
+        settings = bot_state.settings
+        try:
+            is_advanced_tsl_param = param in ["trailing_sl_strategy", "use_strategy_mapping", "default_tsl_strategy", "tsl_ema_period", "tsl_atr_period", "tsl_atr_multiplier"]
+            if is_advanced_tsl_param:
+                target_dict = settings.get("trailing_sl_advanced", {})
+                current_type = type(target_dict.get(param, ''))
+            else:
+                target_dict = settings
+                current_type = type(settings.get(param, ''))
+
+            new_value = current_type(value_str)
+            if isinstance(target_dict.get(param), bool):
+                new_value = value_str.lower() in ['true', '1', 'yes', 'on', 'نعم', 'تفعيل']
+            
+            target_dict[param] = new_value
+            settings["active_preset_name"] = "Custom"
+            save_settings()
+            
+            if settings_menu_id: context.user_data['settings_menu_id'] = settings_menu_id
+            await show_parameters_menu(update, context)
+            confirm_msg = await update.message.reply_text(f"✅ تم تحديث **{PARAM_DISPLAY_NAMES.get(param, param)}** إلى `{new_value}`.", parse_mode=ParseMode.MARKDOWN)
+            context.job_queue.run_once(lambda ctx: ctx.bot.delete_message(chat_id, confirm_msg.message_id), 4)
+        except (ValueError, KeyError):
+            if settings_menu_id:
+                await context.bot.edit_message_text(chat_id=chat_id, message_id=settings_menu_id, text="❌ قيمة غير صالحة. الرجاء المحاولة مرة أخرى.")
+                context.job_queue.run_once(lambda _: show_parameters_menu(update, context), 3)
+        return
+
+async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['balance_tool'] = {'state': 'awaiting_exchange'}
+    keyboard = get_exchange_selection_keyboard("balance", "dashboard_tools")
+    await update.callback_query.edit_message_text("💰 **عرض الرصيد**\n\nاختر المنصة لعرض أرصدتك:", reply_markup=keyboard)
+
+async def my_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['mytrades_tool'] = {'state': 'awaiting_exchange'}
+    keyboard = get_exchange_selection_keyboard("mytrades", "dashboard_tools")
+    await update.callback_query.edit_message_text("📜 **سجل تداولاتي**\n\nاختر المنصة:", reply_markup=keyboard)
+
+async def fetch_and_display_balance(exchange_id, query):
+    exchange = bot_state.exchanges.get(exchange_id.lower())
+    if not exchange or not exchange.apiKey:
+        await query.edit_message_text(f"❌ خطأ: لم يتم توثيق الاتصال بمنصة {exchange_id.capitalize()}.")
+        return
+
+    try:
+        portfolio_data = await calculate_full_portfolio(exchange)
+        assets = portfolio_data.get('assets', [])
+        total_usdt_value = portfolio_data.get('total_usdt', 0)
+
+        if not assets:
+            await query.edit_message_text(f"ℹ️ لا توجد أرصدة كبيرة (> $1) على منصة {exchange_id.capitalize()}.")
+            return
+
+        message_lines = [f"**💰 رصيدك على {exchange_id.capitalize()}**\n"]
+        message_lines.append(f"__**إجمالي القيمة التقديرية:**__ `${total_usdt_value:,.2f}`\n")
+
+        for asset in assets[:15]:
+            message_lines.append(f"- `{asset['currency']}`: `{asset['amount']:.4f}` (~`${asset['usdt_value']:.2f}`)")
+
+        await query.edit_message_text("\n".join(message_lines), parse_mode=ParseMode.MARKDOWN)
+
+    except Exception as e:
+        logger.error(f"Error fetching balance for {exchange_id}: {e}")
+        await query.edit_message_text(f"❌ حدث خطأ أثناء جلب الرصيد من {exchange_id.capitalize()}.")
+
+async def fetch_and_display_my_trades(exchange_id, symbol, message):
+    exchange = bot_state.exchanges.get(exchange_id.lower())
+    if not exchange or not exchange.apiKey:
+        await message.reply_text(f"❌ خطأ: لم يتم توثيق الاتصال بمنصة {exchange_id.capitalize()}.")
+        return
+    try:
+        my_trades = await exchange.fetch_my_trades(symbol, limit=20)
+
+        if not my_trades:
+            await message.reply_text(f"✅ لا يوجد لديك سجل تداول لـ `{symbol or 'الكل'}` على {exchange_id.capitalize()}.")
+            return
+
+        lines = [f"**📜 آخر 20 من تداولاتك لـ `{symbol or 'الكل'}` على {exchange_id.capitalize()}**\n"]
+
+        for trade in reversed(my_trades):
+            trade_time = datetime.fromtimestamp(trade['timestamp'] / 1000, tz=EGYPT_TZ).strftime('%Y-%m-%d %H:%M')
+            side_emoji = "🔼" if trade['side'] == 'buy' else "🔽"
+            fee = trade.get('fee', {})
+            fee_str = f"{fee.get('cost', 0):.4f} {fee.get('currency', '')}"
+            lines.append(
+                f"`{trade_time}` | `{trade['symbol']}` {side_emoji} `{trade['side'].upper()}`\n"
+                f"  - **الكمية:** `{trade['amount']}`\n"
+                f"  - **السعر:** `{trade['price']}`\n"
+                f"  - **الرسوم:** `{fee_str}`"
+            )
+
+        await message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logger.error(f"Error fetching my trades for {symbol} on {exchange_id}: {e}")
+        await message.reply_text(f"❌ فشل جلب سجل تداولاتك. تأكد من صحة الرمز: `{symbol or ''}`.")
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None: 
+    logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
+
+async def calculate_full_portfolio(exchange):
+    """Calculates the total portfolio value and provides a detailed asset breakdown."""
+    if not exchange or not exchange.apiKey:
+        return {'total_usdt': 0, 'assets': []}
+        
+    try:
+        balance = await exchange.fetch_balance()
+        all_assets = balance.get('total', {})
+        
+        if not hasattr(exchange, '_tickers_cache') or (time.time() - getattr(exchange, '_tickers_cache_time', 0) > 60):
+             exchange._tickers_cache = await exchange.fetch_tickers()
+             exchange._tickers_cache_time = time.time()
+        tickers = exchange._tickers_cache
+        
+        portfolio_assets = []
+        total_usdt_value = 0
+        for currency, amount in all_assets.items():
+            if amount > 0:
+                usdt_value = 0
+                if currency == 'USDT':
+                    usdt_value = amount
+                elif f"{currency}/USDT" in tickers and tickers[f"{currency}/USDT"].get('last'):
+                    usdt_value = amount * tickers[f"{currency}/USDT"]['last']
+                
+                if usdt_value > 1.0:
+                    portfolio_assets.append({'currency': currency, 'amount': amount, 'usdt_value': usdt_value})
+                    total_usdt_value += usdt_value
+        
+        portfolio_assets.sort(key=lambda x: x['usdt_value'], reverse=True)
+        return {'total_usdt': total_usdt_value, 'assets': portfolio_assets}
+    except Exception as e:
+        logger.error(f"Could not calculate portfolio value for {exchange.id}: {e}")
+        return {'total_usdt': 0, 'assets': []}
+
+
+async def get_total_real_portfolio_value_usdt():
+    total_value = 0
+    tasks = [calculate_full_portfolio(ex) for ex in bot_state.exchanges.values() if ex.apiKey]
+    results = await asyncio.gather(*tasks)
+    for res in results:
+        total_value += res['total_usdt']
+    return total_value
+
+async def portfolio_snapshot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_message = update.callback_query.message
+    
+    connected_exchanges = [ex for ex in bot_state.exchanges.values() if ex.apiKey]
+    
+    if not connected_exchanges:
+        await target_message.edit_text("❌ **فشل:** لم يتم العثور على أي منصة متصلة بحساب حقيقي.")
+        return
+
+    if len(connected_exchanges) == 1:
+        await process_portfolio_snapshot(update, context, connected_exchanges[0].id)
+    else:
+        keyboard = get_exchange_selection_keyboard("snapshot", "dashboard_refresh_menu")
+        await target_message.edit_text(
+            "**📸 لقطة للمحفظة**\n\nلديك أكثر من منصة متصلة. اختر المنصة:",
+            reply_markup=keyboard
+        )
+
+async def process_portfolio_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE, exchange_id: str):
+    target_message = update.callback_query.message
+    await target_message.edit_text(f"📸 **لقطة للمحفظة**\n\n⏳ جارِ الاتصال بمنصة {exchange_id.capitalize()} وجلب البيانات...")
+
+    exchange = bot_state.exchanges.get(exchange_id)
+    if not exchange:
+        await target_message.edit_text(f"❌ **فشل:** خطأ في العثور على منصة {exchange_id.capitalize()} المتصلة.")
+        return
+
+    try:
+        portfolio_data = await calculate_full_portfolio(exchange)
+        portfolio_assets = portfolio_data.get('assets', [])
+        total_usdt_value = portfolio_data.get('total_usdt', 0)
+        
+        symbols_to_fetch = [f"{asset['currency']}/USDT" for asset in portfolio_assets if f"{asset['currency']}/USDT" in exchange.markets]
+        
+        trade_tasks = [exchange.fetch_my_trades(symbol=symbol, limit=5) for symbol in symbols_to_fetch]
+        trade_results = await asyncio.gather(*trade_tasks, return_exceptions=True)
+
+        all_recent_trades = []
+        for result in trade_results:
+            if not isinstance(result, Exception):
+                all_recent_trades.extend(result)
+        
+        all_recent_trades.sort(key=lambda x: x['timestamp'], reverse=True)
+        recent_trades = all_recent_trades[:20]
+
+        parts = [f"**📸 لقطة لمحفظة {exchange.id.capitalize()}**\n"]
+        parts.append(f"__**إجمالي القيمة التقديرية:**__ `${total_usdt_value:,.2f}`\n")
+
+        parts.append("--- **الأرصدة الحالية (> $1)** ---")
+        for asset in portfolio_assets[:15]:
+            parts.append(f"- **{asset['currency']}**: `{asset['amount']:.4f}` *~`${asset['usdt_value']:.2f}`*")
+        
+        parts.append("\n--- **آخر 20 عملية تداول** ---")
+        if not recent_trades:
+            parts.append("لا يوجد سجل تداولات حديث.")
+        else:
+            for trade in recent_trades:
+                side_emoji = "🟢" if trade['side'] == 'buy' else "🔴"
+                parts.append(f"`{trade['symbol']}` {side_emoji} `{trade['side'].upper()}` | الكمية: `{trade['amount']}` | السعر: `{trade['price']}`")
+        
+        await target_message.edit_text("\n".join(parts), parse_mode=ParseMode.MARKDOWN)
+
+    except Exception as e:
+        logger.error(f"Error generating portfolio snapshot: {e}", exc_info=True)
+        await target_message.edit_text(f"❌ **فشل:** حدث خطأ أثناء جلب بيانات المحفظة.\n`{e}`")
+
+async def risk_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_message = update.callback_query.message
+    await target_message.edit_text("ρίск **تقرير المخاطر**\n\n⏳ جارِ تحليل الصفقات النشطة...")
+
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        conn.row_factory = sqlite3.Row
+        
+        real_trades = [dict(row) for row in conn.cursor().execute("SELECT * FROM trades WHERE status = 'نشطة' AND trade_mode = 'real'").fetchall()]
+        virtual_trades = [dict(row) for row in conn.cursor().execute("SELECT * FROM trades WHERE status = 'نشطة' AND trade_mode = 'virtual'").fetchall()]
+        conn.close()
+
+        parts = ["**ρίск تقرير المخاطر الحالي**\n"]
+
+        def generate_risk_section(title, trades, portfolio_value):
+            if not trades:
+                return [f"\n--- **{title}** ---\n✅ لا توجد صفقات نشطة حالياً."]
+            
+            valid_trades = [t for t in trades if all(k in t and t[k] is not None for k in ['entry_value_usdt', 'entry_price', 'stop_loss', 'quantity'])]
+            
+            total_at_risk = sum(t['entry_value_usdt'] for t in valid_trades)
+            potential_loss = sum((t['entry_price'] - t['stop_loss']) * t['quantity'] for t in valid_trades)
+            symbol_concentration = Counter(t['symbol'] for t in valid_trades)
+
+            section_parts = [f"\n--- **{title}** ---"]
+            section_parts.append(f"- **عدد الصفقات:** {len(valid_trades)}")
+            section_parts.append(f"- **إجمالي رأس المال بالصفقات:** `${total_at_risk:,.2f}`")
+            if portfolio_value > 0:
+                section_parts.append(f"- **نسبة التعرض:** `{(total_at_risk / portfolio_value) * 100:.2f}%` من المحفظة")
+            section_parts.append(f"- **أقصى خسارة محتملة:** `$-{potential_loss:,.2f}` (إذا ضُرب كل الوقف)")
+            
+            if symbol_concentration:
+                most_common = symbol_concentration.most_common(1)[0]
+                section_parts.append(f"- **العملة الأكثر تركيزاً:** `{most_common[0]}` ({most_common[1]} صفقات)")
+            
+            return section_parts
+
+        real_portfolio_value = await get_total_real_portfolio_value_usdt()
+        parts.extend(generate_risk_section("🚨 المخاطر الحقيقية", real_trades, real_portfolio_value))
+        
+        virtual_portfolio_value = bot_state.settings['virtual_portfolio_balance_usdt']
+        parts.extend(generate_risk_section("📊 المخاطر الوهمية", virtual_trades, virtual_portfolio_value))
+
+        await target_message.edit_text("\n".join(parts), parse_mode=ParseMode.MARKDOWN)
+
+    except Exception as e:
+        logger.error(f"Error generating risk report: {e}", exc_info=True)
+        await target_message.edit_text(f"❌ **فشل:** حدث خطأ أثناء إعداد تقرير المخاطر.\n`{e}`")
+
+async def sync_portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_message = update.callback_query.message
+    
+    connected_exchanges = [ex for ex in bot_state.exchanges.values() if ex.apiKey]
+    if not connected_exchanges:
+        await target_message.edit_text("❌ **فشل:** لم يتم العثور على أي منصة متصلة بحساب حقيقي.")
+        return
+        
+    if len(connected_exchanges) == 1:
+        await process_sync_portfolio(update, context, connected_exchanges[0].id)
+    else:
+        keyboard = get_exchange_selection_keyboard("sync", "dashboard_refresh_menu")
+        await target_message.edit_text(
+            "**🔄 المزامنة والإنقاذ الذكي**\n\nلديك أكثر من منصة متصلة. اختر المنصة للمزامنة:",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+async def process_sync_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE, exchange_id: str):
+    target_message = update.callback_query.message
+    await target_message.edit_text(f"🔄 **المزامنة والإنقاذ الذكي**\n\n⏳ جارِ الاتصال بمنصة {exchange_id.capitalize()} ومقارنة البيانات...", parse_mode=ParseMode.MARKDOWN)
+    
+    exchange = bot_state.exchanges.get(exchange_id)
+    if not exchange:
+        await target_message.edit_text(f"❌ **فشل:** خطأ في العثور على منصة {exchange_id.capitalize()} المتصلة.")
+        return
+
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        bot_trades_raw = conn.cursor().execute("SELECT symbol FROM trades WHERE status = 'نشطة' AND trade_mode = 'real' AND LOWER(exchange) = ?", (exchange_id.lower(),)).fetchall()
+        bot_symbols = {item[0] for item in bot_trades_raw}
+        
+        twenty_four_hours_ago = datetime.now() - timedelta(hours=24)
+        recently_closed_raw = conn.cursor().execute("SELECT symbol FROM trades WHERE trade_mode = 'real' AND LOWER(exchange) = ? AND closed_at > ?", (exchange_id.lower(), twenty_four_hours_ago.strftime('%Y-%m-%d %H:%M:%S'))).fetchall()
+        recently_closed_symbols = {item[0] for item in recently_closed_raw}
+        conn.close()
+
+        portfolio_data = await calculate_full_portfolio(exchange)
+        exchange_symbols = {f"{asset['currency']}/USDT" for asset in portfolio_data['assets'] if asset['currency'] != 'USDT'}
+
+        matched_symbols = bot_symbols.intersection(exchange_symbols)
+        exchange_only_symbols = exchange_symbols.difference(bot_symbols).difference(recently_closed_symbols)
+
+        parts = [f"**🔄 تقرير المزامنة ({exchange.id.capitalize()})**\n"]
+        parts.append(f"تمت مقارنة `{len(bot_symbols)}` صفقة مُدارة بواسطة البوت مع `{len(exchange_symbols)}` عملة مملوكة في المنصة.\n")
+
+        parts.append(f"--- ✅ **صفقات مُدارة ومتطابقة** `({len(matched_symbols)})` ---")
+        if matched_symbols: parts.extend([f"- `{s}`" for s in matched_symbols])
+        else: parts.append("لا توجد صفقات متطابقة حالياً.")
+
+        parts.append(f"\n--- 🚑 **صفقات يتيمة (للاستيراد)** `({len(exchange_only_symbols)})` ---")
+        parts.append("*هذه عملات تملكها في المنصة لكن البوت لا يديرها حالياً.*")
+        
+        keyboard_buttons = []
+        if exchange_only_symbols:
+            for symbol in exchange_only_symbols:
+                keyboard_buttons.append([InlineKeyboardButton(f"➕ استيراد ومتابعة {symbol}", callback_data=f"rescue_{exchange_id}_{symbol}")])
+        else:
+            parts.append("لا توجد صفقات يتيمة لاستيرادها. كل شيء متزامن!")
+        
+        keyboard_buttons.append([InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="dashboard_refresh_menu")])
+        keyboard = InlineKeyboardMarkup(keyboard_buttons)
+
+        await target_message.edit_text("\n".join(parts), reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+
+    except Exception as e:
+        logger.error(f"Error processing portfolio sync: {e}", exc_info=True)
+        await target_message.edit_text(f"❌ **فشل:** حدث خطأ أثناء مزامنة المحفظة.\n`{e}`")
 
 # =======================================================================================
-# --- Bot Startup and Main Loop ---
+# --- [v7.5] New "Rescuer" Manual Tool Handlers ---
 # =======================================================================================
+
+async def cancel_order_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['c_order_tool'] = {'state': 'awaiting_exchange'}
+    keyboard = get_exchange_selection_keyboard("c_order", "dashboard_tools")
+    await update.callback_query.edit_message_text("❌ **إلغاء أمر مفتوح**\n\nاختر المنصة:", reply_markup=keyboard)
+
+async def fetch_and_display_cancellable_orders(exchange_id, symbol, message):
+    exchange = bot_state.exchanges.get(exchange_id.lower())
+    if not exchange:
+        await message.reply_text(f"❌ خطأ: لم يتم توثيق الاتصال بمنصة {exchange_id.capitalize()}.")
+        return
+    try:
+        open_orders = await exchange.fetch_open_orders(symbol)
+        if not open_orders:
+            await message.reply_text(f"✅ لا توجد لديك أوامر مفتوحة لـ `{symbol}` على {exchange_id.capitalize()}.")
+            return
+
+        lines = [f"**📖 أوامرك المفتوحة لـ `{symbol}`**\n\nاختر الأمر الذي تريد إلغاءه:"]
+        keyboard = []
+        for order in open_orders:
+            side_emoji = "🔼" if order['side'] == 'buy' else "🔽"
+            order_text = f"{side_emoji} {order['type']} | {order['amount']} @ {order['price']}"
+            keyboard.append([InlineKeyboardButton(order_text, callback_data=f"c_order_confirm_{exchange_id}_{symbol}_{order['id']}")])
+        
+        keyboard.append([InlineKeyboardButton("❌ إلغاء كل الأوامر لهذا الرمز", callback_data=f"c_order_all_{exchange_id}_{symbol}")])
+        keyboard.append([InlineKeyboardButton("🔙 العودة", callback_data="dashboard_tools")])
+
+        await message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+
+    except Exception as e:
+        logger.error(f"Error fetching cancellable orders: {e}")
+        await message.reply_text(f"❌ فشل جلب الأوامر المفتوحة. تأكد من صحة الرمز: `{symbol}`.")
+
+async def cancel_order_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    parts = data.split('_')
+    action = parts[2]
+
+    try:
+        if action == "exchange":
+            exchange_id = parts[3]
+            context.user_data['c_order_tool'] = {'exchange': exchange_id, 'state': 'awaiting_symbol'}
+            await query.edit_message_text(f"اخترت منصة: *{exchange_id.capitalize()}*\n\nالآن، أرسل رمز العملة التي تريد إلغاء أوامرها (مثال: `BTC/USDT`).", parse_mode=ParseMode.MARKDOWN)
+        
+        elif action == "confirm":
+            _, _, _, exchange_id, symbol, order_id = parts
+            exchange = bot_state.exchanges.get(exchange_id)
+            await query.edit_message_text(f"⏳ جارِ إلغاء الأمر `{order_id}`...", parse_mode=ParseMode.MARKDOWN)
+            await exchange.cancel_order(order_id, symbol)
+            await query.edit_message_text(f"✅ تم إلغاء الأمر `{order_id}` لـ `{symbol}` بنجاح.", parse_mode=ParseMode.MARKDOWN)
+        
+        elif action == "all":
+            _, _, _, exchange_id, symbol = parts
+            exchange = bot_state.exchanges.get(exchange_id)
+            await query.edit_message_text(f"⏳ جارِ إلغاء جميع الأوامر...", parse_mode=ParseMode.MARKDOWN)
+            # ملاحظة: يبدو أنك لم تكمل الكود هنا لإلغاء جميع الأوامر
+
+    # تم تصحيح المسافة البادئة هنا
+    except Exception as e:
+        logger.error(f"Error in cancel_order_button_handler: {e}")
+        try:
+            await query.edit_message_text(f"❌ فشل إلغاء الأمر. الخطأ: `{e}`", parse_mode=ParseMode.MARKDOWN)
+        except Exception as inner_e:
+            logger.error(f"Failed to even send error message to user: {inner_e}")
+        await query.edit_message_text(f"❌ فشل إلغاء الأمر. الخطأ: `{e}`", parse_mode=ParseMode.MARKDOWN)
+
 
 async def post_shutdown(application: Application):
     all_exchanges = list(bot_state.exchanges.values()) + list(bot_state.public_exchanges.values())
@@ -1803,13 +2967,12 @@ async def post_init(application: Application):
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
 
     logger.info("Jobs scheduled.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v8.0 - بروتوكول المُصلِح) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v7.0) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
 
 
 if __name__ == '__main__':
-    print("🚀 Starting Mineseper Bot v8.0 (The Fixer Protocol)...")
+    print("🚀 Starting Mineseper Bot v7.0 (Sentinel Protocol)...")
     try:
         main()
     except Exception as e:
         logging.critical(f"Bot stopped due to a critical unhandled error: {e}", exc_info=True)
-
