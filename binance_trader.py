@@ -1,16 +1,17 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v5.5 (Truly Final & Complete) 💣 ---
+# --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v5.9 (الدقة والموثوقية) 💣 ---
 # =======================================================================================
-# --- سجل التغييرات v5.5 ---
+# --- سجل التغييرات v5.9 ---
 #
-# 1. [إصلاح حاسم] تم ملء كل الدوال الفارغة (pass) بالمنطق الكامل من النسخة 4.5.
-# 2. [إصلاح هيكلي] تم التأكد من أن كل الدوال معرفة قبل استدعائها.
-# 3. [دمج كامل] تم دمج كل الدوال والمنطق من النسخة 4.5 في الهيكلة الجديدة v5.
-# 4. [إعادة هيكلة] تطبيق نمط المحول (Adapter Pattern) للتعامل مع المنصات.
-# 5. [إعادة هيكلة] تطبيق كلاس إدارة الحالة (State Management).
-# 6. [تحسين أداء] تطبيق التزامن في متابعة الصفقات.
-# 7. [إصلاح نهائي] تطبيق الحل الصحيح لمنصة KuCoin (أمران منفصلان).
+# 1. [إصلاح حاسم] تم حل مشكلة "صمت البوت" عند نجاح تنفيذ الصفقات الحقيقية.
+#    - سيقوم البوت الآن بإرسال رسالة تأكيد (بطاقة التوصية) لكل صفقة ناجحة بشكل موثوق.
+# 2. [تحسين الدقة] بعد كل صفقة حقيقية، يقوم البوت بإعادة حساب نقاط الهدف والوقف بدقة
+#    بناءً على سعر الدخول الفعلي والمؤكد من المنصة (Verified Price)، مما يضمن
+#    الحفاظ على نسبة المخاطرة/العائد الصحيحة حتى مع وجود انزلاق سعري (Slippage).
+# 3. [زيادة الأمان] تم إضافة طبقات تحقق إضافية في دالة إرسال الرسائل لمنع أي
+#    أخطاء مستقبلية قد تنتج عن بيانات غير مكتملة.
+# 4. [توضيح الواجهة] تم تعديل رسالة الترحيب ورقم الإصدار ليعكس آخر التحديثات.
 #
 # =======================================================================================
 
@@ -58,11 +59,22 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', 'YOUR_CHAT_ID_HERE')
 TELEGRAM_SIGNAL_CHANNEL_ID = os.getenv('TELEGRAM_SIGNAL_CHANNEL_ID', TELEGRAM_CHAT_ID)
 ALPHA_VANTAGE_API_KEY = os.getenv('ALPHA_VANTAGE_API_KEY', 'YOUR_AV_KEY_HERE')
+
+# --- [v5.8] Add API Keys for all supported exchanges ---
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', 'YOUR_BINANCE_API_KEY')
 BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', 'YOUR_BINANCE_API_SECRET')
 KUCOIN_API_KEY = os.getenv('KUCOIN_API_KEY', 'YOUR_KUCOIN_API_KEY')
 KUCOIN_API_SECRET = os.getenv('KUCOIN_API_SECRET', 'YOUR_KUCOIN_API_SECRET')
 KUCOIN_API_PASSPHRASE = os.getenv('KUCOIN_API_PASSPHRASE', 'YOUR_KUCOIN_API_PASSPHRASE')
+GATE_API_KEY = os.getenv('GATE_API_KEY', 'YOUR_GATE_API_KEY')
+GATE_API_SECRET = os.getenv('GATE_API_SECRET', 'YOUR_GATE_API_SECRET')
+MEXC_API_KEY = os.getenv('MEXC_API_KEY', 'YOUR_MEXC_API_KEY')
+MEXC_API_SECRET = os.getenv('MEXC_API_SECRET', 'YOUR_MEXC_API_SECRET')
+OKX_API_KEY = os.getenv('OKX_API_KEY', 'YOUR_OKX_API_KEY')
+OKX_API_SECRET = os.getenv('OKX_API_SECRET', 'YOUR_OKX_API_SECRET')
+OKX_API_PASSPHRASE = os.getenv('OKX_API_PASSPHRASE', 'YOUR_OKX_PASSPHRASE')
+BYBIT_API_KEY = os.getenv('BYBIT_API_KEY', 'YOUR_BYBIT_API_KEY')
+BYBIT_API_SECRET = os.getenv('BYBIT_API_SECRET', 'YOUR_BYBIT_API_SECRET')
 
 # --- إعدادات البوت ---
 EXCHANGES_TO_SCAN = ['binance', 'okx', 'bybit', 'kucoin', 'gate', 'mexc']
@@ -84,7 +96,7 @@ logger = logging.getLogger("MinesweeperBot_v5")
 
 
 # =======================================================================================
-# --- 🚀 [v5.0] إعادة الهيكلة: إدارة الحالة والمنصات 🚀 ---
+# --- 🚀 [v5.8] إعادة هيكلة المحولات (Adapters) لدعم منصات متعددة 🚀 ---
 # =======================================================================================
 
 class BotState:
@@ -111,22 +123,25 @@ class ExchangeAdapter:
         self.exchange = exchange_client
 
     async def place_exit_orders(self, signal, verified_quantity):
-        raise NotImplementedError
+        raise NotImplementedError("يجب تعريف هذه الدالة في الكلاس الفرعي")
 
     async def update_trailing_stop_loss(self, trade, new_sl):
-        raise NotImplementedError
+        raise NotImplementedError("يجب تعريف هذه الدالة في الكلاس الفرعي")
 
-class BinanceAdapter(ExchangeAdapter):
-    """محول خاص بمنصة Binance، يستخدم أوامر OCO."""
+class OcoAdapter(ExchangeAdapter):
+    """محول أساسي للمنصات التي تدعم أوامر OCO (مثل Binance, Bybit, Gate, OKX)."""
     async def place_exit_orders(self, signal, verified_quantity):
         symbol = signal['symbol']
         tp_price = self.exchange.price_to_precision(symbol, signal['take_profit'])
         sl_price = self.exchange.price_to_precision(symbol, signal['stop_loss'])
-        sl_trigger_price = self.exchange.price_to_precision(symbol, signal['stop_loss'])
         
-        logger.info(f"BinanceAdapter: Placing OCO for {symbol}. TP: {tp_price}, SL Trigger: {sl_trigger_price}")
-        oco_params = {'stopLimitPrice': sl_price}
-        oco_order = await self.exchange.create_order(symbol, 'oco', 'sell', verified_quantity, price=tp_price, stopPrice=sl_trigger_price, params=oco_params)
+        logger.info(f"{self.exchange.id} OCO: Placing for {symbol}. TP: {tp_price}, SL: {sl_price}")
+        params = {'stopLimitPrice': sl_price} if self.exchange.id == 'binance' else {}
+        
+        oco_order = await self.exchange.create_order(
+            symbol=symbol, type='oco', side='sell', amount=verified_quantity,
+            price=tp_price, stopPrice=sl_price, params=params
+        )
         return {"oco_id": oco_order['id']}
 
     async def update_trailing_stop_loss(self, trade, new_sl):
@@ -134,38 +149,43 @@ class BinanceAdapter(ExchangeAdapter):
         exit_ids = json.loads(trade.get('exit_order_ids_json', '{}'))
         oco_id_to_cancel = exit_ids.get('oco_id')
         if not oco_id_to_cancel:
-            raise ValueError("Binance trade is missing its OCO ID for TSL update.")
+            raise ValueError(f"{self.exchange.id} trade is missing its OCO ID for TSL update.")
 
-        logger.info(f"BinanceAdapter: Cancelling old OCO order {oco_id_to_cancel} for {symbol}.")
-        await self.exchange.cancel_order(oco_id_to_cancel, symbol)
+        logger.info(f"{self.exchange.id} OCO: Cancelling old OCO order {oco_id_to_cancel} for {symbol}.")
+        try:
+            await self.exchange.cancel_order(oco_id_to_cancel, symbol)
+        except ccxt.OrderNotFound:
+            logger.warning(f"OCO order {oco_id_to_cancel} not found, likely already filled/cancelled.")
         await asyncio.sleep(2)
 
         quantity = trade['quantity']
         tp_price = self.exchange.price_to_precision(symbol, trade['take_profit'])
         sl_price = self.exchange.price_to_precision(symbol, new_sl)
-        sl_trigger_price = self.exchange.price_to_precision(symbol, new_sl)
         
-        logger.info(f"BinanceAdapter: Creating new OCO for {symbol} with new SL: {sl_price}")
-        oco_params = {'stopLimitPrice': sl_price}
-        new_oco_order = await self.exchange.create_order(symbol, 'oco', 'sell', quantity, price=tp_price, stopPrice=sl_trigger_price, params=oco_params)
+        logger.info(f"{self.exchange.id} OCO: Creating new OCO for {symbol} with new SL: {sl_price}")
+        params = {'stopLimitPrice': sl_price} if self.exchange.id == 'binance' else {}
+
+        new_oco_order = await self.exchange.create_order(
+            symbol=symbol, type='oco', side='sell', amount=quantity,
+            price=tp_price, stopPrice=sl_price, params=params
+        )
         return {"oco_id": new_oco_order['id']}
 
-class KuCoinAdapter(ExchangeAdapter):
-    """محول خاص بمنصة KuCoin، يستخدم أمرين منفصلين."""
+class DualOrderAdapter(ExchangeAdapter):
+    """محول أساسي للمنصات التي تتطلب أمرين منفصلين للخروج (مثل KuCoin, MEXC)."""
     async def place_exit_orders(self, signal, verified_quantity):
         symbol = signal['symbol']
         tp_price = self.exchange.price_to_precision(symbol, signal['take_profit'])
-        sl_price = self.exchange.price_to_precision(symbol, signal['stop_loss'])
         sl_trigger_price = self.exchange.price_to_precision(symbol, signal['stop_loss'])
         
-        logger.info(f"KuCoinAdapter: Placing separate TP and SL orders for {symbol}.")
+        logger.info(f"{self.exchange.id} DualOrder: Placing separate TP and SL orders for {symbol}.")
         
         tp_order = await self.exchange.create_order(symbol, 'limit', 'sell', verified_quantity, price=tp_price)
-        logger.info(f"KuCoinAdapter: Take Profit order placed with ID: {tp_order['id']}")
+        logger.info(f"{self.exchange.id} DualOrder: Take Profit order placed with ID: {tp_order['id']}")
         
-        sl_params = {'triggerPrice': sl_trigger_price, 'stop': 'loss'}
-        sl_order = await self.exchange.create_order(symbol, 'stop_limit', 'sell', verified_quantity, price=sl_price, params=sl_params)
-        logger.info(f"KuCoinAdapter: Stop Loss order placed with ID: {sl_order['id']}")
+        sl_params = {'stopPrice': sl_trigger_price}
+        sl_order = await self.exchange.create_order(symbol, 'market', 'sell', verified_quantity, params=sl_params)
+        logger.info(f"{self.exchange.id} DualOrder: Stop Loss (Market) order placed with ID: {sl_order['id']}")
         
         return {"tp_id": tp_order['id'], "sl_id": sl_order['id']}
 
@@ -175,36 +195,47 @@ class KuCoinAdapter(ExchangeAdapter):
         tp_id_to_cancel = exit_ids.get('tp_id')
         sl_id_to_cancel = exit_ids.get('sl_id')
         if not tp_id_to_cancel or not sl_id_to_cancel:
-            raise ValueError("KuCoin trade is missing TP or SL order ID for TSL update.")
+            raise ValueError(f"{self.exchange.id} trade is missing TP or SL order ID for TSL update.")
 
-        logger.info(f"KuCoinAdapter: Cancelling old orders for {symbol}. TP_ID: {tp_id_to_cancel}, SL_ID: {sl_id_to_cancel}")
-        await self.exchange.cancel_order(tp_id_to_cancel, symbol)
-        await self.exchange.cancel_order(sl_id_to_cancel, symbol)
+        logger.info(f"{self.exchange.id} DualOrder: Cancelling old orders for {symbol}. TP_ID: {tp_id_to_cancel}, SL_ID: {sl_id_to_cancel}")
+        try: await self.exchange.cancel_order(tp_id_to_cancel, symbol)
+        except ccxt.OrderNotFound: logger.warning(f"TP order {tp_id_to_cancel} not found, likely already filled.")
+        try: await self.exchange.cancel_order(sl_id_to_cancel, symbol)
+        except ccxt.OrderNotFound: logger.warning(f"SL order {sl_id_to_cancel} not found, likely already filled.")
         await asyncio.sleep(2)
 
         quantity = trade['quantity']
         tp_price = self.exchange.price_to_precision(symbol, trade['take_profit'])
-        sl_price = self.exchange.price_to_precision(symbol, new_sl)
         sl_trigger_price = self.exchange.price_to_precision(symbol, new_sl)
 
-        logger.info(f"KuCoinAdapter: Creating new separate orders for {symbol} with new SL: {sl_price}")
+        logger.info(f"{self.exchange.id} DualOrder: Creating new separate orders for {symbol} with new SL trigger: {sl_trigger_price}")
         new_tp_order = await self.exchange.create_order(symbol, 'limit', 'sell', quantity, price=tp_price)
-        new_sl_params = {'triggerPrice': sl_trigger_price, 'stop': 'loss'}
-        new_sl_order = await self.exchange.create_order(symbol, 'stop_limit', 'sell', quantity, price=sl_price, params=new_sl_params)
+        
+        new_sl_params = {'stopPrice': sl_trigger_price}
+        new_sl_order = await self.exchange.create_order(symbol, 'market', 'sell', quantity, params=new_sl_params)
         
         return {"tp_id": new_tp_order['id'], "sl_id": new_sl_order['id']}
 
+class BinanceAdapter(OcoAdapter): pass
+class BybitAdapter(OcoAdapter): pass
+class GateAdapter(OcoAdapter): pass
+class OKXAdapter(OcoAdapter): pass
+class KuCoinAdapter(DualOrderAdapter): pass
+class MEXCAdapter(DualOrderAdapter): pass
+
 def get_exchange_adapter(exchange_id: str):
     exchange_client = bot_state.exchanges.get(exchange_id.lower())
-    if not exchange_client:
-        return None
-        
-    adapter_map = { 'binance': BinanceAdapter, 'kucoin': KuCoinAdapter }
-    AdapterClass = adapter_map.get(exchange_id.lower())
-    if AdapterClass:
-        return AdapterClass(exchange_client)
+    if not exchange_client: return None
     
-    logger.warning(f"No specific adapter found for {exchange_id}.")
+    adapter_map = {
+        'binance': BinanceAdapter, 'kucoin': KuCoinAdapter, 'okx': OKXAdapter,
+        'bybit': BybitAdapter, 'gate': GateAdapter, 'mexc': MEXCAdapter
+    }
+    AdapterClass = adapter_map.get(exchange_id.lower())
+    
+    if AdapterClass: return AdapterClass(exchange_client)
+    
+    logger.warning(f"No specific adapter found for {exchange_id}, trade automation will be disabled for it.")
     return None
 
 # =======================================================================================
@@ -397,18 +428,23 @@ def log_recommendation_to_db(signal):
         cursor = conn.cursor()
         sql = '''INSERT INTO trades (timestamp, exchange, symbol, entry_price, take_profit, stop_loss, quantity, entry_value_usdt, status, trailing_sl_active, highest_price, reason, trade_mode, entry_order_id, exit_order_ids_json)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'''
+        
+        if 'quantity' not in signal or signal['quantity'] is None:
+            logger.error(f"Attempted to log trade for {signal['symbol']} with missing quantity.")
+            return None
+
         params = (
             datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'),
             signal['exchange'],
             signal['symbol'],
-            signal.get('verified_entry_price', signal['entry_price']), 
-            signal['take_profit'],
-            signal['stop_loss'],
-            signal.get('verified_quantity', signal['quantity']), 
-            signal.get('verified_entry_value', signal['entry_value_usdt']), 
+            signal.get('entry_price'), # [v5.9] Use the already-verified price
+            signal.get('take_profit'),
+            signal.get('stop_loss'),
+            signal.get('quantity'),
+            signal.get('entry_value_usdt'), 
             'نشطة',
             False,
-            signal.get('verified_entry_price', signal['entry_price']),
+            signal.get('entry_price'), # Start with the entry price
             signal['reason'],
             'real' if signal.get('is_real_trade') else 'virtual',
             signal.get('entry_order_id'),
@@ -420,7 +456,7 @@ def log_recommendation_to_db(signal):
         conn.close()
         return trade_id
     except Exception as e:
-        logger.error(f"Failed to log recommendation to DB: {e}")
+        logger.error(f"Failed to log recommendation to DB: {e}", exc_info=True)
         return None
 
 async def get_alpha_vantage_economic_events():
@@ -635,15 +671,16 @@ async def initialize_exchanges():
             logger.error(f"Failed to connect PUBLIC client for {ex_id}: {e}")
 
         params = {'enableRateLimit': True, 'options': {'defaultType': 'spot'}}
-        authenticated = False
-        if ex_id == 'binance' and BINANCE_API_KEY != 'YOUR_BINANCE_API_KEY':
-            params.update({'apiKey': BINANCE_API_KEY, 'secret': BINANCE_API_SECRET})
-            authenticated = True
-        if ex_id == 'kucoin' and KUCOIN_API_KEY != 'YOUR_KUCOIN_API_KEY':
-            params.update({'apiKey': KUCOIN_API_KEY, 'secret': KUCOIN_API_SECRET, 'password': KUCOIN_API_PASSPHRASE})
-            authenticated = True
-
-        if authenticated:
+        credentials = {}
+        if ex_id == 'binance': credentials = {'apiKey': BINANCE_API_KEY, 'secret': BINANCE_API_SECRET}
+        elif ex_id == 'kucoin': credentials = {'apiKey': KUCOIN_API_KEY, 'secret': KUCOIN_API_SECRET, 'password': KUCOIN_API_PASSPHRASE}
+        elif ex_id == 'gate': credentials = {'apiKey': GATE_API_KEY, 'secret': GATE_API_SECRET}
+        elif ex_id == 'mexc': credentials = {'apiKey': MEXC_API_KEY, 'secret': MEXC_API_SECRET}
+        elif ex_id == 'okx': credentials = {'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 'password': OKX_API_PASSPHRASE}
+        elif ex_id == 'bybit': credentials = {'apiKey': BYBIT_API_KEY, 'secret': BYBIT_API_SECRET}
+        
+        if credentials.get('apiKey') and 'YOUR_' not in credentials['apiKey']:
+            params.update(credentials)
             try:
                 private_exchange = getattr(ccxt_async, ex_id)(params)
                 await private_exchange.load_markets()
@@ -844,14 +881,25 @@ async def place_real_trade(signal):
         
         quantity = trade_amount_usdt / signal['entry_price']
         formatted_quantity = exchange.amount_to_precision(symbol, quantity)
+        signal.update({
+            'quantity': float(formatted_quantity),
+            'entry_value_usdt': trade_amount_usdt
+        })
+
     except Exception as e:
         return {'success': False, 'data': f"Pre-flight check failed: {e}"}
 
     buy_order = None
     try:
-        logger.info(f"Placing MARKET BUY order for {formatted_quantity} of {symbol} on {exchange_id.capitalize()}")
-        buy_order = await exchange.create_market_buy_order(symbol, float(formatted_quantity))
+        logger.info(f"Placing MARKET BUY order for {signal['quantity']} of {symbol} on {exchange_id.capitalize()}")
+        buy_order = await exchange.create_market_buy_order(symbol, signal['quantity'])
         logger.info(f"Initial response for BUY order {buy_order.get('id', 'N/A')} received.")
+    except ccxt.InvalidOrder as e:
+        logger.error(f"Placing BUY order for {symbol} failed (InvalidOrder): {e}", exc_info=True)
+        return {'success': False, 'data': f"فشل: أمر غير صالح. قد يكون المبلغ أقل من الحد الأدنى أو نوع الأمر خاطئ.\n`{str(e)}`"}
+    except ccxt.InsufficientFunds as e:
+        logger.error(f"Placing BUY order for {symbol} failed (InsufficientFunds): {e}", exc_info=True)
+        return {'success': False, 'data': f"فشل: رصيد غير كاف.\n`{str(e)}`"}
     except Exception as e:
         logger.error(f"Placing BUY order for {symbol} failed immediately: {e}", exc_info=True)
         return {'success': False, 'data': f"حدث خطأ من المنصة عند محاولة الشراء: `{str(e)}`"}
@@ -972,13 +1020,27 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
             if attempt_real_trade:
                 await send_telegram_message(context.bot, {'custom_message': f"**🔎 تم العثور على إشارة حقيقية لـ `{signal['symbol']}`... جاري محاولة التنفيذ على `{signal['exchange']}`.**"})
                 try:
-                    trade_result = await place_real_trade(signal)
+                    trade_result = await place_real_trade(signal.copy()) # Use a copy to avoid mutation issues
                     
                     if trade_result.get('success'):
+                        # [FIX v5.9] This is the crucial fix block
+                        # 1. Update signal with verified data from the trade
                         if isinstance(trade_result.get('data'), dict):
                             signal.update(trade_result['data'])
                         
-                        if log_recommendation_to_db(signal):
+                        # 2. Recalculate SL/TP based on the actual entry price to maintain R:R
+                        original_risk = signal['entry_price'] - signal['stop_loss']
+                        verified_entry = signal['verified_entry_price']
+                        
+                        signal['entry_price'] = verified_entry # Set the main entry price to the verified one
+                        signal['quantity'] = signal['verified_quantity']
+                        signal['entry_value_usdt'] = signal['verified_entry_value']
+                        signal['stop_loss'] = verified_entry - original_risk
+                        signal['take_profit'] = verified_entry + (original_risk * settings['risk_reward_ratio'])
+                        
+                        # 3. Now log and send the corrected signal
+                        if trade_id := log_recommendation_to_db(signal):
+                            signal['trade_id'] = trade_id
                             await send_telegram_message(context.bot, signal, is_new=True)
                             new_trades += 1
                             if trade_result.get('exit_orders_failed'):
@@ -1045,30 +1107,39 @@ async def send_telegram_message(bot, signal_data, is_new=False, is_opportunity=F
         if 'keyboard' in signal_data: keyboard = signal_data['keyboard']
 
     elif is_new or is_opportunity:
-        target_chat = TELEGRAM_SIGNAL_CHANNEL_ID
-        strength_stars = '⭐' * signal_data.get('strength', 1)
+        try:
+            target_chat = TELEGRAM_SIGNAL_CHANNEL_ID
+            strength_stars = '⭐' * signal_data.get('strength', 1)
 
-        trade_type_title = "🚨 صفقة حقيقية 🚨" if signal_data.get('is_real_trade') else "✅ توصية شراء جديدة"
-        title = f"**{trade_type_title} | {signal_data['symbol']}**" if is_new else f"**💡 فرصة محتملة | {signal_data['symbol']}**"
+            trade_type_title = "🚨 صفقة حقيقية 🚨" if signal_data.get('is_real_trade') else "✅ توصية شراء جديدة"
+            title = f"**{trade_type_title} | {signal_data['symbol']}**" if is_new else f"**💡 فرصة محتملة | {signal_data['symbol']}**"
 
-        entry, tp, sl = signal_data['entry_price'], signal_data['take_profit'], signal_data['stop_loss']
-        tp_percent, sl_percent = ((tp - entry) / entry * 100), ((entry - sl) / entry * 100)
-        id_line = f"\n*للمتابعة اضغط: /check {signal_data.get('trade_id', 'N/A')}*" if is_new else ""
+            entry, tp, sl = signal_data['entry_price'], signal_data['take_profit'], signal_data['stop_loss']
+            # [FIX v5.9] Add safety check for entry price to prevent division by zero
+            if not entry or entry == 0:
+                logger.error(f"Cannot generate signal message for {signal_data['symbol']} due to invalid entry price: {entry}")
+                return
+            
+            tp_percent, sl_percent = ((tp - entry) / entry * 100), ((entry - sl) / entry * 100)
+            id_line = f"\n*للمتابعة اضغط: /check {signal_data.get('trade_id', 'N/A')}*" if is_new else ""
 
-        reasons_en = signal_data['reason'].split(' + ')
-        reasons_ar = ' + '.join([STRATEGY_NAMES_AR.get(r, r) for r in reasons_en])
+            reasons_en = signal_data['reason'].split(' + ')
+            reasons_ar = ' + '.join([STRATEGY_NAMES_AR.get(r, r) for r in reasons_en])
 
-        message = (f"**Signal Alert | تنبيه إشارة**\n"
-                   f"------------------------------------\n"
-                   f"{title}\n"
-                   f"------------------------------------\n"
-                   f"🔹 **المنصة:** {signal_data['exchange']}\n"
-                   f"⭐ **قوة الإشارة:** {strength_stars}\n"
-                   f"🔍 **الاستراتيجية:** {reasons_ar}\n\n"
-                   f"📈 **نقطة الدخول:** `{format_price(entry)}`\n"
-                   f"🎯 **الهدف:** `{format_price(tp)}` (+{tp_percent:.2f}%)\n"
-                   f"🛑 **الوقف:** `{format_price(sl)}` (-{sl_percent:.2f}%)"
-                   f"{id_line}")
+            message = (f"**Signal Alert | تنبيه إشارة**\n"
+                    f"------------------------------------\n"
+                    f"{title}\n"
+                    f"------------------------------------\n"
+                    f"🔹 **المنصة:** {signal_data['exchange']}\n"
+                    f"⭐ **قوة الإشارة:** {strength_stars}\n"
+                    f"🔍 **الاستراتيجية:** {reasons_ar}\n\n"
+                    f"📈 **نقطة الدخول:** `{format_price(entry)}`\n"
+                    f"🎯 **الهدف:** `{format_price(tp)}` (+{tp_percent:.2f}%)\n"
+                    f"🛑 **الوقف:** `{format_price(sl)}` (-{sl_percent:.2f}%)"
+                    f"{id_line}")
+        except KeyError as e:
+            logger.error(f"CRITICAL: Missing key '{e}' in signal_data when trying to send message. Data: {signal_data}")
+            return
     elif update_type == 'tsl_activation':
         message = (f"**🚀 تأمين الأرباح! | #{signal_data['id']} {signal_data['symbol']}**\n\n"
                    f"تم رفع وقف الخسارة إلى نقطة الدخول.\n"
@@ -1178,7 +1249,7 @@ async def handle_tsl_update(context, trade, new_sl, highest_price, is_activation
 async def update_real_trade_sl(context, trade, new_sl, highest_price, is_activation=False):
     exchange_id = trade['exchange'].lower()
     symbol = trade['symbol']
-    logger.info(f"AUTOMATING TSL UPDATE for real trade #{trade['id']} ({symbol}). New SL: {new_sl}")
+    logger.info(f"SELF-HEALING TSL: Attempting update for real trade #{trade['id']} ({symbol}). New SL: {new_sl}")
     
     adapter = get_exchange_adapter(exchange_id)
     if not adapter:
@@ -1188,10 +1259,30 @@ async def update_real_trade_sl(context, trade, new_sl, highest_price, is_activat
     try:
         new_exit_ids = await adapter.update_trailing_stop_loss(trade, new_sl)
         await update_trade_sl_in_db(context, trade, new_sl, highest_price, is_activation=is_activation, new_exit_ids_json=json.dumps(new_exit_ids))
+        logger.info(f"SELF-HEALING TSL: Primary update for trade #{trade['id']} successful.")
 
     except Exception as e:
-        logger.critical(f"CRITICAL FAILURE in automated TSL for trade #{trade['id']} ({symbol}): {e}", exc_info=True)
-        await send_telegram_message(context.bot, {'custom_message': f"**🚨 فشل حرج في أتمتة الوقف المتحرك 🚨**\n\n**صفقة:** `#{trade['id']} {symbol}`\n**الخطأ:** `{e}`\n\n**قد تكون الصفقة الآن بدون حماية! يرجى المتابعة اليدوية فوراً!**"})
+        logger.critical(f"SELF-HEALING TSL: CRITICAL FAILURE in primary update for trade #{trade['id']} ({symbol}): {e}", exc_info=True)
+        await send_telegram_message(context.bot, {'custom_message': f"**🚨 فشل حرج في أتمتة الوقف المتحرك 🚨**\n\n**صفقة:** `#{trade['id']} {symbol}`\n**الخطأ:** `{e}`\n\n**⚠️ قد تكون الصفقة الآن بدون حماية! جارِ محاولة الشفاء الذاتي...**"})
+        
+        await update_trade_order_ids_in_db(trade['id'], "{}")
+        
+        try:
+            logger.info(f"SELF-HEALING TSL: Starting recovery for trade #{trade['id']}.")
+            recovery_signal = {
+                'symbol': trade['symbol'],
+                'take_profit': trade['take_profit'],
+                'stop_loss': new_sl
+            }
+            recovered_exit_ids = await adapter.place_exit_orders(recovery_signal, trade['quantity'])
+            
+            await update_trade_sl_in_db(context, trade, new_sl, highest_price, is_activation=is_activation, new_exit_ids_json=json.dumps(recovered_exit_ids))
+            logger.info(f"SELF-HEALING TSL: RECOVERY SUCCESSFUL for trade #{trade['id']}.")
+            await send_telegram_message(context.bot, {'custom_message': f"**✅ تم التعافي بنجاح!**\n\n**صفقة:** `#{trade['id']} {symbol}`\n\nتم إعادة وضع أوامر الحماية بنجاح. الصفقة مؤمنة ومؤتمتة مجدداً."})
+        
+        except Exception as recovery_e:
+            logger.critical(f"SELF-HEALING TSL: RECOVERY FAILED for trade #{trade['id']}: {recovery_e}", exc_info=True)
+            await send_telegram_message(context.bot, {'custom_message': f"**🚨 فشل الشفاء الذاتي! 🚨**\n\n**صفقة:** `#{trade['id']} {symbol}`\n**خطأ التعافي:** `{recovery_e}`\n\n**لم أتمكن من إعادة تأمين الصفقة. التدخل اليدوي الفوري ضروري الآن!**"})
 
 
 async def close_trade_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict, exit_price: float, status: str):
@@ -1237,6 +1328,17 @@ async def close_trade_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict, exi
 
     await send_telegram_message(context.bot, {'custom_message': message, 'target_chat': TELEGRAM_SIGNAL_CHANNEL_ID})
 
+async def update_trade_order_ids_in_db(trade_id: int, new_exit_ids_json: str):
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE trades SET exit_order_ids_json=? WHERE id=?", (new_exit_ids_json, trade_id))
+        conn.commit()
+        conn.close()
+        logger.info(f"Updated order IDs for trade #{trade_id} to: {new_exit_ids_json}")
+    except Exception as e:
+        logger.error(f"Failed to update order IDs for trade #{trade_id} in DB: {e}")
+
 async def update_trade_sl_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict, new_sl: float, highest_price: float, is_activation: bool = False, silent: bool = False, new_exit_ids_json: str = None):
     try:
         conn = sqlite3.connect(DB_FILE, timeout=10)
@@ -1245,7 +1347,7 @@ async def update_trade_sl_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict,
         sql = "UPDATE trades SET stop_loss=?, highest_price=?, trailing_sl_active=? "
         params = [new_sl, highest_price, True]
         
-        if new_exit_ids_json:
+        if new_exit_ids_json is not None:
             sql += ", exit_order_ids_json=? "
             params.append(new_exit_ids_json)
 
@@ -1257,7 +1359,7 @@ async def update_trade_sl_in_db(context: ContextTypes.DEFAULT_TYPE, trade: dict,
         conn.close()
         
         log_msg = f"Trailing SL {'activated' if is_activation else 'updated'} for trade #{trade['id']}. New SL: {new_sl}"
-        if new_exit_ids_json:
+        if new_exit_ids_json is not None:
             log_msg += f", New Exit IDs: {new_exit_ids_json}"
         logger.info(log_msg)
 
@@ -1366,7 +1468,7 @@ settings_menu_keyboard = [
 ]
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 5.2 - الهيكلة النهائية)*\n\nاختر من القائمة للبدء."
+    welcome_message = "💣 أهلاً بك في بوت **كاسحة الألغام**!\n\n*(الإصدار 5.9 - الدقة والموثوقية)*\n\nاختر من القائمة للبدء."
     await update.message.reply_text(welcome_message, reply_markup=ReplyKeyboardMarkup(main_menu_keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1519,6 +1621,63 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trad
     except Exception as e:
         logger.error(f"Error in stats_command: {e}", exc_info=True)
         return "خطأ في جلب الإحصائيات.", None
+
+def generate_performance_report_string(trade_mode_filter='all'):
+    """Generates a detailed performance report string for each strategy."""
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        query = "SELECT reason, status, pnl_usdt FROM trades WHERE status != 'نشطة'"
+        params = []
+        if trade_mode_filter != 'all':
+            query += " AND trade_mode = ?"
+            params.append(trade_mode_filter)
+
+        cursor.execute(query, params)
+        trades = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+
+        if not trades:
+            return "لا توجد صفقات مغلقة لتحليل أداء الاستراتيجيات."
+
+        strategy_stats = defaultdict(lambda: {'wins': 0, 'losses': 0, 'total_pnl': 0.0})
+
+        for trade in trades:
+            reasons = [r.strip() for r in trade['reason'].split('+')]
+            for reason in reasons:
+                stats = strategy_stats[reason]
+                if trade['status'] == 'ناجحة':
+                    stats['wins'] += 1
+                elif trade['status'] == 'فاشلة':
+                    stats['losses'] += 1
+                
+                if trade['pnl_usdt'] is not None:
+                    stats['total_pnl'] += trade['pnl_usdt'] / len(reasons)
+        
+        report_lines = ["**📜 تقرير أداء الاستراتيجيات**\n"]
+        
+        sorted_strategies = sorted(strategy_stats.items(), key=lambda item: item[1]['total_pnl'], reverse=True)
+
+        for reason, stats in sorted_strategies:
+            total_trades = stats['wins'] + stats['losses']
+            win_rate = (stats['wins'] / total_trades * 100) if total_trades > 0 else 0
+            avg_pnl = stats['total_pnl'] / total_trades if total_trades > 0 else 0
+            strategy_name_ar = STRATEGY_NAMES_AR.get(reason, reason)
+
+            report_lines.append(f"\n--- **{strategy_name_ar}** ---")
+            report_lines.append(f"  - **إجمالي الصفقات:** {total_trades}")
+            report_lines.append(f"  - **معدل النجاح:** {win_rate:.2f}% ({stats['wins']} ✅ / {stats['losses']} ❌)")
+            report_lines.append(f"  - **صافي الربح/الخسارة:** `${stats['total_pnl']:+.2f}`")
+            report_lines.append(f"  - **متوسط الربح للصفقة:** `${avg_pnl:+.2f}`")
+
+        return "\n".join(report_lines)
+
+    except Exception as e:
+        logger.error(f"Error generating performance report string: {e}", exc_info=True)
+        return "❌ حدث خطأ غير متوقع أثناء إعداد تقرير أداء الاستراتيجيات."
+
 
 async def strategy_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE, trade_mode_filter='all'):
     report_string = generate_performance_report_string(trade_mode_filter)
@@ -2084,44 +2243,27 @@ async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 async def manual_trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['manual_trade'] = {'state': 'awaiting_exchange'}
-    keyboard = [
-        [InlineKeyboardButton("Binance", callback_data="manual_trade_exchange_binance"),
-         InlineKeyboardButton("KuCoin", callback_data="manual_trade_exchange_kucoin")],
-        [InlineKeyboardButton("❌ إلغاء", callback_data="manual_trade_cancel")]
-    ]
-
+    keyboard = get_exchange_selection_keyboard("manual_trade")
     message_text = "✍️ **بدء تداول يدوي**\n\nاختر المنصة التي تريد تنفيذ الأمر عليها:"
     if update.callback_query:
-        await update.callback_query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.callback_query.edit_message_text(message_text, reply_markup=keyboard)
     else:
-        await update.message.reply_text(message_text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(message_text, reply_markup=keyboard)
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['balance_tool'] = {'state': 'awaiting_exchange'}
-    keyboard = [
-        [InlineKeyboardButton("Binance", callback_data="balance_exchange_binance"),
-         InlineKeyboardButton("KuCoin", callback_data="balance_exchange_kucoin")],
-        [InlineKeyboardButton("🔙 العودة للأدوات", callback_data="dashboard_tools")]
-    ]
-    await update.callback_query.edit_message_text("💰 **عرض الرصيد**\n\nاختر المنصة لعرض أرصدتك:", reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard = get_exchange_selection_keyboard("balance")
+    await update.callback_query.edit_message_text("💰 **عرض الرصيد**\n\nاختر المنصة لعرض أرصدتك:", reply_markup=keyboard)
 
 async def open_orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['openorders_tool'] = {'state': 'awaiting_exchange'}
-    keyboard = [
-        [InlineKeyboardButton("Binance", callback_data="openorders_exchange_binance"),
-         InlineKeyboardButton("KuCoin", callback_data="openorders_exchange_kucoin")],
-        [InlineKeyboardButton("🔙 العودة للأدوات", callback_data="dashboard_tools")]
-    ]
-    await update.callback_query.edit_message_text("📖 **أوامري المفتوحة**\n\nاختر المنصة:", reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard = get_exchange_selection_keyboard("openorders")
+    await update.callback_query.edit_message_text("📖 **أوامري المفتوحة**\n\nاختر المنصة:", reply_markup=keyboard)
 
 async def my_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['mytrades_tool'] = {'state': 'awaiting_exchange'}
-    keyboard = [
-        [InlineKeyboardButton("Binance", callback_data="mytrades_exchange_binance"),
-         InlineKeyboardButton("KuCoin", callback_data="mytrades_exchange_kucoin")],
-        [InlineKeyboardButton("🔙 العودة للأدوات", callback_data="dashboard_tools")]
-    ]
-    await update.callback_query.edit_message_text("📜 **سجل تداولاتي**\n\nاختر المنصة:", reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard = get_exchange_selection_keyboard("mytrades")
+    await update.callback_query.edit_message_text("📜 **سجل تداولاتي**\n\nاختر المنصة:", reply_markup=keyboard)
 
 async def fetch_and_display_balance(exchange_id, query):
     exchange = bot_state.exchanges.get(exchange_id.lower())
@@ -2130,32 +2272,15 @@ async def fetch_and_display_balance(exchange_id, query):
         return
 
     try:
-        balance = await exchange.fetch_balance()
-        total_balance = balance.get('total', {})
-
-        public_exchange = bot_state.public_exchanges.get(exchange_id.lower())
-        tickers = await public_exchange.fetch_tickers()
-
-        assets = []
-        for currency, amount in total_balance.items():
-            if amount > 0:
-                usdt_value = 0
-                if currency == 'USDT':
-                    usdt_value = amount
-                elif f"{currency}/USDT" in tickers:
-                    usdt_value = amount * tickers[f"{currency}/USDT"]['last']
-
-                if usdt_value > 1:
-                    assets.append({'currency': currency, 'amount': amount, 'usdt_value': usdt_value})
-
-        assets.sort(key=lambda x: x['usdt_value'], reverse=True)
+        portfolio_data = await calculate_full_portfolio(exchange)
+        assets = portfolio_data.get('assets', [])
+        total_usdt_value = portfolio_data.get('total_usdt', 0)
 
         if not assets:
             await query.edit_message_text(f"ℹ️ لا توجد أرصدة كبيرة (> $1) على منصة {exchange_id.capitalize()}.")
             return
 
         message_lines = [f"**💰 رصيدك على {exchange_id.capitalize()}**\n"]
-        total_usdt_value = sum(a['usdt_value'] for a in assets)
         message_lines.append(f"__**إجمالي القيمة التقديرية:**__ `${total_usdt_value:,.2f}`\n")
 
         for asset in assets[:15]:
@@ -2229,32 +2354,48 @@ async def fetch_and_display_my_trades(exchange_id, symbol, message):
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None: logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
 
-async def get_total_real_portfolio_value_usdt():
-    total_usdt_value = 0
-    for exchange in bot_state.exchanges.values():
-        if not exchange.apiKey:
-            continue
-        try:
-            balance = await exchange.fetch_balance()
-            if not hasattr(exchange, '_tickers_cache') or (time.time() - exchange._tickers_cache_time > 60):
-                 exchange._tickers_cache = await exchange.fetch_tickers()
-                 exchange._tickers_cache_time = time.time()
-            
-            tickers = exchange._tickers_cache
+async def calculate_full_portfolio(exchange):
+    """Calculates the total portfolio value and provides a detailed asset breakdown."""
+    if not exchange or not exchange.apiKey:
+        return {'total_usdt': 0, 'assets': []}
+        
+    try:
+        balance = await exchange.fetch_balance()
+        all_assets = balance.get('total', {})
+        
+        if not hasattr(exchange, '_tickers_cache') or (time.time() - getattr(exchange, '_tickers_cache_time', 0) > 60):
+             exchange._tickers_cache = await exchange.fetch_tickers()
+             exchange._tickers_cache_time = time.time()
+        tickers = exchange._tickers_cache
+        
+        portfolio_assets = []
+        total_usdt_value = 0
+        for currency, amount in all_assets.items():
+            if amount > 0:
+                usdt_value = 0
+                if currency == 'USDT':
+                    usdt_value = amount
+                elif f"{currency}/USDT" in tickers and tickers[f"{currency}/USDT"].get('last'):
+                    usdt_value = amount * tickers[f"{currency}/USDT"]['last']
+                
+                if usdt_value > 1.0:
+                    portfolio_assets.append({'currency': currency, 'amount': amount, 'usdt_value': usdt_value})
+                    total_usdt_value += usdt_value
+        
+        portfolio_assets.sort(key=lambda x: x['usdt_value'], reverse=True)
+        return {'total_usdt': total_usdt_value, 'assets': portfolio_assets}
+    except Exception as e:
+        logger.error(f"Could not calculate portfolio value for {exchange.id}: {e}")
+        return {'total_usdt': 0, 'assets': []}
 
-            for currency, amount in balance.get('total', {}).items():
-                if amount > 0:
-                    usdt_value = 0
-                    if currency == 'USDT':
-                        usdt_value = amount
-                    elif f"{currency}/USDT" in tickers and tickers[f"{currency}/USDT"].get('last'):
-                        usdt_value = amount * tickers[f"{currency}/USDT"]['last']
-                    
-                    if usdt_value > 0.1:
-                        total_usdt_value += usdt_value
-        except Exception as e:
-            logger.error(f"Could not calculate real portfolio value for {exchange.id}: {e}")
-    return total_usdt_value
+
+async def get_total_real_portfolio_value_usdt():
+    total_value = 0
+    tasks = [calculate_full_portfolio(ex) for ex in bot_state.exchanges.values() if ex.apiKey]
+    results = await asyncio.gather(*tasks)
+    for res in results:
+        total_value += res['total_usdt']
+    return total_value
 
 async def portfolio_snapshot_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_message = update.callback_query.message
@@ -2288,35 +2429,19 @@ async def process_portfolio_snapshot(update: Update, context: ContextTypes.DEFAU
         return
 
     try:
-        balance = await exchange.fetch_balance()
-        all_assets = balance.get('total', {})
-        tickers = await exchange.fetch_tickers()
+        portfolio_data = await calculate_full_portfolio(exchange)
+        portfolio_assets = portfolio_data.get('assets', [])
+        total_usdt_value = portfolio_data.get('total_usdt', 0)
         
-        portfolio_assets = []
-        total_usdt_value = 0
-        for currency, amount in all_assets.items():
-            if amount > 0:
-                usdt_value = 0
-                if currency == 'USDT':
-                    usdt_value = amount
-                elif f"{currency}/USDT" in tickers and tickers[f"{currency}/USDT"].get('last'):
-                    usdt_value = amount * tickers[f"{currency}/USDT"]['last']
-                
-                if usdt_value > 1:
-                    portfolio_assets.append({'currency': currency, 'amount': amount, 'usdt_value': usdt_value})
-                    total_usdt_value += usdt_value
+        symbols_to_fetch = [f"{asset['currency']}/USDT" for asset in portfolio_assets if f"{asset['currency']}/USDT" in exchange.markets]
         
-        portfolio_assets.sort(key=lambda x: x['usdt_value'], reverse=True)
-        
+        trade_tasks = [exchange.fetch_my_trades(symbol=symbol, limit=5) for symbol in symbols_to_fetch]
+        trade_results = await asyncio.gather(*trade_tasks, return_exceptions=True)
+
         all_recent_trades = []
-        for asset in portfolio_assets:
-            try:
-                symbol = f"{asset['currency']}/USDT"
-                if symbol in exchange.markets:
-                    trades = await exchange.fetch_my_trades(symbol=symbol, limit=5)
-                    all_recent_trades.extend(trades)
-            except Exception as e:
-                logger.warning(f"Could not fetch trades for {asset['currency']}: {e}")
+        for result in trade_results:
+            if not isinstance(result, Exception):
+                all_recent_trades.extend(result)
         
         all_recent_trades.sort(key=lambda x: x['timestamp'], reverse=True)
         recent_trades = all_recent_trades[:20]
@@ -2332,7 +2457,7 @@ async def process_portfolio_snapshot(update: Update, context: ContextTypes.DEFAU
         if not recent_trades:
             parts.append("لا يوجد سجل تداولات حديث.")
         else:
-            for trade in reversed(recent_trades): 
+            for trade in recent_trades:
                 side_emoji = "🟢" if trade['side'] == 'buy' else "🔴"
                 parts.append(f"`{trade['symbol']}` {side_emoji} `{trade['side'].upper()}` | الكمية: `{trade['amount']}` | السعر: `{trade['price']}`")
         
@@ -2350,8 +2475,8 @@ async def risk_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         conn = sqlite3.connect(DB_FILE, timeout=10)
         conn.row_factory = sqlite3.Row
         
-        real_trades = conn.cursor().execute("SELECT * FROM trades WHERE status = 'نشطة' AND trade_mode = 'real'").fetchall()
-        virtual_trades = conn.cursor().execute("SELECT * FROM trades WHERE status = 'نشطة' AND trade_mode = 'virtual'").fetchall()
+        real_trades = [dict(row) for row in conn.cursor().execute("SELECT * FROM trades WHERE status = 'نشطة' AND trade_mode = 'real'").fetchall()]
+        virtual_trades = [dict(row) for row in conn.cursor().execute("SELECT * FROM trades WHERE status = 'نشطة' AND trade_mode = 'virtual'").fetchall()]
         conn.close()
 
         parts = ["**ρίск تقرير المخاطر الحالي**\n"]
@@ -2360,7 +2485,7 @@ async def risk_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             if not trades:
                 return [f"\n--- **{title}** ---\n✅ لا توجد صفقات نشطة حالياً."]
             
-            valid_trades = [t for t in trades if all(t.get(k) is not None for k in ['entry_value_usdt', 'entry_price', 'stop_loss', 'quantity'])]
+            valid_trades = [t for t in trades if all(k in t and t[k] is not None for k in ['entry_value_usdt', 'entry_price', 'stop_loss', 'quantity'])]
             
             total_at_risk = sum(t['entry_value_usdt'] for t in valid_trades)
             potential_loss = sum((t['entry_price'] - t['stop_loss']) * t['quantity'] for t in valid_trades)
@@ -2379,10 +2504,7 @@ async def risk_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             return section_parts
 
-        exchange = next((ex for ex in bot_state.exchanges.values() if ex.apiKey), None)
-        real_portfolio_value = 0
-        if exchange:
-            real_portfolio_value = await get_real_balance(exchange.id, 'USDT')
+        real_portfolio_value = await get_total_real_portfolio_value_usdt()
         parts.extend(generate_risk_section("🚨 المخاطر الحقيقية", real_trades, real_portfolio_value))
         
         virtual_portfolio_value = bot_state.settings['virtual_portfolio_balance_usdt']
@@ -2409,11 +2531,8 @@ async def sync_portfolio_command(update: Update, context: ContextTypes.DEFAULT_T
         bot_symbols = {item[0] for item in bot_trades_raw}
         conn.close()
 
-        balance = await exchange.fetch_balance()
-        exchange_symbols = set()
-        for currency, amount in balance.get('total', {}).items():
-            if amount > 0 and f"{currency}/USDT" in exchange.markets:
-                exchange_symbols.add(f"{currency}/USDT")
+        portfolio_data = await calculate_full_portfolio(exchange)
+        exchange_symbols = {f"{asset['currency']}/USDT" for asset in portfolio_data['assets']}
 
         matched_symbols = bot_symbols.intersection(exchange_symbols)
         bot_only_symbols = bot_symbols.difference(exchange_symbols)
@@ -2473,7 +2592,7 @@ async def post_init(application: Application):
     job_queue.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
 
     logger.info("Jobs scheduled.")
-    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v5.2) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
+    await application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 *بوت كاسحة الألغام (v5.9) جاهز للعمل!*", parse_mode=ParseMode.MARKDOWN)
 
 async def post_shutdown(application: Application):
     all_exchanges = list(bot_state.exchanges.values()) + list(bot_state.public_exchanges.values())
@@ -2483,7 +2602,7 @@ async def post_shutdown(application: Application):
 
 def main():
     """Sets up and runs the bot application."""
-    if TELEGRAM_BOT_TOKEN == 'YOUR_BOT_TOKEN_HERE':
+    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == 'YOUR_BOT_TOKEN_HERE':
         print("FATAL ERROR: TELEGRAM_BOT_TOKEN is not set.")
         exit()
 
@@ -2510,7 +2629,7 @@ def main():
 
 
 if __name__ == '__main__':
-    print("🚀 Starting Mineseper Bot v5.2 (Full & Final Version)...")
+    print("🚀 Starting Mineseper Bot v5.9 (Reliability & Precision)...")
     try:
         main()
     except Exception as e:
