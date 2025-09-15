@@ -897,37 +897,67 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         except:
             pass
 
-# =======================================================================================
-# --- 🚀 نقطة انطلاق البوت (بنية جديدة ومستقرة) 🚀 ---
+## =======================================================================================
+# --- 🚀 نقطة انطلاق البوت (نسخة التشخيص) 🚀 ---
 # =======================================================================================
 async def main():
-    """الدالة الرئيسية الجديدة التي تبدأ وتدير البوت بشكل مستقر."""
+    """الدالة الرئيسية (نسخة التشخيص) لتتبع الأخطاء."""
     
+    # --- نقطة تفتيش 1: هل بدأت الدالة؟ ---
+    print("DEBUG CHECKPOINT 1: Main function started.")
+    logger.info("DEBUG CHECKPOINT 1: Main function started.")
+
+    # --- نقطة تفتيش 2: هل يمكن استيراد المكتبات؟ ---
+    try:
+        import websockets
+        from dotenv import load_dotenv
+        print("DEBUG CHECKPOINT 2: Successfully imported websockets and dotenv.")
+        logger.info("DEBUG CHECKPOINT 2: Successfully imported websockets and dotenv.")
+        load_dotenv()
+        print("DEBUG CHECKPOINT 2.1: load_dotenv() executed.")
+        logger.info("DEBUG CHECKPOINT 2.1: load_dotenv() executed.")
+    except ImportError as e:
+        print(f"DEBUG FAIL: FAILED TO IMPORT LIBRARIES: {e}")
+        logger.critical(f"DEBUG FAIL: FAILED TO IMPORT LIBRARIES: {e}")
+        return
+
     required_vars = {
-        'OKX_API_KEY': OKX_API_KEY, 'OKX_API_SECRET': OKX_API_SECRET, 
-        'OKX_API_PASSPHRASE': OKX_API_PASSPHRASE, 'TELEGRAM_BOT_TOKEN': TELEGRAM_BOT_TOKEN, 
-        'TELEGRAM_CHAT_ID': TELEGRAM_CHAT_ID
+        'OKX_API_KEY': os.getenv('OKX_API_KEY'), 'OKX_API_SECRET': os.getenv('OKX_API_SECRET'),
+        'OKX_API_PASSPHRASE': os.getenv('OKX_API_PASSPHRASE'), 'TELEGRAM_BOT_TOKEN': os.getenv('TELEGRAM_BOT_TOKEN'),
+        'TELEGRAM_CHAT_ID': os.getenv('TELEGRAM_CHAT_ID')
     }
     if any(not v for v in required_vars.values()):
         missing = [key for key, value in required_vars.items() if not value]
+        # --- نقطة تفتيش 2.5: هل المتغيرات موجودة؟ ---
+        print(f"DEBUG FAIL: Environment variables are missing AFTER load_dotenv: {missing}")
         logger.critical(f"FATAL: The following environment variables are not set: {', '.join(missing)}. Exiting.")
         return
+
+    print("DEBUG CHECKPOINT 3: Environment variables seem to be loaded.")
+    logger.info("DEBUG CHECKPOINT 3: Environment variables seem to be loaded.")
 
     load_settings()
     await init_database()
     
-    # --- [تعديل] إنشاء وتشغيل مدير الـ WebSocket في الخلفية ---
+    # --- نقطة تفتيش 4: هل سنبدأ مدير الويب سوكيت؟ ---
+    print("DEBUG CHECKPOINT 4: About to initialize WebSocketManager.")
+    logger.info("DEBUG CHECKPOINT 4: About to initialize WebSocketManager.")
+    
     ws_manager = WebSocketManager(bot_state)
     bot_state.ws_manager = ws_manager
-    ws_manager.subscribe_to_tickers(['BTC/USDT', 'ETH/USDT']) 
+    ws_manager.subscribe_to_tickers(['BTC/USDT', 'ETH/USDT'])
     ws_task = asyncio.create_task(ws_manager.run())
+
+    # --- نقطة تفتيش 5: هل تم إنشاء مهمة الويب سوكيت؟ ---
+    print("DEBUG CHECKPOINT 5: WebSocket task created successfully.")
+    logger.info("DEBUG CHECKPOINT 5: WebSocket task created successfully.")
     logger.info("🚀 [WS] تم تشغيل مدير الاتصال اللحظي في الخلفية.")
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     bot_state.exchange = ccxt.okx({
-        'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 
-        'password': OKX_API_PASSPHRASE, 'enableRateLimit': True, 
+        'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET,
+        'password': OKX_API_PASSPHRASE, 'enableRateLimit': True,
         'options': {'defaultType': 'spot'}
     })
 
@@ -968,26 +998,21 @@ async def main():
     app.job_queue.run_repeating(perform_scan, interval=scan_interval, first=10, name="perform_scan")
     app.job_queue.run_repeating(track_open_trades, interval=track_interval, first=30, name="track_trades")
     logger.info(f"Jobs scheduled: Scan every {scan_interval}s, Tracker every {track_interval}s.")
-    
+
     try:
-        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت OKX The Mastermind v5.5 بدأ العمل (بقلب WebSocket نابض)...*", parse_mode=ParseMode.MARKDOWN)
-        
+        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت OKX The Mastermind v5.5 بدأ العمل (وضع التشخيص)...*", parse_mode=ParseMode.MARKDOWN)
         async with app:
             await app.start()
             await app.updater.start_polling()
             logger.info("Bot is now running and polling for updates...")
-            
-            # This makes sure the bot and the websocket task run concurrently
-            await asyncio.gather(ws_task) 
-                
+            await asyncio.gather(ws_task)
     except (KeyboardInterrupt, SystemExit):
         logger.info("Bot shutting down gracefully...")
     except Exception as e:
         logger.critical(f"An unhandled error occurred in main loop: {e}", exc_info=True)
     finally:
-        # Graceful shutdown
         ws_task.cancel()
-        if app.updater and app.updater._running: # <-- Fixed the AttributeError
+        if app.updater and app.updater._running:
             await app.updater.stop()
         if app.running:
             await app.stop()
@@ -995,9 +1020,3 @@ async def main():
             await bot_state.exchange.close()
             logger.info("CCXT exchange connection closed.")
         logger.info("Bot has been shut down.")
-
-if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user.")
