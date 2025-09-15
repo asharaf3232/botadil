@@ -390,7 +390,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
 # [MODIFIED] Passing `bot` object explicitly
 async def execute_atomic_trade(signal, bot: "telegram.Bot"):
     symbol, settings, exchange = signal['symbol'], bot_state.settings, bot_state.exchange
-    logger.info(f"Executing 2-step trade for {symbol}: 1. Market Buy, 2. OCO Protection.")
+    logger.info(f"Executing Smart-Retry trade for {symbol}: 1. Market Buy, 2. OCO Protection.")
     
     try:
         # --- الخطوة 1: تنفيذ أمر الشراء بسعر السوق ---
@@ -416,44 +416,50 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
         if not verified_order:
             raise Exception("Market buy order did not fill in time. Manual check required.")
 
-        # --- [THE FINAL FIX] Wait 5 seconds for the exchange balance to update ---
-        logger.info("Waiting 5 seconds for balance to settle before placing OCO...")
-        await asyncio.sleep(5) # <--- <<< تم التعديل هنا
-        # --------------------------------------------------------------------
-
-        # --- الخطوة 2: حساب ووضع أمر الحماية OCO ---
+        # --- الخطوة 2: حساب ووضع أمر الحماية OCO بمنطق إعادة المحاولة ---
         avg_price = verified_order.get('average', signal['entry_price'])
         filled_qty = verified_order.get('filled', 0)
         
         if not avg_price or not filled_qty:
-             raise Exception(f"Order {verified_order['id']} was confirmed but has no avg price or filled quantity. Manual check required. Data: {verified_order}")
+             raise Exception(f"Order {verified_order['id']} was confirmed but has no avg price or filled quantity. Data: {verified_order}")
         
         original_risk = signal['entry_price'] - signal['stop_loss']
         final_sl = avg_price - original_risk
         final_tp = avg_price + (original_risk * settings['risk_reward_ratio'])
 
-        logger.info(f"Step 2: Placing OCO protection for {filled_qty} of {symbol} with TP={final_tp:.4f} and SL={final_sl:.4f}")
-        
         oco_params = {
-            'instId': exchange.market_id(symbol),
-            'tdMode': 'cash',
-            'side': 'sell',
-            'ordType': 'oco',
+            'instId': exchange.market_id(symbol), 'tdMode': 'cash', 'side': 'sell', 'ordType': 'oco',
             'sz': exchange.amount_to_precision(symbol, filled_qty),
-            'tpTriggerPx': exchange.price_to_precision(symbol, final_tp),
-            'tpOrdPx': '-1',
-            'slTriggerPx': exchange.price_to_precision(symbol, final_sl),
-            'slOrdPx': '-1'
+            'tpTriggerPx': exchange.price_to_precision(symbol, final_tp), 'tpOrdPx': '-1',
+            'slTriggerPx': exchange.price_to_precision(symbol, final_sl), 'slOrdPx': '-1'
         }
         
-        oco_receipt = await exchange.private_post_trade_order_algo(oco_params)
-        
+        # --- [NEW] Smart Retry Loop for OCO placement ---
+        oco_placed_successfully = False
         algo_id = None
-        if oco_receipt and oco_receipt.get('data') and oco_receipt['data'][0].get('sCode') == '0':
-            algo_id = oco_receipt['data'][0]['algoId']
-            logger.info(f"✅ OCO protection order placed successfully. Algo ID: {algo_id}")
-        else:
-            raise ccxt.ExchangeError(f"Failed to place OCO protection order: {json.dumps(oco_receipt)}")
+        max_oco_retries = 4  # Try up to 4 times
+        for attempt in range(max_oco_retries):
+            logger.info(f"Attempting to place OCO protection (Attempt {attempt + 1}/{max_oco_retries})...")
+            oco_receipt = await exchange.private_post_trade_order_algo(oco_params)
+            
+            if oco_receipt and oco_receipt.get('data') and oco_receipt['data'][0].get('sCode') == '0':
+                algo_id = oco_receipt['data'][0]['algoId']
+                logger.info(f"✅ OCO protection order placed successfully. Algo ID: {algo_id}")
+                oco_placed_successfully = True
+                break  # Exit loop on success
+            
+            # Check for the specific settlement delay error code
+            elif oco_receipt and oco_receipt.get('data') and oco_receipt['data'][0].get('sCode') == '51008':
+                logger.warning(f"OCO failed with Insufficient Funds (51008), retrying in 5s... (Attempt {attempt + 1})")
+                await asyncio.sleep(5)
+                continue # Go to the next attempt
+            else:
+                # Any other error is a critical failure
+                raise ccxt.ExchangeError(f"Failed to place OCO with an unexpected error: {json.dumps(oco_receipt)}")
+        
+        if not oco_placed_successfully:
+            raise Exception("Failed to place OCO protection after multiple retries. Manual intervention required.")
+        # --- [END] Smart Retry Loop ---
 
         # --- تسجيل الصفقة في قاعدة البيانات ---
         signal['final_tp'] = final_tp
@@ -474,7 +480,7 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=success_msg, parse_mode=ParseMode.MARKDOWN)
 
     except Exception as e:
-        logger.critical(f"CRITICAL FAILURE during 2-step trade for {symbol}: {e}", exc_info=True)
+        logger.critical(f"CRITICAL FAILURE during smart-retry trade for {symbol}: {e}", exc_info=True)
         try:
             open_orders = await exchange.fetch_open_orders(symbol)
             if open_orders:
@@ -483,6 +489,7 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
             logger.error(f"Failed to check for open orders during cleanup: {cleanup_e}")
             
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"**🔥🔥🔥 فشل حرج - {symbol}**\n\n**الخطأ:** `{str(e)}`\n\nيرجى التحقق من المنصة يدوياً.", parse_mode=ParseMode.MARKDOWN)
+
 async def worker(queue, signals_list, failure_counter):
     settings, exchange = bot_state.settings, bot_state.exchange
     while not queue.empty():
