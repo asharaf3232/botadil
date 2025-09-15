@@ -390,38 +390,43 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
 # [MODIFIED] Passing `bot` object explicitly
 async def execute_atomic_trade(signal, bot: "telegram.Bot"):
     symbol, settings, exchange = signal['symbol'], bot_state.settings, bot_state.exchange
-    logger.info(f"Executing Smart-Retry trade for {symbol}: 1. Market Buy, 2. OCO Protection.")
+    logger.info(f"Executing ARMORED trade for {symbol}. Trade is now under full lifecycle management.")
     
+    # State variables to track the trade's lifecycle
+    buy_order_id = None
+    verified_order = None
+    algo_id = None
+
     try:
-        # --- الخطوة 1: تنفيذ أمر الشراء بسعر السوق ---
+        # --- STAGE 1: EXECUTE AND ROBUSTLY CONFIRM THE BUY ORDER ---
         quantity_to_buy = settings['real_trade_size_usdt'] / signal['entry_price']
-        logger.info(f"Step 1: Placing Market Buy order for {quantity_to_buy:.6f} {symbol.split('/')[0]}")
-        buy_order = await exchange.create_market_buy_order(symbol, quantity_to_buy)
+        logger.info(f"Armored Stage 1: Placing Market Buy order for {quantity_to_buy:.6f} {symbol.split('/')[0]}")
         
-        # --- انتظار تأكيد تنفيذ أمر الشراء ---
-        verified_order = None
+        buy_order = await exchange.create_market_buy_order(symbol, quantity_to_buy)
+        buy_order_id = buy_order['id']
+
         max_retries = 24 # 60 seconds timeout
         for i in range(max_retries):
             await asyncio.sleep(2.5)
             exchange.nonce = exchange.milliseconds
-            logger.info(f"Checking order status for {buy_order['id']}... Attempt {i+1}/{max_retries}")
-            order_status = await exchange.fetch_order(buy_order['id'], symbol)
+            logger.info(f"Confirming buy order {buy_order_id}... Attempt {i+1}/{max_retries}")
+            order_status = await exchange.fetch_order(buy_order_id, symbol)
             current_status = order_status.get('status')
             logger.info(f"Order status from API: {current_status}")
             if order_status and current_status in ['filled', 'closed']:
                 verified_order = order_status
-                logger.info(f"✅ Market Buy order {verified_order['id']} for {symbol} is CONFIRMED with status: {current_status}.")
+                logger.info(f"✅ STAGE 1 PASSED: Buy order {verified_order['id']} is CONFIRMED with status: {current_status}.")
                 break
         
         if not verified_order:
-            raise Exception("Market buy order did not fill in time. Manual check required.")
+            raise Exception(f"Buy order confirmation failed after {max_retries} retries. Manual check required for order ID {buy_order_id}.")
 
-        # --- الخطوة 2: حساب ووضع أمر الحماية OCO بمنطق إعادة المحاولة ---
+        # --- STAGE 2: PLACE OCO PROTECTION WITH SMART RETRY LOGIC ---
         avg_price = verified_order.get('average', signal['entry_price'])
         filled_qty = verified_order.get('filled', 0)
         
         if not avg_price or not filled_qty:
-             raise Exception(f"Order {verified_order['id']} was confirmed but has no avg price or filled quantity. Data: {verified_order}")
+             raise Exception(f"Order {verified_order['id']} confirmed but has no avg price or filled quantity. Data: {verified_order}")
         
         original_risk = signal['entry_price'] - signal['stop_loss']
         final_sl = avg_price - original_risk
@@ -434,34 +439,28 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
             'slTriggerPx': exchange.price_to_precision(symbol, final_sl), 'slOrdPx': '-1'
         }
         
-        # --- [NEW] Smart Retry Loop for OCO placement ---
-        oco_placed_successfully = False
-        algo_id = None
-        max_oco_retries = 4  # Try up to 4 times
+        max_oco_retries = 4
         for attempt in range(max_oco_retries):
-            logger.info(f"Attempting to place OCO protection (Attempt {attempt + 1}/{max_oco_retries})...")
+            logger.info(f"Armored Stage 2: Placing OCO protection (Attempt {attempt + 1}/{max_oco_retries})...")
             oco_receipt = await exchange.private_post_trade_order_algo(oco_params)
             
-            if oco_receipt and oco_receipt.get('data') and oco_receipt['data'][0].get('sCode') == '0':
+            if oco_receipt and oco_receipt.get('data') and oco_receipt.get('data')[0].get('sCode') == '0':
                 algo_id = oco_receipt['data'][0]['algoId']
-                logger.info(f"✅ OCO protection order placed successfully. Algo ID: {algo_id}")
-                oco_placed_successfully = True
-                break  # Exit loop on success
+                logger.info(f"✅ STAGE 2 PASSED: OCO protection placed successfully. Algo ID: {algo_id}")
+                break
             
-            # Check for the specific settlement delay error code
             elif oco_receipt and oco_receipt.get('data') and oco_receipt['data'][0].get('sCode') == '51008':
                 logger.warning(f"OCO failed with Insufficient Funds (51008), retrying in 5s... (Attempt {attempt + 1})")
-                await asyncio.sleep(5)
-                continue # Go to the next attempt
+                if attempt < max_oco_retries - 1:
+                    await asyncio.sleep(5)
+                continue
             else:
-                # Any other error is a critical failure
                 raise ccxt.ExchangeError(f"Failed to place OCO with an unexpected error: {json.dumps(oco_receipt)}")
         
-        if not oco_placed_successfully:
-            raise Exception("Failed to place OCO protection after multiple retries. Manual intervention required.")
-        # --- [END] Smart Retry Loop ---
+        if not algo_id:
+            raise Exception("Failed to place OCO protection after multiple retries. The position is UNPROTECTED.")
 
-        # --- تسجيل الصفقة في قاعدة البيانات ---
+        # --- STAGE 3: LOGGING AND SUCCESS NOTIFICATION ---
         signal['final_tp'] = final_tp
         signal['final_sl'] = final_sl
         trade_id = await log_trade_to_db(signal, verified_order, algo_id)
@@ -470,25 +469,37 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
         sl_percent = (1 - final_sl / avg_price) * 100 if avg_price > 0 else 0
         
         success_msg = (
-            f"**✅ صفقة ناجحة ومتكاملة | {symbol} (ID: {trade_id})**\n"
+            f"**✅🛡️ صفقة مصفحة وناجحة | {symbol} (ID: {trade_id})**\n"
             f"------------------------------------\n"
             f"🔍 **الاستراتيجية:** {signal['reason']}\n\n"
             f"📈 **متوسط الشراء:** `{avg_price:,.4f}`\n"
             f"🎯 **الهدف:** `{final_tp:,.4f}` (+{tp_percent:.2f}%)\n"
             f"🛑 **الوقف:** `{final_sl:,.4f}` (-{sl_percent:.2f}%)\n\n"
-            f"***تم تأمين الصفقة بأمر حماية OCO.***")
+            f"***تم تأمين الصفقة بنجاح بأمر حماية OCO.***")
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=success_msg, parse_mode=ParseMode.MARKDOWN)
 
     except Exception as e:
-        logger.critical(f"CRITICAL FAILURE during smart-retry trade for {symbol}: {e}", exc_info=True)
-        try:
-            open_orders = await exchange.fetch_open_orders(symbol)
-            if open_orders:
-                logger.warning(f"Found {len(open_orders)} open orders for {symbol} after failure. Manual check advised.")
-        except Exception as cleanup_e:
-            logger.error(f"Failed to check for open orders during cleanup: {cleanup_e}")
+        logger.critical(f"CRITICAL FAILURE during armored trade for {symbol}: {e}", exc_info=True)
+        
+        # --- [NEW] Smart Error Reporting ---
+        error_message = f"**🔥🔥🔥 فشل حرج - {symbol}**\n\n"
+        if verified_order and not algo_id:
+            # This is the most dangerous case: Buy succeeded, but protection failed.
+            error_message += f"🚨 **خطر! تم شراء الصفقة بنجاح ولكن فشلت كل محاولات وضع أمر الحماية.**\n"
+            error_message += f"**الكمية المشتراة:** `{verified_order.get('filled', 'N/A')}`\n"
+            error_message += f"**متوسط السعر:** `{verified_order.get('average', 'N/A')}`\n\n"
+            error_message += "**❗️ الصفقة مفتوحة الآن وبدون حماية! يرجى التدخل اليدوي الفوري لوضع وقف الخسارة.**"
+        elif buy_order_id and not verified_order:
+            # Buy order was sent, but we couldn't confirm if it was filled.
+            error_message += f"⚠️ **تحذير: لم أتمكن من تأكيد تنفيذ أمر الشراء.**\n"
+            error_message += f"**معرف الأمر:** `{buy_order_id}`\n\n"
+            error_message += "**يرجى التحقق من المنصة يدوياً. قد تكون الصفقة نفذت أو لم تنفذ.**"
+        else:
+            # Generic failure, likely before the buy order was even placed successfully.
+            error_message += f"**الخطأ:** `{str(e)}`\n\n"
+            error_message += "يرجى التحقق من المنصة والسجلات."
             
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"**🔥🔥🔥 فشل حرج - {symbol}**\n\n**الخطأ:** `{str(e)}`\n\nيرجى التحقق من المنصة يدوياً.", parse_mode=ParseMode.MARKDOWN)
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=error_message, parse_mode=ParseMode.MARKDOWN)
 
 async def worker(queue, signals_list, failure_counter):
     settings, exchange = bot_state.settings, bot_state.exchange
