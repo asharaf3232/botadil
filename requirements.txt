@@ -6,3 +6,4 @@ aiosqlite
 httpx
 feedparser
 nltk
+websockets
