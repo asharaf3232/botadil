@@ -392,7 +392,6 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
     symbol, settings, exchange = signal['symbol'], bot_state.settings, bot_state.exchange
     logger.info(f"Executing ARMORED trade for {symbol}. Trade is now under full lifecycle management.")
     
-    # State variables to track the trade's lifecycle
     buy_order_id = None
     verified_order = None
     algo_id = None
@@ -421,7 +420,7 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
         if not verified_order:
             raise Exception(f"Buy order confirmation failed after {max_retries} retries. Manual check required for order ID {buy_order_id}.")
 
-        # --- STAGE 2: PLACE OCO PROTECTION WITH SMART RETRY LOGIC ---
+        # --- STAGE 2: PLACE OCO PROTECTION WITH EXTREME PERSISTENCE ---
         avg_price = verified_order.get('average', signal['entry_price'])
         filled_qty = verified_order.get('filled', 0)
         
@@ -439,20 +438,20 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
             'slTriggerPx': exchange.price_to_precision(symbol, final_sl), 'slOrdPx': '-1'
         }
         
-        max_oco_retries = 4
+        max_oco_retries = 6  # Try up to 6 times <<--- MODIFIED
         for attempt in range(max_oco_retries):
             logger.info(f"Armored Stage 2: Placing OCO protection (Attempt {attempt + 1}/{max_oco_retries})...")
             oco_receipt = await exchange.private_post_trade_order_algo(oco_params)
             
-            if oco_receipt and oco_receipt.get('data') and oco_receipt.get('data')[0].get('sCode') == '0':
+            if oco_receipt and oco_receipt.get('data') and oco_receipt['data'][0].get('sCode') == '0':
                 algo_id = oco_receipt['data'][0]['algoId']
                 logger.info(f"✅ STAGE 2 PASSED: OCO protection placed successfully. Algo ID: {algo_id}")
                 break
             
             elif oco_receipt and oco_receipt.get('data') and oco_receipt['data'][0].get('sCode') == '51008':
-                logger.warning(f"OCO failed with Insufficient Funds (51008), retrying in 5s... (Attempt {attempt + 1})")
+                logger.warning(f"OCO failed with Insufficient Funds (51008), retrying in 10s... (Attempt {attempt + 1})")
                 if attempt < max_oco_retries - 1:
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(10) # Wait 10 seconds between retries <<--- MODIFIED
                 continue
             else:
                 raise ccxt.ExchangeError(f"Failed to place OCO with an unexpected error: {json.dumps(oco_receipt)}")
@@ -481,21 +480,17 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
     except Exception as e:
         logger.critical(f"CRITICAL FAILURE during armored trade for {symbol}: {e}", exc_info=True)
         
-        # --- [NEW] Smart Error Reporting ---
         error_message = f"**🔥🔥🔥 فشل حرج - {symbol}**\n\n"
         if verified_order and not algo_id:
-            # This is the most dangerous case: Buy succeeded, but protection failed.
             error_message += f"🚨 **خطر! تم شراء الصفقة بنجاح ولكن فشلت كل محاولات وضع أمر الحماية.**\n"
             error_message += f"**الكمية المشتراة:** `{verified_order.get('filled', 'N/A')}`\n"
             error_message += f"**متوسط السعر:** `{verified_order.get('average', 'N/A')}`\n\n"
             error_message += "**❗️ الصفقة مفتوحة الآن وبدون حماية! يرجى التدخل اليدوي الفوري لوضع وقف الخسارة.**"
         elif buy_order_id and not verified_order:
-            # Buy order was sent, but we couldn't confirm if it was filled.
             error_message += f"⚠️ **تحذير: لم أتمكن من تأكيد تنفيذ أمر الشراء.**\n"
             error_message += f"**معرف الأمر:** `{buy_order_id}`\n\n"
             error_message += "**يرجى التحقق من المنصة يدوياً. قد تكون الصفقة نفذت أو لم تنفذ.**"
         else:
-            # Generic failure, likely before the buy order was even placed successfully.
             error_message += f"**الخطأ:** `{str(e)}`\n\n"
             error_message += "يرجى التحقق من المنصة والسجلات."
             
