@@ -398,15 +398,27 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
         logger.info(f"Step 1: Placing Market Buy order for {quantity_to_buy:.6f} {symbol.split('/')[0]}")
         buy_order = await exchange.create_market_buy_order(symbol, quantity_to_buy)
         
-        # --- انتظار تأكيد تنفيذ أمر الشراء ---
+        # --- [MODIFIED] انتظار تأكيد التنفيذ بمنطق محسن ---
         verified_order = None
-        max_retries = 24 # Wait up to 60 seconds  <--- <<< تم التعديل هنا
+        max_retries = 24 # 60 seconds timeout
         for i in range(max_retries):
             await asyncio.sleep(2.5)
+            
+            # --- [NEW] Force a fresh API request by updating the nonce ---
+            # This is a key trick to bypass potential caching issues
+            exchange.nonce = exchange.milliseconds
+            
+            logger.info(f"Checking order status for {buy_order['id']}... Attempt {i+1}/{max_retries}")
             order_status = await exchange.fetch_order(buy_order['id'], symbol)
-            if order_status and order_status.get('status') == 'filled':
+            
+            # --- [NEW] Log the status we receive from the exchange ---
+            current_status = order_status.get('status')
+            logger.info(f"Order status from API: {current_status}")
+
+            # --- [NEW] Check for 'filled' or 'closed' as final states ---
+            if order_status and current_status in ['filled', 'closed']:
                 verified_order = order_status
-                logger.info(f"✅ Market Buy order {verified_order['id']} for {symbol} is FILLED.")
+                logger.info(f"✅ Market Buy order {verified_order['id']} for {symbol} is CONFIRMED with status: {current_status}.")
                 break
         
         if not verified_order:
@@ -415,6 +427,9 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
         # --- الخطوة 2: حساب ووضع أمر الحماية OCO ---
         avg_price = verified_order.get('average', signal['entry_price'])
         filled_qty = verified_order.get('filled', 0)
+        
+        if not avg_price or not filled_qty:
+             raise Exception(f"Order {verified_order['id']} was confirmed but has no avg price or filled quantity. Manual check required. Data: {verified_order}")
         
         original_risk = signal['entry_price'] - signal['stop_loss']
         final_sl = avg_price - original_risk
