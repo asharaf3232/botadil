@@ -892,7 +892,7 @@ async def main():
     
     # 8. تشغيل البوت بطريقة مستقرة (غير حاجزة)
     try:
-        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت OKX The Mastermind v5.3 بدأ العمل (بنية قوية و مستقرة)...*", parse_mode=ParseMode.MARKDOWN)
+        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت OKX The Mastermind v5.3 بدأ 🚀العمل (بنية قوية و مستقرة)...*", parse_mode=ParseMode.MARKDOWN)
         
         # استخدام async with يضمن الإغلاق الآمن للتطبيق
         async with app:
