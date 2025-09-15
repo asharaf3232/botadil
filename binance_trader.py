@@ -551,7 +551,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         exchange = bot_state.exchange
         try:
             tickers = await exchange.fetch_tickers()
-            usdt_markets = [m for m in tickers.values() if m.get('symbol', '').endswith('/USDT') and not any(k in m['symbol'] for k in ['-SWAP', 'UP', 'DOWN', '3L', '3S']) and m.get('quoteVolume', 0) > settings['liquidity_filters']['min_quote_volume_2d_usd']]
+            usdt_markets = [m for m in tickers.values() if m.get('symbol', '').endswith('/USDT') and not any(k in m['symbol'] for k in ['-SWAP', 'UP', 'DOWN', '3L', '3S']) and m.get('quoteVolume', 0) > settings['liquidity_filters']['min_quote_volume_24h_usd']]
             usdt_markets.sort(key=lambda m: m.get('quoteVolume', 0), reverse=True)
             top_markets = usdt_markets[:settings['top_n_symbols_by_volume']]
             bot_state.scan_stats['markets_scanned'] = len(top_markets)
