@@ -395,6 +395,7 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
     symbol, settings, exchange = signal['symbol'], bot_state.settings, bot_state.exchange
     logger.info(f"Executing ARMORED trade for {symbol}. Trade is now under full lifecycle management.")
     
+    # State variables to track the trade's lifecycle
     buy_order_id = None
     verified_order = None
     algo_id = None
@@ -423,7 +424,7 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
         if not verified_order:
             raise Exception(f"Buy order confirmation failed after {max_retries} retries. Manual check required for order ID {buy_order_id}.")
 
-        # --- STAGE 2: PLACE OCO PROTECTION WITH EXTREME PERSISTENCE ---
+        # --- STAGE 2: PLACE OCO PROTECTION WITH SMART RETRY LOGIC ---
         avg_price = verified_order.get('average', signal['entry_price'])
         filled_qty = verified_order.get('filled', 0)
         
@@ -441,7 +442,7 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
             'slTriggerPx': exchange.price_to_precision(symbol, final_sl), 'slOrdPx': '-1'
         }
         
-        max_oco_retries = 6  # Try up to 6 times <<--- MODIFIED
+        max_oco_retries = 6 
         for attempt in range(max_oco_retries):
             logger.info(f"Armored Stage 2: Placing OCO protection (Attempt {attempt + 1}/{max_oco_retries})...")
             oco_receipt = await exchange.private_post_trade_order_algo(oco_params)
@@ -452,9 +453,11 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
                 break
             
             elif oco_receipt and oco_receipt.get('data') and oco_receipt['data'][0].get('sCode') == '51008':
-                logger.warning(f"OCO failed with Insufficient Funds (51008), retrying in 10s... (Attempt {attempt + 1})")
+                # Use the new setting from the UI
+                delay = settings.get('oco_retry_delay_seconds', 10)
+                logger.warning(f"OCO failed with Insufficient Funds (51008), retrying in {delay}s... (Attempt {attempt + 1})")
                 if attempt < max_oco_retries - 1:
-                    await asyncio.sleep(10) # Wait 10 seconds between retries <<--- MODIFIED
+                    await asyncio.sleep(delay)
                 continue
             else:
                 raise ccxt.ExchangeError(f"Failed to place OCO with an unexpected error: {json.dumps(oco_receipt)}")
@@ -483,6 +486,7 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
     except Exception as e:
         logger.critical(f"CRITICAL FAILURE during armored trade for {symbol}: {e}", exc_info=True)
         
+        # --- Smart Error Reporting ---
         error_message = f"**🔥🔥🔥 فشل حرج - {symbol}**\n\n"
         if verified_order and not algo_id:
             error_message += f"🚨 **خطر! تم شراء الصفقة بنجاح ولكن فشلت كل محاولات وضع أمر الحماية.**\n"
@@ -498,7 +502,6 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
             error_message += "يرجى التحقق من المنصة والسجلات."
             
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=error_message, parse_mode=ParseMode.MARKDOWN)
-
 async def worker(queue, signals_list, failure_counter):
     settings, exchange = bot_state.settings, bot_state.exchange
     while not queue.empty():
