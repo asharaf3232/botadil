@@ -3,9 +3,9 @@
 # --- 🚀 بوت OKX القناص v5.2 (The Mastermind - Patched) - النسخة النهائية المتكاملة 🚀 ---
 # =======================================================================================
 # هذا الإصدار هو إصدار تصحيحي شامل بناءً على الملاحظات الحية:
-# - [إصلاح حاسم] إصلاح الخطأ البرمجي (TypeError) الذي كان يمنع بدء عملية الفحص.
-# - [إكمال الميزات] برمجة زر "تقرير أداء الاستراتيجيات" ليعمل بشكل كامل.
-# - [إعادة ميزة] إضافة زر "تقرير التشخيص" إلى لوحة التحكم مع كامل وظائفه.
+# - [إصلاح حاسم] إصلاح الخطأ البرمجي (AttributeError) الذي كان يمنع بدء تشغيل البوت.
+# - [إكمال الميزات] برمجة زر "تقرير أداء الاستراتيجيات" و "تقرير التشخيص" ليعملا بشكل كامل ومستقر.
+# - [إضافة] إضافة "حالة اتصال المنصة" إلى تقرير التشخيص.
 # - [تحسينات] مراجعة شاملة للكود لضمان الاستقرار والموثوقية.
 #
 # للتثبيت: pip install "ccxt[async]" pandas pandas-ta python-telegram-bot httpx feedparser nltk
@@ -723,16 +723,17 @@ async def post_init(app: Application):
     if 'YOUR_OKX_API_KEY' in OKX_API_KEY or 'YOUR_BOT_TOKEN' in TELEGRAM_BOT_TOKEN:
         logger.critical("FATAL: API keys or Bot Token are not set."); return
 
-    original_fetch2 = ccxt.base.exchange.Exchange.fetch2
-    def patched_fetch2(self, path, api='public', method='GET', params={}, headers=None, body=None, config={}):
+    # [FIX v5.2] The correct, safe way to monkey-patch ccxt
+    original_fetch2 = ccxt.async_support.base.exchange.Exchange.fetch2
+    def patched_fetch2(self, path, api='public', method='GET', params=None, headers=None, body=None, config=None, context=None):
         params = params or {}
         if self.id == 'okx':
             if (path == 'trade/order-algo') or (path == 'trade/order' and 'attachAlgoOrds' in params):
                 if params.get("side") == "sell":
                     params.pop("tgtCcy", None)
-        return original_fetch2(self, path, api, method, params, headers, body, config)
+        return original_fetch2(self, path, api, method, params, headers, body, config, context)
     
-    ccxt.base.exchange.Exchange.fetch2 = patched_fetch2
+    ccxt.async_support.base.exchange.Exchange.fetch2 = patched_fetch2
     logger.info("Applied STABLE monkey-patch for CCXT.")
     
     bot_state.exchange = ccxt.okx({'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 'password': OKX_API_PASSPHRASE, 'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
