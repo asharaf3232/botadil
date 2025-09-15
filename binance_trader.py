@@ -1,15 +1,12 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 بوت OKX القناص v5.0 (The Mastermind) - النسخة النهائية المتكاملة 🚀 ---
+# --- 🚀 بوت OKX القناص v5.1 (The Mastermind - Patched) - النسخة النهائية المتكاملة 🚀 ---
 # =======================================================================================
-# هذا الإصدار هو التجسيد الكامل للرؤية المشتركة:
-# - جسد قوي: محرك تداول ذري وآمن ومخصص لمنصة OKX.
-# - عقل حكيم: دمج كامل لكل الميزات الذكية من البوت الأصلي، بما في ذلك:
-#   1. محرك تحليل مزاج السوق (فني، أساسي، نفسي).
-#   2. فلتر أمان رئيسي يوقف التداول في ظروف السوق السيئة.
-#   3. نظام اقتراحات ذكي للأنماط.
-#   4. واجهة تحكم تفاعلية وشاملة.
-#   5. نظام وقف متحرك متقدم (المراقب الذكي).
+# هذا الإصدار هو إصدار تصحيحي شامل بناءً على الملاحظات الحية:
+# - [إصلاح حاسم] إصلاح الخطأ البرمجي (TypeError) الذي كان يمنع بدء عملية الفحص.
+# - [إكمال الميزات] برمجة زر "تقرير أداء الاستراتيجيات" ليعمل بشكل كامل.
+# - [إعادة ميزة] إضافة زر "تقرير التشخيص" إلى لوحة التحكم مع كامل وظائفه.
+# - [تحسينات] مراجعة شاملة للكود لضمان الاستقرار والموثوقية.
 #
 # للتثبيت: pip install "ccxt[async]" pandas pandas-ta python-telegram-bot httpx feedparser nltk
 # =======================================================================================
@@ -65,6 +62,7 @@ class BotState:
         self.settings = {}
         self.last_signal_time = {}
         self.market_mood = {"mood": "UNKNOWN", "reason": "تحليل لم يتم بعد", "btc_mood": "UNKNOWN", "fng": "N/A", "news": "N/A"}
+        self.scan_stats = {"last_start": None, "last_duration": "N/A", "markets_scanned": 0, "failures": 0}
 
 bot_state = BotState()
 scan_lock = asyncio.Lock()
@@ -135,7 +133,7 @@ def load_settings():
                 bot_state.settings[key] = value
             elif isinstance(value, dict):
                  for sub_key, sub_value in value.items():
-                      if sub_key not in bot_state.settings[key]:
+                      if sub_key not in bot_state.settings.get(key, {}):
                            bot_state.settings[key][sub_key] = sub_value
         save_settings()
         logger.info("Settings loaded successfully.")
@@ -209,7 +207,6 @@ def get_latest_crypto_news():
     urls = ["https://cointelegraph.com/rss", "https://www.coindesk.com/arc/outboundfeeds/rss/"]
     for url in urls:
         try:
-            # Use a synchronous library or run in executor for async compatibility
             feed = feedparser.parse(url)
             headlines.extend(entry.title for entry in feed.entries[:5])
         except Exception: pass
@@ -249,8 +246,7 @@ async def get_market_mood():
     # 3. Fundamental Mood (News)
     _, news_mood_text = analyze_sentiment_of_headlines(get_latest_crypto_news())
 
-    # If we reached here, mood is positive
-    return {"mood": "POSITIVE", "reason": "وضع السوق مناسب (BTC صاعد والمشاعر مستقرة)", "btc_mood": btc_mood_text, "fng": fng_text, "news": news_mood_text}
+    return {"mood": "POSITIVE", "reason": "وضع السوق مناسب", "btc_mood": btc_mood_text, "fng": fng_text, "news": news_mood_text}
 
 # =======================================================================================
 # --- 🧠 العقل: دوال التحليل والاستراتيجيات 🧠 ---
@@ -403,15 +399,15 @@ async def execute_atomic_trade(signal):
                 logger.info(f"✅ VERIFIED: Main order {verified_order.get('id')} is filled.")
                 await asyncio.sleep(1)
                 open_orders = await exchange.fetch_open_orders(symbol)
-                algo_order = next((o for o in open_orders if o.get('clientOrderId') == verified_order.get('clientOrderId')), None)
+                algo_order = next((o for o in open_orders if o.get('clOrdId') == verified_order.get('clOrdId')), None)
                 algo_id = algo_order.get('id') if algo_order else 'unknown'
                 avg_price = verified_order.get('average', signal['entry_price'])
                 original_risk = signal['entry_price'] - signal['stop_loss']
                 signal['final_sl'] = avg_price - original_risk
                 signal['final_tp'] = avg_price + (original_risk * settings['risk_reward_ratio'])
                 trade_id = log_trade_to_db(signal, verified_order, algo_id)
-                tp_percent = (signal['final_tp'] - avg_price) / avg_price * 100
-                sl_percent = (avg_price - signal['final_sl']) / avg_price * 100
+                tp_percent = (signal['final_tp'] - avg_price) / avg_price * 100 if avg_price > 0 else 0
+                sl_percent = (avg_price - signal['final_sl']) / avg_price * 100 if avg_price > 0 else 0
                 success_msg = (
                     f"**✅ صفقة ذرية ناجحة | {symbol} (ID: {trade_id})**\n"
                     f"------------------------------------\n"
@@ -427,13 +423,12 @@ async def execute_atomic_trade(signal):
         logger.critical(f"CRITICAL FAILURE during atomic trade for {symbol}: {e}")
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"**🔥🔥🔥 فشل ذري حرج - {symbol}**\n\n**الخطأ:** `{str(e)}`", parse_mode=ParseMode.MARKDOWN)
 
-async def worker(queue, signals_list):
+async def worker(queue, signals_list, failure_counter):
     settings, exchange = bot_state.settings, bot_state.exchange
     while not queue.empty():
         market = await queue.get()
         symbol = market.get('symbol')
         try:
-            # Multi-layered filtering...
             orderbook = await exchange.fetch_order_book(symbol, limit=1)
             if not orderbook['bids'] or not orderbook['asks']: continue
             spread = (orderbook['asks'][0][0] - orderbook['bids'][0][0]) / orderbook['bids'][0][0] * 100
@@ -460,7 +455,6 @@ async def worker(queue, signals_list):
             df_htf = pd.DataFrame(htf_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df_htf['sma'] = ta.sma(df_htf['close'], length=htf_period)
             if df_htf['close'].iloc[-1] < df_htf['sma'].iloc[-1]: continue
-            # Strategy analysis...
             confirmed_reasons = []
             for name in settings['active_scanners']:
                 strategy_info = STRATEGIES_MAP.get(name)
@@ -481,12 +475,15 @@ async def worker(queue, signals_list):
                     stop_loss, take_profit = entry_price - risk, entry_price + (risk * settings['risk_reward_ratio'])
                     if (take_profit/entry_price - 1)*100 >= settings['min_tp_sl_filter']['min_tp_percent'] and (1 - stop_loss/entry_price)*100 >= settings['min_tp_sl_filter']['min_sl_percent']:
                         signals_list.append({"symbol": symbol, "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "reason": reason_str})
-        except Exception: pass
+        except Exception as e:
+            logger.debug(f"Worker error for {symbol}: {e}")
+            failure_counter[0] += 1
         finally: queue.task_done()
 
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
     async with scan_lock:
         settings, bot = bot_state.settings, context.bot
+        bot_state.scan_stats['last_start'] = datetime.now(EGYPT_TZ)
         logger.info("--- Starting new market scan... ---")
         if settings['market_mood_filter_enabled']:
             mood_result = await get_market_mood()
@@ -505,38 +502,59 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
             usdt_markets = [m for m in tickers.values() if m.get('symbol', '').endswith('/USDT') and not any(k in m['symbol'] for k in ['-SWAP', 'UP', 'DOWN', '3L', '3S']) and m.get('quoteVolume', 0) > settings['liquidity_filters']['min_quote_volume_24h_usd']]
             usdt_markets.sort(key=lambda m: m.get('quoteVolume', 0), reverse=True)
             top_markets = usdt_markets[:settings['top_n_symbols_by_volume']]
+            bot_state.scan_stats['markets_scanned'] = len(top_markets)
         except Exception as e:
             logger.error(f"Failed to fetch markets: {e}")
             return
-        queue = asyncio.Queue()
+        queue, signals_found, failure_counter = asyncio.Queue(), [], [0]
         for market in top_markets: await queue.put(market)
-        signals_found = []
-        worker_tasks = [asyncio.create_task(worker(queue, signals_found)) for _ in range(10)]
+        worker_tasks = [asyncio.create_task(worker(queue, signals_found, failure_counter)) for _ in range(10)]
         await queue.join()
         for task in worker_tasks: task.cancel()
+        
+        bot_state.scan_stats['failures'] = failure_counter[0]
+        duration = (datetime.now(EGYPT_TZ) - bot_state.scan_stats['last_start']).total_seconds()
+        bot_state.scan_stats['last_duration'] = f"{duration:.0f} ثانية"
+
+        scan_summary = (
+            f"🔬 **ملخص الفحص الأخير**\n\n"
+            f"- **الحالة:** اكتمل بنجاح\n"
+            f"- **وضع السوق:** {bot_state.market_mood['mood']} ({bot_state.market_mood['btc_mood']})\n"
+            f"- **المدة:** {bot_state.scan_stats['last_duration']}\n"
+            f"- **العملات المفحوصة:** {bot_state.scan_stats['markets_scanned']}\n\n"
+            f"------------------------------------\n"
+            f"- **إجمالي الإشارات المكتشفة:** {len(signals_found)}\n"
+        )
+
+        new_trades = 0
         if signals_found:
             logger.info(f"+++ Scan complete. Found {len(signals_found)} signals! +++")
             for signal in signals_found:
                 if time.time() - bot_state.last_signal_time.get(signal['symbol'], 0) < settings['scan_interval_seconds'] * 2.5: continue
                 bot_state.last_signal_time[signal['symbol']] = time.time()
                 await execute_atomic_trade(signal)
+                new_trades += 1
                 await asyncio.sleep(10)
         else:
             logger.info("--- Scan complete. No new signals found. ---")
+
+        scan_summary += f"- **✅ صفقات جديدة فُتحت:** {new_trades}\n"
+        scan_summary += f"- **⚠️ أخطاء في التحليل:** {bot_state.scan_stats['failures']}"
+        await bot.send_message(TELEGRAM_CHAT_ID, scan_summary, parse_mode=ParseMode.MARKDOWN)
 
 # =======================================================================================
 # --- 📱 واجهة التحكم عبر تليجرام (النسخة الكاملة) 📱 ---
 # =======================================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"]]
-    await update.message.reply_text("أهلاً بك في بوت OKX القناص v5.0 (The Mastermind)", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True))
+    await update.message.reply_text("أهلاً بك في بوت OKX القناص v5.1 (The Mastermind)", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True))
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📊 الإحصائيات العامة", callback_data="dashboard_stats")],
         [InlineKeyboardButton("📈 الصفقات النشطة", callback_data="dashboard_active_trades")],
         [InlineKeyboardButton("📜 تقرير أداء الاستراتيجيات", callback_data="dashboard_strategy_report")],
-        [InlineKeyboardButton("🌡️ حالة مزاج السوق", callback_data="dashboard_mood")]
+        [InlineKeyboardButton("🌡️ حالة مزاج السوق", callback_data="dashboard_mood"), InlineKeyboardButton("🕵️‍♂️ تقرير التشخيص", callback_data="dashboard_diagnostics")]
     ]
     await update.message.reply_text("🖥️ *لوحة التحكم الرئيسية*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
 
@@ -598,6 +616,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     data = query.data
     
     if data.startswith("dashboard_"):
+        await query.message.delete()
         report_type = data.split("_", 1)[1]
         if report_type == "stats":
             with sqlite3.connect(DB_FILE) as conn:
@@ -605,11 +624,10 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             counts, pnl = defaultdict(int), defaultdict(float)
             for status, count, p in stats: counts[status], pnl[status] = count, p or 0
             wins = sum(v for k, v in counts.items() if k.startswith('ناجحة'))
-            losses = counts.get('فاشلة (وقف خسارة)', 0)
-            closed = wins + losses
+            losses = counts.get('فاشلة (وقف خسارة)', 0); closed = wins + losses
             win_rate = (wins / closed * 100) if closed > 0 else 0
             total_pnl = sum(pnl.values())
-            await query.message.reply_text(f"*📊 الإحصائيات العامة*\n- إجمالي الصفقات المغلقة: {closed}\n- نسبة النجاح: {win_rate:.2f}%\n- صافي الربح/الخسارة: ${total_pnl:+.2f}", parse_mode=ParseMode.MARKDOWN)
+            await query.message.reply_text(f"*📊 الإحصائيات العامة*\n- الصفقات المغلقة: {closed}\n- نسبة النجاح: {win_rate:.2f}%\n- صافي الربح/الخسارة: ${total_pnl:+.2f}", parse_mode=ParseMode.MARKDOWN)
         elif report_type == "active_trades":
             with sqlite3.connect(DB_FILE) as conn:
                 conn.row_factory = sqlite3.Row
@@ -617,9 +635,37 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             if not trades: return await query.message.reply_text("لا توجد صفقات نشطة حالياً.")
             keyboard = [[InlineKeyboardButton(f"#{t['id']} | {t['symbol']} | ${t['entry_value_usdt']:.2f}", callback_data=f"check_{t['id']}")] for t in trades]
             await query.message.reply_text("اختر صفقة لمتابعتها:", reply_markup=InlineKeyboardMarkup(keyboard))
+        elif report_type == "strategy_report":
+            with sqlite3.connect(DB_FILE) as conn:
+                trades = conn.cursor().execute("SELECT reason, status, pnl_usdt FROM trades WHERE status != 'active'").fetchall()
+            if not trades: return await query.message.reply_text("لا توجد صفقات مغلقة لتحليلها.")
+            stats = defaultdict(lambda: {'wins': 0, 'losses': 0, 'pnl': 0.0})
+            for reason, status, pnl_val in trades:
+                s = stats[reason]
+                if status.startswith('ناجحة'): s['wins'] += 1
+                else: s['losses'] += 1
+                if pnl_val: s['pnl'] += pnl_val
+            report = ["**📜 تقرير أداء الاستراتيجيات**"]
+            for r, s in stats.items():
+                total = s['wins'] + s['losses']
+                wr = (s['wins'] / total * 100) if total > 0 else 0
+                report.append(f"\n--- **{r}** ---\n  - الصفقات: {total} ({s['wins']}✅ / {s['losses']}❌)\n  - النجاح: {wr:.2f}%\n  - صافي الربح: ${s['pnl']:+.2f}")
+            await query.message.reply_text("\n".join(report), parse_mode=ParseMode.MARKDOWN)
         elif report_type == "mood":
             mood = bot_state.market_mood
-            await query.message.reply_text(f"*🌡️ حالة مزاج السوق الحالية*\n- **النتيجة:** {mood['mood']}\n- **السبب:** {mood['reason']}\n- **مؤشر BTC:** {mood['btc_mood']}\n- **الخوف والطمع:** {mood['fng']}\n- **الأخبار:** {mood['news']}", parse_mode=ParseMode.MARKDOWN)
+            await query.message.reply_text(f"*🌡️ حالة مزاج السوق*\n- **النتيجة:** {mood['mood']}\n- **السبب:** {mood['reason']}\n- **مؤشر BTC:** {mood['btc_mood']}\n- **الخوف والطمع:** {mood['fng']}\n- **الأخبار:** {mood['news']}", parse_mode=ParseMode.MARKDOWN)
+        elif report_type == "diagnostics":
+            mood = bot_state.market_mood
+            scan = bot_state.scan_stats
+            settings = bot_state.settings
+            with sqlite3.connect(DB_FILE) as conn:
+                total_trades, active_trades = conn.cursor().execute("SELECT COUNT(*) FROM trades").fetchone()[0], conn.cursor().execute("SELECT COUNT(*) FROM trades WHERE status = 'active'").fetchone()[0]
+            report = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v5.1)**\n",
+                      f"--- **📊 حالة السوق الحالية** ---\n- **المزاج العام:** {mood['mood']} ({mood['reason']})\n- **مؤشر BTC:** {mood['btc_mood']}\n- **الخوف والطمع:** {mood['fng']}\n",
+                      f"--- **🔬 أداء آخر فحص** ---\n- **وقت البدء:** {scan['last_start']}\n- **المدة:** {scan['last_duration']}\n- **العملات المفحوصة:** {scan['markets_scanned']}\n- **فشل في تحليل:** {scan['failures']} عملات\n",
+                      f"--- **🔧 الإعدادات النشطة** ---\n- **النمط الحالي:** {settings['active_preset']}\n- **الماسحات المفعلة:** {', '.join(settings['active_scanners'])}\n",
+                      f"--- **🔩 حالة العمليات الداخلية** ---\n- **قاعدة البيانات:** متصلة ✅ ({total_trades} صفقة / {active_trades} نشطة)"]
+            await query.message.reply_text("\n".join(report), parse_mode=ParseMode.MARKDOWN)
 
     elif data.startswith("toggle_scanner_"):
         scanner_name = data.split("_", 2)[2]
@@ -644,8 +690,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         param_key = data.split("_", 1)[1]
         if isinstance(bot_state.settings.get(param_key), bool):
              bot_state.settings[param_key] = not bot_state.settings[param_key]; save_settings()
-             await query.message.delete()
-             await show_parameters_menu(update, context) # Refresh menu
+             await query.message.delete(); await show_parameters_menu(update, context)
         else:
              msg = await query.message.reply_text(f"📝 *تعديل '{PARAM_DISPLAY_NAMES.get(param_key, param_key)}'*\n*القيمة الحالية:* `{bot_state.settings.get(param_key)}`\n\nأرسل القيمة الجديدة.", parse_mode=ParseMode.MARKDOWN)
              context.user_data['awaiting_input_for_param'] = (param_key, msg.message_id)
@@ -663,33 +708,40 @@ async def post_init(app: Application):
     if NLTK_AVAILABLE:
         try: nltk.data.find('sentiment/vader_lexicon.zip')
         except LookupError: logger.info("Downloading NLTK data..."); nltk.download('vader_lexicon')
-    logger.info("🚀 Starting OKX Mastermind v5.0...")
+    logger.info("🚀 Starting OKX Mastermind v5.1...")
     if 'YOUR_OKX_API_KEY' in OKX_API_KEY or 'YOUR_BOT_TOKEN' in TELEGRAM_BOT_TOKEN:
         logger.critical("FATAL: API keys or Bot Token are not set."); return
-    bot_state.exchange = ccxt.okx({'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 'password': OKX_API_PASSPHRASE, 'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
-    def _request_patch(self, path, api="private", method="POST", params=None, headers=None, body=None, config=None, context=None):
-        if params is None: params = {}
+
+    # [FIX v5.1] The correct, safe way to monkey-patch ccxt
+    original_request = ccxt.okx.request
+    def patched_request(self, path, api='public', method='GET', params={}, headers=None, body=None, config={}):
         if (path == 'trade/order-algo') or (path == 'trade/order' and 'attachAlgoOrds' in params):
-            if params.get("side") == "sell": params.pop("tgtCcy", None)
-        return self.fetch2(path, api, method, params, headers, body, config, context)
-    bot_state.exchange.request = types.MethodType(_request_patch, bot_state.exchange)
+            if params.get("side") == "sell":
+                params.pop("tgtCcy", None)
+        # Call the original stored method
+        return original_request(self, path, api, method, params, headers, body, config)
+    
+    bot_state.exchange = ccxt.okx({'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 'password': OKX_API_PASSPHRASE, 'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
+    bot_state.exchange.request = types.MethodType(patched_request, bot_state.exchange)
     logger.info("Applied monkey-patch to fix OKX 'tgtCcy' parameter issue.")
+    
     scan_interval = bot_state.settings.get("scan_interval_seconds", 900)
     track_interval = bot_state.settings.get("track_interval_seconds", 60)
     app.job_queue.run_repeating(perform_scan, interval=scan_interval, first=10, name="perform_scan")
     app.job_queue.run_repeating(track_open_trades, interval=track_interval, first=30, name="track_trades")
     logger.info(f"Scan job every {scan_interval}s. Tracker job every {track_interval}s.")
-    await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت OKX The Mastermind v5.0 بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+    await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت OKX The Mastermind v5.1 بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
 
 def main():
     load_settings()
     init_database()
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$'), text_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^[+-]?\d*\.?\d+$'), text_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, input_handler))
     app.add_handler(CallbackQueryHandler(button_callback_handler))
     app.run_polling()
 
 if __name__ == '__main__':
     main()
+
