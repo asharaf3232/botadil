@@ -138,44 +138,79 @@ class ExchangeAdapter:
 
 class OcoAdapter(ExchangeAdapter):
     """محول أساسي للمنصات التي تدعم أوامر OCO."""
+
     async def place_exit_orders(self, signal, verified_quantity):
         symbol = signal['symbol']
         tp_price = self.exchange.price_to_precision(symbol, signal['take_profit'])
         sl_price = self.exchange.price_to_precision(symbol, signal['stop_loss'])
-        
+
+        # فرع منصة OKX
         if self.exchange.id == 'okx':
             logger.info(f"OKX: Placing OCO algorithm order for {symbol}")
             try:
-                trigger_order = await self.exchange.private_post_trade_order_algo({
-                    'instId': self.exchange.market_id(symbol),
-                    'tdMode': 'isolated',
+                inst_id = self.exchange.market_id(symbol)  # 'OKB-USDT'
+                base_ccy, _ = symbol.split('/')           # 'OKB'
+
+                payload = {
+                    'instId': inst_id,
+                    # للحسابات Spot لازم يكون 'cash' وليس isolated
+                    'tdMode': 'cash',
+                    # العملة المطلوبة في OKX (أساس الزوج)
+                    'ccy': base_ccy,
                     'side': 'sell',
                     'ordType': 'oco',
-                    'sz': str(verified_quantity),
+                    'sz': str(self.exchange.amount_to_precision(symbol, verified_quantity)),
                     'posSide': 'net',
                     'tpTriggerPx': tp_price,
                     'tpOrdPx': tp_price,
                     'slTriggerPx': sl_price,
                     'slOrdPx': '-1',
-                })
-                
-                algo_id = trigger_order.get('data', [{}])[0].get('algoId')
+                }
+
+                logger.debug(f"OKX OCO payload: {payload}")
+                trigger_order = await self.exchange.private_post_trade_order_algo(payload)
+                logger.info(f"OKX OCO response: {trigger_order}")
+
+                algo_id = None
+                data = trigger_order.get('data') or trigger_order.get('order') or trigger_order.get('result')
+                if isinstance(data, list) and data:
+                    algo_id = data[0].get('algoId') or data[0].get('algo_id')
+                elif isinstance(data, dict):
+                    algo_id = data.get('algoId') or data.get('algo_id')
+
                 if not algo_id:
-                    raise ccxt.ExchangeError(f"OKX failed to return a valid algoId for the OCO order. Response: {trigger_order}")
+                    raise ccxt.ExchangeError(
+                        f"OKX failed to return a valid algoId for the OCO order. Response: {trigger_order}"
+                    )
+
                 logger.info(f"OKX: OCO Algorithm order placed with algoId: {algo_id}")
                 return {"algo_id": algo_id}
+
             except Exception as e:
                 logger.error(f"Failed to place OKX OCO order: {e}", exc_info=True)
                 raise
 
+        # باقي المنصات (Binance وغيرها)
         logger.info(f"{self.exchange.id} OCO: Placing for {symbol}. TP: {tp_price}, SL: {sl_price}")
-        params = {'stopLimitPrice': sl_price} if self.exchange.id == 'binance' else {}
-        
+
+        params = {}
+        if self.exchange.id == 'binance':
+            params['stopLimitPrice'] = sl_price
+
         oco_order = await self.exchange.create_order(
-            symbol=symbol, type='oco', side='sell', amount=verified_quantity,
-            price=tp_price, stopPrice=sl_price, params=params
+            symbol=symbol,
+            type='oco',
+            side='sell',
+            amount=verified_quantity,
+            price=tp_price,
+            stopPrice=sl_price,
+            params=params
         )
-        return {"oco_id": oco_order['id']}
+
+        # قد تختلف صيغة الـ response باختلاف المنصة
+        oco_id = oco_order.get('id') or oco_order.get('orderId') or oco_order
+        return {"oco_id": oco_id}
+
 
     async def update_trailing_stop_loss(self, trade, new_sl):
         symbol = trade['symbol']
