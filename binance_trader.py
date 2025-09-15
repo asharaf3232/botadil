@@ -416,9 +416,9 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
         if not verified_order:
             raise Exception("Market buy order did not fill in time. Manual check required.")
 
-        # --- [THE FINAL FIX] Wait 2 seconds for the exchange balance to update ---
-        logger.info("Waiting 2 seconds for balance to settle before placing OCO...")
-        await asyncio.sleep(2)
+        # --- [THE FINAL FIX] Wait 5 seconds for the exchange balance to update ---
+        logger.info("Waiting 5 seconds for balance to settle before placing OCO...")
+        await asyncio.sleep(5) # <--- <<< تم التعديل هنا
         # --------------------------------------------------------------------
 
         # --- الخطوة 2: حساب ووضع أمر الحماية OCO ---
