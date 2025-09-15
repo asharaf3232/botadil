@@ -133,9 +133,6 @@ class ExchangeAdapter:
 
 class OcoAdapter(ExchangeAdapter):
 
-    """محول أساسي للمنصات التي تدعم أوامر OCO."""
-
-
 
     async def place_exit_orders(self, signal, verified_quantity):
 
