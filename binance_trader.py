@@ -27,12 +27,9 @@ import httpx
 import feedparser
 import websockets # <-- إضافة جديدة
 
-try:
-    import nltk
-    from nltk.sentiment.vader import SentimentIntensityAnalyzer
-    NLTK_AVAILABLE = True
-except ImportError:
-    NLTK_AVAILABLE = False
+# تم تعطيل NLTK مؤقتاً لتجنب مشاكل بدء التشغيل
+NLTK_AVAILABLE = False
+
 
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
