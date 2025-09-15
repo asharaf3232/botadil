@@ -1,9 +1,8 @@
-ccxt
+ccxt[async]
 pandas
 pandas-ta
+python-telegram-bot
+aiosqlite
+httpx
 feedparser
 nltk
-requests
-python-telegram-bot
-scipy
-aiohttp
