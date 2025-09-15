@@ -2,33 +2,12 @@
 # =======================================================================================
 # --- 💣 بوت كاسحة الألغام (Minesweeper Bot) v8.0 (بروتوكول المُصلِح) 💣 ---
 # =======================================================================================
-# --- سجل التغييرات v8.0 ---
-#
-# بناءً على التحليل العميق والمشترك، تم إجراء عملية إصلاح شاملة وجذرية.
-#
-# 1. [إصلاح جذري] إصلاح خلل التوافقية مع المنصات (OKX):
-#    - تمت إعادة كتابة منطق وضع أوامر الحماية (OCO) بالكامل لـ OKX ليتوافق مع متطلباتها الخاصة.
-#    - **النتيجة:** القضاء التام على خطأ 'TypeError' المسبب لانهيار البوت وترك الصفقات عارية.
-#
-# 2. [تأمين فوري] الحفاظ على منطق التحذير الصريح عند فشل الحماية الأولية:
-#    - تم التأكد من أن رسالة v6.1 "العبقرية" تعمل بكفاءة. إذا نجح الشراء وفشل وضع الأوامر،
-#      سيقوم البوت بإرسال تحذير فوري وواضح للتدخل اليدوي.
-#
-# 3. [منطق وقائي] إضافة "بوابة أمان" لاستراتيجيات الوقف المتحرك الحساسة:
-#    - استراتيجيات `atr` و `ema` الآن **تحترم** شرط "تفعيل الوقف المتحرك (%)" (1.5% افتراضياً).
-#    - لن يتم إطلاق عملية التحديث الخطيرة إلا بعد تحقيق ربح حقيقي أولاً.
-#
-# 4. [تطوير الحارس] ترقية "بروتوكول الحارس" إلى "بروتوكول المُصلِح":
-#    - لم يعد الحارس يكتفي بالصراخ. عند اكتشاف صفقة "عارية" (بلا حماية)،
-#      سيقوم الآن بمحاولة **"إصلاح ذاتي"** وإعادة وضع أوامر الحماية تلقائياً.
-#    - يرسل "المُصلِح" تقريراً بنجاح أو فشل عملية الإصلاح الذاتي.
-#
-# 5. [زيادة الاستقرار] تم إصلاح الأسباب الجذرية لانهيار البوت وإعادة تشغيله المستمر.
-#    من المتوقع أن يعمل البوت الآن باستقرار أعلى بكثير.
-#
+# نسخة مُعدَّلة جاهزة:
+# - إزالة تعريف OcoAdapter المكرر قبل تعريف ExchangeAdapter.
+# - إضافة فلترة Blacklist لعملات المنصات.
+# - إضافة دالة مسح للذاكرة وقاعدة البيانات.
 # =======================================================================================
 
-# --- المكتبات المطلوبة ---
 import ccxt.async_support as ccxt_async
 import ccxt
 import pandas as pd
@@ -73,7 +52,6 @@ TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', 'YOUR_CHAT_ID_HERE')
 TELEGRAM_SIGNAL_CHANNEL_ID = os.getenv('TELEGRAM_SIGNAL_CHANNEL_ID', TELEGRAM_CHAT_ID)
 ALPHA_VANTAGE_API_KEY = os.getenv('ALPHA_VANTAGE_API_KEY', 'YOUR_AV_KEY_HERE')
 
-# --- Add API Keys for all supported exchanges ---
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '')
 BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', '')
 GATE_API_KEY = os.getenv('GATE_API_KEY', '')
@@ -84,12 +62,11 @@ OKX_API_PASSPHRASE = os.getenv('OKX_API_PASSPHRASE', '')
 BYBIT_API_KEY = os.getenv('BYBIT_API_KEY', '')
 BYBIT_API_SECRET = os.getenv('BYBIT_API_SECRET', '')
 
-# --- إعدادات البوت ---
 EXCHANGES_TO_SCAN = ['binance', 'okx', 'bybit', 'gate']
 TIMEFRAME = '15m'
 HIGHER_TIMEFRAME = '1h'
 SCAN_INTERVAL_SECONDS = 900
-TRACK_INTERVAL_SECONDS = 60 
+TRACK_INTERVAL_SECONDS = 60
 
 APP_ROOT = '.'
 DB_FILE = os.path.join(APP_ROOT, 'minesweeper_bot_v8.db')
@@ -98,167 +75,40 @@ EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
 # --- إعداد مسجل الأحداث (Logger) ---
 LOG_FILE = os.path.join(APP_ROOT, 'minesweeper_bot_v8.log')
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, 'a', 'utf-8'), logging.StreamHandler()])
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO,
+                    handlers=[logging.FileHandler(LOG_FILE, 'a', 'utf-8'), logging.StreamHandler()])
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logger = logging.getLogger("MinesweeperBot_v8")
-# --- إضافة: دعم تسجيل العمليات التفصيلي (rotating file handler) -------------------
+
+# ----------------- فلترة العملات الممنوعة / blacklist -----------------
+BLACKLIST_TOKENS = {
+    'BNB', 'OKB', 'HT', 'KCS', 'FTT', 'BGB', 'GT'
+}
+
+def is_allowed_symbol(symbol: str) -> bool:
+    """إرجاع False لو الزوج يحتوي على عملة موجودة في BLACKLIST_TOKENS."""
+    try:
+        base, quote = symbol.replace('-', '/').upper().split('/')
+    except Exception:
+        parts = re.split(r'[-_/]', symbol.upper())
+        base, quote = (parts[0], parts[-1]) if len(parts) >= 2 else (parts[0], '')
+    return (base not in BLACKLIST_TOKENS) and (quote not in BLACKLIST_TOKENS)
+# ---------------------------------------------------------------------
+
 from logging.handlers import RotatingFileHandler
-
-# ملف لوج منفصل لعمليات البوت (نجاح / فشل / تفاصيل أوامر الخ)
 OPS_LOG_FILE = os.path.join(APP_ROOT, 'bot_operations.log')
-
 ops_logger = logging.getLogger("MinesweeperBot_ops")
 ops_logger.setLevel(logging.INFO)
-
-# لا تضيف handlers مكررة لو تم استدعاء الملف أكثر من مرة
 if not ops_logger.handlers:
-    ops_handler = RotatingFileHandler(
-        OPS_LOG_FILE,
-        maxBytes=5 * 1024 * 1024,  # 5 MB
-        backupCount=5,
-        encoding='utf-8'
-    )
+    ops_handler = RotatingFileHandler(OPS_LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=5, encoding='utf-8')
     ops_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s')
     ops_handler.setFormatter(ops_formatter)
     ops_logger.addHandler(ops_handler)
-
-# أيضًا احفظ نسخة من اللوج العام إلى ملف العمليات (اختياري لكنه مفيد)
-# هذا يضمن أن سجلات logger العام تُضاف أيضاً إلى ملف العمليات
 if not any(type(h) is RotatingFileHandler and getattr(h, "baseFilename", "") == OPS_LOG_FILE for h in logger.handlers):
     logger.addHandler(ops_handler)
 
-# اختصار استخدام ops_logger في أي مكان بالكود
-# مثال: ops_logger.info("Order placed ...")
-# ------------------------------------------------------------------------------------
-
-# --- إضافة: كلاس OcoAdapter المعدل لدعم OKX و fallback لتجنيب ترك الصفقات عارية ----------
-
-    """محول أساسي للمنصات التي تدعم أوامر OCO. يدعم OKX مع اصلاحات ccy/tdMode وفالباك."""
-
-    async def place_exit_orders(self, signal, verified_quantity):
-        symbol = signal['symbol']
-        tp_price = self.exchange.price_to_precision(symbol, signal['take_profit'])
-        sl_price = self.exchange.price_to_precision(symbol, signal['stop_loss'])
-
-        # ---------- فرع منصة OKX ----------
-        if self.exchange.id == 'okx':
-            ops_logger.info(f"[OKX] Placing OCO algorithm order for {symbol} TP={tp_price} SL={sl_price}")
-            try:
-                inst_id = self.exchange.market_id(symbol)  # مثال: 'OKB-USDT'
-                # تفصل الزوج للحصول على العملة الأساسية (ccy)
-                try:
-                    base_ccy, _ = symbol.split('/')
-                except Exception:
-                    # في حال كان symbol بصيغة مختلفة، نحاول استخدام market info
-                    market = self.exchange.markets.get(symbol) if hasattr(self.exchange, 'markets') else None
-                    base_ccy = market['base'] if market else symbol.split('-')[0]
-
-                payload = {
-                    'instId': inst_id,
-                    'tdMode': 'cash',  # spot accounts عادة 'cash'
-                    'ccy': base_ccy,   # مطلوب من OKX وإلا سيُرجع 50014
-                    'side': 'sell',
-                    'ordType': 'oco',
-                    'sz': str(self.exchange.amount_to_precision(symbol, verified_quantity)),
-                    'posSide': 'net',
-                    'tpTriggerPx': tp_price,
-                    'tpOrdPx': tp_price,
-                    'slTriggerPx': sl_price,
-                    'slOrdPx': '-1',
-                }
-
-                ops_logger.debug(f"[OKX] OCO payload: {payload}")
-                trigger_order = await self.exchange.private_post_trade_order_algo(payload)
-                ops_logger.info(f"[OKX] OCO response: {trigger_order}")
-
-                # استخراج algoId بشكل آمن
-                algo_id = None
-                data = None
-                if isinstance(trigger_order, dict):
-                    data = trigger_order.get('data') or trigger_order.get('order') or trigger_order.get('result')
-                if isinstance(data, list) and data:
-                    algo_id = data[0].get('algoId') or data[0].get('algo_id') or data[0].get('ordId')
-                elif isinstance(data, dict):
-                    algo_id = data.get('algoId') or data.get('algo_id') or data.get('ordId')
-
-                if not algo_id:
-                    # سجّل الاستجابة التفصيلية ثم ارفع استثناء ليدخل الفالباك
-                    ops_logger.warning(f"[OKX] No algoId in response, will attempt fallback. Response: {trigger_order}")
-                    raise ccxt.ExchangeError(f"OKX did not return algoId. Response: {trigger_order}")
-
-                ops_logger.info(f"[OKX] OCO Algorithm order placed with algoId: {algo_id}")
-                return {"algo_id": algo_id}
-
-            except Exception as e:
-                ops_logger.error(f"[OKX] Failed to place OCO algo order: {e}", exc_info=True)
-
-                # --------- Fallback: محاولة إنشاء أوامر منفصلة (TP limit + SL conditional) ----------
-                fallback = {}
-                try:
-                    tp_qty = self.exchange.amount_to_precision(symbol, verified_quantity)
-                    tp_order = await self.exchange.create_order(
-                        symbol=symbol, type='limit', side='sell', amount=tp_qty, price=tp_price, params={}
-                    )
-                    fallback['tp_order'] = tp_order.get('id') or tp_order.get('orderId') or tp_order
-                    ops_logger.info(f"[OKX][fallback] TP order created: {fallback['tp_order']}")
-                except Exception as tp_e:
-                    fallback['tp_error'] = str(tp_e)
-                    ops_logger.error(f"[OKX][fallback] TP creation failed: {tp_e}", exc_info=True)
-
-                try:
-                    sl_qty = self.exchange.amount_to_precision(symbol, verified_quantity)
-                    # params قد تحتاج تعديل حسب نسخة ccxt/okx؛ هذا مثال عام
-                    sl_params = {'triggerPrice': sl_price, 'ordType': 'conditional'}
-                    sl_order = await self.exchange.create_order(
-                        symbol=symbol, type='limit', side='sell', amount=sl_qty, price=sl_price, params=sl_params
-                    )
-                    fallback['sl_order'] = sl_order.get('id') or sl_order.get('orderId') or sl_order
-                    ops_logger.info(f"[OKX][fallback] SL conditional order created: {fallback['sl_order']}")
-                except Exception as sl_e:
-                    fallback['sl_error'] = str(sl_e)
-                    ops_logger.error(f"[OKX][fallback] SL creation failed: {sl_e}", exc_info=True)
-
-                # إذا نجحت أي عملية من الفالباك نُعيد تفاصيلها، وإلا نُعيد الخطأ الكامل للطبقة العليا
-                if fallback.get('tp_order') or fallback.get('sl_order'):
-                    ops_logger.info(f"[OKX][fallback] Fallback succeeded: {fallback}")
-                    return {"fallback": fallback}
-                else:
-                    ops_logger.critical(f"[OKX][fallback] Fallback failed: {fallback}")
-                    raise ccxt.ExchangeError(f"OKX OCO and fallback both failed. Details: {fallback}")
-
-        # ---------- باقي المنصات (مثال: Binance) ----------
-        ops_logger.info(f"[{self.exchange.id}] Placing OCO for {symbol} TP={tp_price} SL={sl_price}")
-        params = {}
-        if self.exchange.id == 'binance':
-            params['stopLimitPrice'] = sl_price
-
-        oco_order = await self.exchange.create_order(
-            symbol=symbol,
-            type='oco',
-            side='sell',
-            amount=verified_quantity,
-            price=tp_price,
-            stopPrice=sl_price,
-            params=params
-        )
-
-        oco_id = None
-        if isinstance(oco_order, dict):
-            oco_id = oco_order.get('id') or oco_order.get('orderId') or oco_order.get('clientOrderId')
-        if not oco_id:
-            oco_id = oco_order
-
-        ops_logger.info(f"[{self.exchange.id}] OCO order result: {oco_id}")
-        return {"oco_id": oco_id}
-# ----------------------------------------------------------------------------------------
-
-
 # =======================================================================================
-# --- 🚀 [v8.0] إعادة هيكلة المحولات (Adapters) لإصلاح التوافقية 🚀 ---
-# =======================================================================================
-
 class BotState:
-    """كلاس مركزي لإدارة كل حالة البوت لزيادة التنظيم."""
     def __init__(self):
         self.exchanges = {}
         self.public_exchanges = {}
@@ -276,36 +126,33 @@ scan_lock = asyncio.Lock()
 report_lock = asyncio.Lock()
 
 class ExchangeAdapter:
-    """كلاس أساسي مجرد لنمط المحول."""
     def __init__(self, exchange_client):
         self.exchange = exchange_client
 
     async def place_exit_orders(self, signal, verified_quantity):
-        raise NotImplementedError("يجب تعريف هذه الدالة في الكلاس الفرعي")
+        raise NotImplementedError
 
     async def update_trailing_stop_loss(self, trade, new_sl):
-        raise NotImplementedError("يجب تعريف هذه الدالة في الكلاس الفرعي")
+        raise NotImplementedError
 
 class OcoAdapter(ExchangeAdapter):
-    """محول أساسي للمنصات التي تدعم أوامر OCO."""
-
     async def place_exit_orders(self, signal, verified_quantity):
         symbol = signal['symbol']
+        if not is_allowed_symbol(symbol):
+            ops_logger.info(f"[FILTER] Skipping blacklisted symbol {symbol} (not placing exit orders).")
+            return {"skipped": True, "reason": "blacklisted"}
+
         tp_price = self.exchange.price_to_precision(symbol, signal['take_profit'])
         sl_price = self.exchange.price_to_precision(symbol, signal['stop_loss'])
 
-        # فرع منصة OKX
         if self.exchange.id == 'okx':
             logger.info(f"OKX: Placing OCO algorithm order for {symbol}")
             try:
-                inst_id = self.exchange.market_id(symbol)  # 'OKB-USDT'
-                base_ccy, _ = symbol.split('/')           # 'OKB'
-
+                inst_id = self.exchange.market_id(symbol)
+                base_ccy, _ = symbol.split('/')
                 payload = {
                     'instId': inst_id,
-                    # للحسابات Spot لازم يكون 'cash' وليس isolated
                     'tdMode': 'cash',
-                    # العملة المطلوبة في OKX (أساس الزوج)
                     'ccy': base_ccy,
                     'side': 'sell',
                     'ordType': 'oco',
@@ -316,37 +163,27 @@ class OcoAdapter(ExchangeAdapter):
                     'slTriggerPx': sl_price,
                     'slOrdPx': '-1',
                 }
-
                 logger.debug(f"OKX OCO payload: {payload}")
                 trigger_order = await self.exchange.private_post_trade_order_algo(payload)
                 logger.info(f"OKX OCO response: {trigger_order}")
-
                 algo_id = None
                 data = trigger_order.get('data') or trigger_order.get('order') or trigger_order.get('result')
                 if isinstance(data, list) and data:
                     algo_id = data[0].get('algoId') or data[0].get('algo_id')
                 elif isinstance(data, dict):
                     algo_id = data.get('algoId') or data.get('algo_id')
-
                 if not algo_id:
-                    raise ccxt.ExchangeError(
-                        f"OKX failed to return a valid algoId for the OCO order. Response: {trigger_order}"
-                    )
-
+                    raise ccxt.ExchangeError(f"OKX failed to return a valid algoId for the OCO order. Response: {trigger_order}")
                 logger.info(f"OKX: OCO Algorithm order placed with algoId: {algo_id}")
                 return {"algo_id": algo_id}
-
             except Exception as e:
                 logger.error(f"Failed to place OKX OCO order: {e}", exc_info=True)
                 raise
 
-        # باقي المنصات (Binance وغيرها)
         logger.info(f"{self.exchange.id} OCO: Placing for {symbol}. TP: {tp_price}, SL: {sl_price}")
-
         params = {}
         if self.exchange.id == 'binance':
             params['stopLimitPrice'] = sl_price
-
         oco_order = await self.exchange.create_order(
             symbol=symbol,
             type='oco',
@@ -356,16 +193,12 @@ class OcoAdapter(ExchangeAdapter):
             stopPrice=sl_price,
             params=params
         )
-
-        # قد تختلف صيغة الـ response باختلاف المنصة
         oco_id = oco_order.get('id') or oco_order.get('orderId') or oco_order
         return {"oco_id": oco_id}
-
 
     async def update_trailing_stop_loss(self, trade, new_sl):
         symbol = trade['symbol']
         exit_ids = json.loads(trade.get('exit_order_ids_json', '{}'))
-        
         if self.exchange.id == 'okx':
             algo_id_to_cancel = exit_ids.get('algo_id')
             if not algo_id_to_cancel:
@@ -386,9 +219,7 @@ class OcoAdapter(ExchangeAdapter):
                 await self.exchange.cancel_order(oco_id_to_cancel, symbol)
             except ccxt.OrderNotFound:
                 logger.warning(f"OCO order {oco_id_to_cancel} not found.")
-        
         await asyncio.sleep(2)
-
         new_signal = {'symbol': symbol, 'take_profit': trade['take_profit'], 'stop_loss': new_sl}
         return await self.place_exit_orders(new_signal, trade['quantity'])
 
@@ -400,17 +231,29 @@ class OKXAdapter(OcoAdapter): pass
 def get_exchange_adapter(exchange_id: str):
     exchange_client = bot_state.exchanges.get(exchange_id.lower())
     if not exchange_client: return None
-    
     adapter_map = {
         'binance': BinanceAdapter, 'okx': OKXAdapter,
         'bybit': BybitAdapter, 'gate': GateAdapter
     }
     AdapterClass = adapter_map.get(exchange_id.lower())
-    
     if AdapterClass: return AdapterClass(exchange_client)
-    
     logger.warning(f"No specific adapter found for {exchange_id}, trade automation will be disabled for it.")
     return None
+
+# دالة مساعدة لمسح قاعدة البيانات والذاكرة
+def wipe_bot_state_and_db():
+    if os.path.exists(DB_FILE):
+        os.remove(DB_FILE)
+        logger.info("DB file removed: %s", DB_FILE)
+    if os.path.exists(OPS_LOG_FILE):
+        os.remove(OPS_LOG_FILE)
+        logger.info("Ops log removed: %s", OPS_LOG_FILE)
+    bot_state.scan_history.clear()
+    bot_state.last_signal_time.clear()
+    bot_state.exchanges.clear()
+    bot_state.public_exchanges.clear()
+    logger.info("In-memory bot state cleared.")
+
 
 # =======================================================================================
 # --- Configurations and Constants ---
