@@ -101,7 +101,9 @@ PRESETS = {
 EDITABLE_PARAMS = {
     "إعدادات المخاطر": ["real_trade_size_usdt", "atr_sl_multiplier", "risk_reward_ratio"],
     "إعدادات الوقف المتحرك": ["trailing_sl_enabled", "trailing_sl_activation_percent", "trailing_sl_callback_percent"],
-    "إعدادات الفحص والمزاج": ["top_n_symbols_by_volume", "fear_and_greed_threshold", "market_mood_filter_enabled", "scan_interval_seconds"] # <--- أضفها هنا
+    "إعدادات الفحص والمزاج": ["top_n_symbols_by_volume", "fear_and_greed_threshold", 
+                             "market_mood_filter_enabled", "scan_interval_seconds", 
+                             "oco_retry_delay_seconds"]
 }
 PARAM_DISPLAY_NAMES = {
     "real_trade_size_usdt": "💵 حجم الصفقة ($)", "atr_sl_multiplier": "مضاعف وقف الخسارة (ATR)",
@@ -109,7 +111,8 @@ PARAM_DISPLAY_NAMES = {
     "trailing_sl_activation_percent": "تفعيل الوقف المتحرك (%)", "trailing_sl_callback_percent": "مسافة تتبع الوقف (%)",
     "top_n_symbols_by_volume": "عدد العملات للفحص", "fear_and_greed_threshold": "حد مؤشر الخوف",
     "market_mood_filter_enabled": "فلتر مزاج السوق",
-    "scan_interval_seconds": "⏱️ الفاصل الزمني للفحص (ثواني)" # <--- السطر الجديد
+    "scan_interval_seconds": "⏱️ الفاصل الزمني للفحص (ثواني)",
+    "oco_retry_delay_seconds": "⏳ مدة انتظار الحماية (ثواني)"
 }
 STRATEGIES_MAP = {
     "momentum_breakout": {"func_name": "analyze_momentum_breakout", "name": "زخم اختراقي"},
