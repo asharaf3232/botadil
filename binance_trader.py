@@ -399,7 +399,7 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
             {'tpTriggerPx': tp_price_str, 'tpOrdPx': '-1', 'side': 'sell'},
             {'slTriggerPx': sl_price_str, 'slOrdPx': '-1', 'side': 'sell'}
         ]
-        params = {'tdMode': 'cash', 'attachAlgoOrds': attached_algo_orders, 'clOrdId': f'mastermind_{int(time.time()*1000)}'}
+        params = {'tdMode': 'cash', 'attachAlgoOrds': attached_algo_orders, 'clOrdId': f'mastermind{int(time.time()*1000)}'}
         
         order_receipt = await exchange.create_order(symbol=symbol, type='market', side='buy', amount=quantity_to_buy, params=params)
         logger.debug(f"Atomic order request for {symbol} sent. Receipt: {json.dumps(order_receipt, default=str)}")
