@@ -479,8 +479,9 @@ async def worker(queue, signals_list, failure_counter):
             ohlcv = await exchange.fetch_ohlcv(symbol, '15m', limit=settings['trend_filters']['ema_period'] + 20)
             if len(ohlcv) < settings['trend_filters']['ema_period'] + 10: continue
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            
-            df['volume_sma'] = ta.sma(df['volume'], length=20)
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('timestamp', inplace=True) # <--- تم التصحيح
+    df['volume_sma'] = ta.sma(df['volume'], length=20)
             if pd.isna(df['volume_sma'].iloc[-2]) or df['volume_sma'].iloc[-2] == 0: continue
             rvol = df['volume'].iloc[-2] / df['volume_sma'].iloc[-2]
             if rvol < settings['liquidity_filters']['min_rvol']: continue
