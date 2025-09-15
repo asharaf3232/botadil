@@ -472,63 +472,88 @@ async def worker(queue, signals_list, failure_counter):
         symbol = market.get('symbol')
         try:
             orderbook = await exchange.fetch_order_book(symbol, limit=1)
-            if not orderbook['bids'] or not orderbook['asks']: continue
+            if not orderbook['bids'] or not orderbook['asks']:
+                continue
             spread = (orderbook['asks'][0][0] - orderbook['bids'][0][0]) / orderbook['bids'][0][0] * 100
-            if spread > settings['liquidity_filters']['max_spread_percent']: continue
-            
+            if spread > settings['liquidity_filters']['max_spread_percent']:
+                continue
+
             ohlcv = await exchange.fetch_ohlcv(symbol, '15m', limit=settings['trend_filters']['ema_period'] + 20)
-            if len(ohlcv) < settings['trend_filters']['ema_period'] + 10: continue
+            if len(ohlcv) < settings['trend_filters']['ema_period'] + 10:
+                continue
+            
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    df.set_index('timestamp', inplace=True) # <--- تم التصحيح
-    df['volume_sma'] = ta.sma(df['volume'], length=20)
-            if pd.isna(df['volume_sma'].iloc[-2]) or df['volume_sma'].iloc[-2] == 0: continue
+            
+            # This is the fix for the VWAP warning, now correctly indented
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df.set_index('timestamp', inplace=True)
+
+            df['volume_sma'] = ta.sma(df['volume'], length=20)
+            if pd.isna(df['volume_sma'].iloc[-2]) or df['volume_sma'].iloc[-2] == 0:
+                continue
             rvol = df['volume'].iloc[-2] / df['volume_sma'].iloc[-2]
-            if rvol < settings['liquidity_filters']['min_rvol']: continue
-            
-            df.ta.atr(length=14, append=True); atr_col = find_col(df.columns, 'ATRr_')
+            if rvol < settings['liquidity_filters']['min_rvol']:
+                continue
+
+            df.ta.atr(length=14, append=True)
+            atr_col = find_col(df.columns, 'ATRr_')
             last_close = df['close'].iloc[-2]
-            if not atr_col or last_close == 0: continue
+            if not atr_col or last_close == 0:
+                continue
             atr_percent = (df[atr_col].iloc[-2] / last_close) * 100
-            if atr_percent < settings['volatility_filters']['min_atr_percent']: continue
-            
+            if atr_percent < settings['volatility_filters']['min_atr_percent']:
+                continue
+
             ema_period = settings['trend_filters']['ema_period']
             df.ta.ema(length=ema_period, append=True)
             ema_col = find_col(df.columns, f'EMA_{ema_period}')
-            if not ema_col or pd.isna(df[ema_col].iloc[-2]) or last_close < df[ema_col].iloc[-2]: continue
-            
+            if not ema_col or pd.isna(df[ema_col].iloc[-2]) or last_close < df[ema_col].iloc[-2]:
+                continue
+
             htf_period = settings['trend_filters']['htf_period']
             htf_ohlcv = await exchange.fetch_ohlcv(symbol, '1h', limit=htf_period + 5)
-            if len(htf_ohlcv) < htf_period: continue
+            if len(htf_ohlcv) < htf_period:
+                continue
             df_htf = pd.DataFrame(htf_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df_htf['sma'] = ta.sma(df_htf['close'], length=htf_period)
-            if df_htf['close'].iloc[-1] < df_htf['sma'].iloc[-1]: continue
-            
+            if df_htf['close'].iloc[-1] < df_htf['sma'].iloc[-1]:
+                continue
+
             confirmed_reasons = []
             for name in settings['active_scanners']:
                 strategy_info = STRATEGIES_MAP.get(name)
-                if not strategy_info: continue
+                if not strategy_info:
+                    continue
                 strategy_func = globals()[strategy_info['func_name']]
                 if asyncio.iscoroutinefunction(strategy_func):
                     result = await strategy_func(df.copy(), rvol, exchange, symbol)
                 else:
                     result = strategy_func(df.copy(), rvol)
-                if result: confirmed_reasons.append(result['reason'])
+                if result:
+                    confirmed_reasons.append(result['reason'])
 
             if confirmed_reasons:
                 reason_str = ' + '.join(confirmed_reasons)
                 entry_price = last_close
-                df.ta.atr(length=14, append=True); atr_col = find_col(df.columns, "ATRr_14")
+                df.ta.atr(length=14, append=True)
+                atr_col = find_col(df.columns, "ATRr_14")
                 current_atr = df.iloc[-2].get(atr_col, 0)
                 if current_atr > 0:
                     risk = current_atr * settings['atr_sl_multiplier']
                     stop_loss, take_profit = entry_price - risk, entry_price + (risk * settings['risk_reward_ratio'])
-                    if (take_profit/entry_price - 1)*100 >= settings['min_tp_sl_filter']['min_tp_percent'] and (1 - stop_loss/entry_price)*100 >= settings['min_tp_sl_filter']['min_sl_percent']:
-                        signals_list.append({"symbol": symbol, "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "reason": reason_str})
-             except Exception as e:
+                    if (take_profit / entry_price - 1) * 100 >= settings['min_tp_sl_filter']['min_tp_percent'] and \
+                       (1 - stop_loss / entry_price) * 100 >= settings['min_tp_sl_filter']['min_sl_percent']:
+                        signals_list.append({
+                            "symbol": symbol,
+                            "entry_price": entry_price,
+                            "take_profit": take_profit,
+                            "stop_loss": stop_loss,
+                            "reason": reason_str
+                        })
+        except Exception as e:
             logger.debug(f"Worker error for {symbol}: {e}")
             failure_counter[0] += 1
-            finally:
+        finally:
             queue.task_done()
 
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
