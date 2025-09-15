@@ -1,15 +1,11 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 بوت OKX  القناص v5.3 (The Mastermind - Hardened) - النسخة المحسنة 🚀 ---
+# --- 🚀 بوت OKX القناص v5.5 (The Mastermind - WebSocket Integrated) - النسخة المحسنة 🚀 ---
 # =======================================================================================
-# هذا الإصدار يتضمن تحسينات جوهرية في الموثوقية والأداء بناءً على مراجعة متقدمة:
-# - [إصلاح حاسم] تصحيح الـ monkey-patch الخاص بـ ccxt ليعمل بشكل غير متزامن (async-safe).
-# - [موثوقية] إضافة اختبار اتصال إلزامي بالمنصة (OKX) عند بدء التشغيل.
-# - [أداء] استبدال مكتبة sqlite3 بـ aiosqlite لمنع حظر العمليات في البيئة غير المتزامنة.
-# - [هيكلية] التخلص من الاعتماد على المتغير العام `application` وتمرير كائن `bot` بشكل صريح.
-# - [أمان] تشديد التحقق من وجود المتغيرات الحساسة ومنع التشغيل بقيم افتراضية.
+# هذا الإصدار يدمج "مدير اتصال لحظي" (WebSocket Manager) كنواة جديدة للبوت،
+# مما يمهد الطريق لسرعة استجابة فائقة في إدارة الصفقات.
 #
-# للتثبيت: pip install "ccxt[async]" pandas pandas-ta python-telegram-bot httpx feedparser nltk aiosqlite
+# للتثبيت: pip install "ccxt[async]" pandas pandas-ta python-telegram-bot httpx feedparser nltk aiosqlite websockets
 # =======================================================================================
 
 # --- المكتبات المطلوبة ---
@@ -26,9 +22,10 @@ import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from collections import defaultdict, Counter
-import aiosqlite  # <-- تم التغيير
+import aiosqlite
 import httpx
 import feedparser
+import websockets # <-- إضافة جديدة
 
 try:
     import nltk
@@ -45,7 +42,6 @@ from telegram.error import BadRequest, Forbidden
 # =======================================================================================
 # --- ⚙️ الإعدادات الأساسية ⚙️ ---
 # =======================================================================================
-# [MODIFIED] تحميل المتغيرات بدون قيم افتراضية خطيرة
 OKX_API_KEY = os.getenv('OKX_API_KEY')
 OKX_API_SECRET = os.getenv('OKX_API_SECRET')
 OKX_API_PASSPHRASE = os.getenv('OKX_API_PASSPHRASE')
@@ -57,12 +53,13 @@ DB_FILE = os.path.join(APP_ROOT, 'okx_mastermind_v5.db')
 SETTINGS_FILE = os.path.join(APP_ROOT, 'okx_mastermind_settings_v5.json')
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger("OKX_Mastermind_v5.3")
+logger = logging.getLogger("OKX_Mastermind_v5.5")
 
 class BotState:
     def __init__(self):
         self.exchange = None
         self.settings = {}
+        self.live_tickers = {} # <-- [تعديل] لتخزين الأسعار الحية
         self.last_signal_time = {}
         self.market_mood = {"mood": "UNKNOWN", "reason": "تحليل لم يتم بعد", "btc_mood": "UNKNOWN", "fng": "N/A", "news": "N/A"}
         self.scan_stats = {"last_start": None, "last_duration": "N/A", "markets_scanned": 0, "failures": 0}
@@ -101,7 +98,7 @@ PRESETS = {
 EDITABLE_PARAMS = {
     "إعدادات المخاطر": ["real_trade_size_usdt", "atr_sl_multiplier", "risk_reward_ratio"],
     "إعدادات الوقف المتحرك": ["trailing_sl_enabled", "trailing_sl_activation_percent", "trailing_sl_callback_percent"],
-    "إعدادات الفحص والمزاج": ["top_n_symbols_by_volume", "fear_and_greed_threshold", "market_mood_filter_enabled", "scan_interval_seconds"] # <--- أضفها هنا
+    "إعدادات الفحص والمزاج": ["top_n_symbols_by_volume", "fear_and_greed_threshold", "market_mood_filter_enabled", "scan_interval_seconds"]
 }
 PARAM_DISPLAY_NAMES = {
     "real_trade_size_usdt": "💵 حجم الصفقة ($)", "atr_sl_multiplier": "مضاعف وقف الخسارة (ATR)",
@@ -109,7 +106,7 @@ PARAM_DISPLAY_NAMES = {
     "trailing_sl_activation_percent": "تفعيل الوقف المتحرك (%)", "trailing_sl_callback_percent": "مسافة تتبع الوقف (%)",
     "top_n_symbols_by_volume": "عدد العملات للفحص", "fear_and_greed_threshold": "حد مؤشر الخوف",
     "market_mood_filter_enabled": "فلتر مزاج السوق",
-    "scan_interval_seconds": "⏱️ الفاصل الزمني للفحص (ثواني)" # <--- السطر الجديد
+    "scan_interval_seconds": "⏱️ الفاصل الزمني للفحص (ثواني)"
 }
 STRATEGIES_MAP = {
     "momentum_breakout": {"func_name": "analyze_momentum_breakout", "name": "زخم اختراقي"},
@@ -153,7 +150,6 @@ def save_settings():
     except Exception as e:
         logger.error(f"Failed to save settings: {e}")
 
-# [MODIFIED] Using aiosqlite for all DB operations
 async def init_database():
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
@@ -177,7 +173,6 @@ async def init_database():
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
 
-# [MODIFIED] Using aiosqlite
 async def log_trade_to_db(signal, order_receipt, algo_id):
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
@@ -249,6 +244,81 @@ async def get_market_mood():
     return {"mood": "POSITIVE", "reason": "وضع السوق مناسب", "btc_mood": btc_mood_text, "fng": fng_text, "news": news_mood_text}
 
 # =======================================================================================
+# --- 🌐 مدير الاتصال اللحظي (WebSocket Manager) v1.0 🌐 ---
+# =======================================================================================
+class WebSocketManager:
+    """
+    فئة مخصصة لإدارة الاتصال المستمر بـ OKX WebSocket،
+    والاشتراك في القنوات، ومعالجة البيانات اللحظية.
+    """
+    def __init__(self, bot_state):
+        self.ws_url = "wss://ws.okx.com:8443/ws/v5/public"
+        self.bot_state = bot_state  # لتحديث الحالة المشتركة
+        self.subscriptions = []
+        self.websocket = None
+        self.is_connected = asyncio.Event()
+
+    async def _send_subscription(self):
+        """يرسل طلبات الاشتراك عند الاتصال."""
+        if not self.subscriptions:
+            return
+        try:
+            message = json.dumps({"op": "subscribe", "args": self.subscriptions})
+            await self.websocket.send(message)
+            logger.info(f"📤 [WS] تم إرسال طلب الاشتراك: {self.subscriptions}")
+        except Exception as e:
+            logger.error(f"🔥 [WS] فشل إرسال الاشتراك: {e}")
+
+    async def _message_handler(self, message):
+        """يعالج الرسائل الواردة من الـ WebSocket."""
+        if message == 'ping':
+            await self.websocket.send('pong')
+            return
+
+        data = json.loads(message)
+
+        # تحديث بيانات الأسعار اللحظية
+        if 'data' in data and data.get('arg', {}).get('channel') == 'tickers':
+            for ticker_data in data['data']:
+                symbol = ticker_data['instId'].replace('-', '/')
+                # تخزين آخر سعر فقط لتسهيل الوصول إليه
+                self.bot_state.live_tickers[symbol] = float(ticker_data['last'])
+
+    async def run(self):
+        """الدالة الرئيسية التي تحافظ على الاتصال وإعادة الاتصال."""
+        while True:
+            try:
+                async with websockets.connect(self.ws_url) as websocket:
+                    self.websocket = websocket
+                    self.is_connected.set() # إعلام بأن الاتصال تم
+                    logger.info("✅ [WS] تم الاتصال بنجاح بـ OKX WebSocket.")
+                    
+                    # إعادة الاشتراك عند الاتصال
+                    await self._send_subscription()
+
+                    # حلقة استماع للرسائل
+                    async for message in websocket:
+                        await self._message_handler(message)
+
+            except (websockets.exceptions.ConnectionClosed, ConnectionRefusedError) as e:
+                logger.warning(f"⚠️ [WS] انقطع الاتصال: {e}. إعادة المحاولة بعد 5 ثوانٍ...")
+            except Exception as e:
+                logger.error(f"🔥 [WS] خطأ غير متوقع في الـ WebSocket: {e}", exc_info=True)
+            
+            self.is_connected.clear()
+            await asyncio.sleep(5)
+
+    def subscribe_to_tickers(self, symbols: list):
+        """للاشتراك في أسعار عملات محددة."""
+        for symbol in symbols:
+            # تحويل الصيغة من 'BTC/USDT' إلى 'BTC-USDT'
+            inst_id = symbol.replace('/', '-')
+            sub = {"channel": "tickers", "instId": inst_id}
+            if sub not in self.subscriptions:
+                self.subscriptions.append(sub)
+        logger.info(f"📝 [WS] تمت إضافة عملات جديدة للاشتراك: {symbols}")
+
+# =======================================================================================
 # --- 🧠 العقل: دوال التحليل والاستراتيجيات 🧠 ---
 # =======================================================================================
 def find_col(df_columns, prefix):
@@ -317,7 +387,6 @@ async def analyze_whale_radar(df, rvol, exchange, symbol):
 # =======================================================================================
 # --- المراقب الذكي: منطق الوقف المتحرك ---
 # =======================================================================================
-# [MODIFIED] Using aiosqlite
 async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
     settings = bot_state.settings
     if not settings.get('trailing_sl_enabled', False): return
@@ -337,6 +406,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
 
     for trade in active_trades:
         try:
+            # ملاحظة: في المستقبل، سنستبدل هذا السطر بالبيانات اللحظية من الـ WebSocket
             ticker = await exchange.fetch_ticker(trade['symbol'])
             current_price = ticker.get('last')
             if not current_price: continue
@@ -355,11 +425,8 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
             if new_sl and new_sl > trade['stop_loss']:
                 logger.info(f"{'ACTIVATING' if is_activation else 'UPDATING'} TSL for trade #{trade['id']}. New SL: {new_sl}")
                 
-                # This part is complex, assuming cancel_algos works this way with ccxt
                 await exchange.private_post_trade_cancel_algos([{'instId': exchange.market_id(trade['symbol']), 'algoId': trade['algo_id']}])
                 
-                # Re-placing an OCO is often done by creating a new one
-                # For simplicity, assuming a custom function exists or direct API call
                 new_algo_id = await exchange.create_order(
                     trade['symbol'], 'oco', 'sell', trade['quantity'], 
                     params={'tpTriggerPx': trade['take_profit'], 'slTriggerPx': new_sl}
@@ -387,7 +454,6 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
 # =======================================================================================
 # --- 🦾 جسد البوت: منطق التشغيل والفحص والتداول 🦾 ---
 # =======================================================================================
-# [MODIFIED] Passing `bot` object explicitly
 async def execute_atomic_trade(signal, bot: "telegram.Bot"):
     symbol, settings, exchange = signal['symbol'], bot_state.settings, bot_state.exchange
     logger.info(f"Executing ARMORED trade for {symbol}. Trade is now under full lifecycle management.")
@@ -397,14 +463,13 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
     algo_id = None
 
     try:
-        # --- STAGE 1: EXECUTE AND ROBUSTLY CONFIRM THE BUY ORDER ---
         quantity_to_buy = settings['real_trade_size_usdt'] / signal['entry_price']
         logger.info(f"Armored Stage 1: Placing Market Buy order for {quantity_to_buy:.6f} {symbol.split('/')[0]}")
         
         buy_order = await exchange.create_market_buy_order(symbol, quantity_to_buy)
         buy_order_id = buy_order['id']
 
-        max_retries = 24 # 60 seconds timeout
+        max_retries = 24
         for i in range(max_retries):
             await asyncio.sleep(2.5)
             exchange.nonce = exchange.milliseconds
@@ -420,7 +485,6 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
         if not verified_order:
             raise Exception(f"Buy order confirmation failed after {max_retries} retries. Manual check required for order ID {buy_order_id}.")
 
-        # --- STAGE 2: PLACE OCO PROTECTION WITH EXTREME PERSISTENCE ---
         avg_price = verified_order.get('average', signal['entry_price'])
         filled_qty = verified_order.get('filled', 0)
         
@@ -438,7 +502,7 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
             'slTriggerPx': exchange.price_to_precision(symbol, final_sl), 'slOrdPx': '-1'
         }
         
-        max_oco_retries = 6  # Try up to 6 times <<--- MODIFIED
+        max_oco_retries = 6
         for attempt in range(max_oco_retries):
             logger.info(f"Armored Stage 2: Placing OCO protection (Attempt {attempt + 1}/{max_oco_retries})...")
             oco_receipt = await exchange.private_post_trade_order_algo(oco_params)
@@ -451,7 +515,7 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
             elif oco_receipt and oco_receipt.get('data') and oco_receipt['data'][0].get('sCode') == '51008':
                 logger.warning(f"OCO failed with Insufficient Funds (51008), retrying in 10s... (Attempt {attempt + 1})")
                 if attempt < max_oco_retries - 1:
-                    await asyncio.sleep(10) # Wait 10 seconds between retries <<--- MODIFIED
+                    await asyncio.sleep(10)
                 continue
             else:
                 raise ccxt.ExchangeError(f"Failed to place OCO with an unexpected error: {json.dumps(oco_receipt)}")
@@ -459,7 +523,6 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
         if not algo_id:
             raise Exception("Failed to place OCO protection after multiple retries. The position is UNPROTECTED.")
 
-        # --- STAGE 3: LOGGING AND SUCCESS NOTIFICATION ---
         signal['final_tp'] = final_tp
         signal['final_sl'] = final_sl
         trade_id = await log_trade_to_db(signal, verified_order, algo_id)
@@ -514,8 +577,6 @@ async def worker(queue, signals_list, failure_counter):
                 continue
             
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            
-            # This is the fix for the VWAP warning, now correctly indented
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             df.set_index('timestamp', inplace=True)
 
@@ -622,7 +683,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         worker_tasks = [asyncio.create_task(worker(queue, signals_found, failure_counter)) for _ in range(10)]
         await queue.join()
         for task in worker_tasks: task.cancel()
-        await asyncio.gather(*worker_tasks, return_exceptions=True) # Wait for cancellation
+        await asyncio.gather(*worker_tasks, return_exceptions=True)
         
         bot_state.scan_stats['failures'] = failure_counter[0]
         duration = (datetime.now(EGYPT_TZ) - bot_state.scan_stats['last_start']).total_seconds()
@@ -643,21 +704,22 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
             for signal in signals_found:
                 if time.time() - bot_state.last_signal_time.get(signal['symbol'], 0) < settings['scan_interval_seconds'] * 2.5: continue
                 bot_state.last_signal_time[signal['symbol']] = time.time()
-                await execute_atomic_trade(signal, bot) # [MODIFIED] Passing bot
+                await execute_atomic_trade(signal, bot)
                 new_trades += 1
-                await asyncio.sleep(10) # Stagger trades
+                await asyncio.sleep(10)
         else:
             logger.info("--- Scan complete. No new signals found. ---")
         
         scan_summary += f"- **✅ صفقات جديدة فُتحت:** {new_trades}\n"
         scan_summary += f"- **⚠️ أخطاء في التحليل:** {bot_state.scan_stats['failures']}"
         await bot.send_message(TELEGRAM_CHAT_ID, scan_summary, parse_mode=ParseMode.MARKDOWN)
+
 # =======================================================================================
 # --- 📱 واجهة التحكم عبر تليجرام (النسخة الكاملة) 📱 ---
 # =======================================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"]]
-    await update.message.reply_text("أهلاً بك في بوت OKX القناص v5.3 (The Mastermind - Hardened)", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True))
+    await update.message.reply_text("أهلاً بك في بوت OKX القناص v5.5 (Mastermind - WS Integrated)", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True))
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -721,7 +783,6 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     keyboard.append([InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="back_to_settings")])
     await update.message.reply_text("⚙️ *الإعدادات المتقدمة*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
 
-# [MODIFIED] Using aiosqlite for all dashboard queries
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -783,11 +844,12 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 async with aiosqlite.connect(DB_FILE) as conn:
                     total_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades")).fetchone())[0]
                     active_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")).fetchone())[0]
-                report = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v5.3)**\n",
+                report = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v5.5)**\n",
                           f"--- **📊 حالة السوق الحالية** ---\n- **المزاج العام:** {mood['mood']} ({escape_markdown(mood['reason'])})\n- **مؤشر BTC:** {mood['btc_mood']}\n- **الخوف والطمع:** {mood['fng']}\n",
                           f"--- **🔬 أداء آخر فحص** ---\n- **وقت البدء:** {scan['last_start'].strftime('%Y-%m-%d %H:%M') if scan['last_start'] else 'N/A'}\n- **المدة:** {scan['last_duration']}\n- **العملات المفحوصة:** {scan['markets_scanned']}\n- **فشل في تحليل:** {scan['failures']} عملات\n",
                           f"--- **🔧 الإعدادات النشطة** ---\n- **النمط الحالي:** {settings['active_preset']}\n- **الماسحات المفعلة:** {escape_markdown(', '.join(settings['active_scanners']))}\n",
-                          f"--- **🔩 حالة العمليات الداخلية** ---\n- **قاعدة البيانات:** متصلة ✅ ({total_trades} صفقة / {active_trades} نشطة)"]
+                          f"--- **🔩 حالة العمليات الداخلية** ---\n- **قاعدة البيانات:** متصلة ✅ ({total_trades} صفقة / {active_trades} نشطة)\n"
+                          f"- **الاتصال اللحظي (WS):** {'متصل ✅' if bot_state.ws_manager and bot_state.ws_manager.is_connected.is_set() else 'غير متصل ❌'}"]
                 await query.message.reply_text("\n".join(report), parse_mode=ParseMode.MARKDOWN)
 
         elif data.startswith("toggle_scanner_"):
@@ -830,14 +892,12 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         except:
             pass
 
-
-# =# =======================================================================================
+# =======================================================================================
 # --- 🚀 نقطة انطلاق البوت (بنية جديدة ومستقرة) 🚀 ---
 # =======================================================================================
 async def main():
     """الدالة الرئيسية الجديدة التي تبدأ وتدير البوت بشكل مستقر."""
     
-    # 1. التحقق من وجود المتغيرات الأساسية
     required_vars = {
         'OKX_API_KEY': OKX_API_KEY, 'OKX_API_SECRET': OKX_API_SECRET, 
         'OKX_API_PASSPHRASE': OKX_API_PASSPHRASE, 'TELEGRAM_BOT_TOKEN': TELEGRAM_BOT_TOKEN, 
@@ -848,15 +908,18 @@ async def main():
         logger.critical(f"FATAL: The following environment variables are not set: {', '.join(missing)}. Exiting.")
         return
 
-    # 2. تحميل الإعدادات وتهيئة قاعدة البيانات
     load_settings()
     await init_database()
     
-    # 3. بناء كائن التطبيق (البوت)
+    # --- [تعديل] إنشاء وتشغيل مدير الـ WebSocket في الخلفية ---
+    ws_manager = WebSocketManager(bot_state)
+    bot_state.ws_manager = ws_manager # لتسهيل الوصول إليه لاحقاً
+    ws_manager.subscribe_to_tickers(['BTC/USDT', 'ETH/USDT']) 
+    ws_task = asyncio.create_task(ws_manager.run())
+    logger.info("🚀 [WS] تم تشغيل مدير الاتصال اللحظي في الخلفية.")
+
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # --- دمج منطق post_init هنا مباشرة ---
-    # 4. تهيئة الاتصال بالمنصة وتطبيق الـ Patch
     bot_state.exchange = ccxt.okx({
         'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 
         'password': OKX_API_PASSPHRASE, 'enableRateLimit': True, 
@@ -876,7 +939,6 @@ async def main():
     bot_state.exchange.request = types.MethodType(patched_request, bot_state.exchange)
     logger.info("Applied async-safe monkey-patch for OKX.")
 
-    # 5. اختبار الاتصال بالمنصة
     try:
         ticker = await bot_state.exchange.fetch_ticker('BTC/USDT')
         _ = await bot_state.exchange.fetch_balance()
@@ -888,41 +950,36 @@ async def main():
         except Exception as tg_e:
             logger.warning(f"Could not send startup failure message to Telegram: {tg_e}")
         await bot_state.exchange.close()
+        ws_task.cancel() # إيقاف مهمة الـ WS عند الفشل
         return
 
-    # 6. إضافة المعالجات (Handlers)
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^[+-]?\d*\.?\d+$'), text_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, input_handler))
     app.add_handler(CallbackQueryHandler(button_callback_handler))
 
-    # 7. جدولة المهام المتكررة
     scan_interval = bot_state.settings.get("scan_interval_seconds", 900)
     track_interval = bot_state.settings.get("track_interval_seconds", 60)
     app.job_queue.run_repeating(perform_scan, interval=scan_interval, first=10, name="perform_scan")
     app.job_queue.run_repeating(track_open_trades, interval=track_interval, first=30, name="track_trades")
     logger.info(f"Jobs scheduled: Scan every {scan_interval}s, Tracker every {track_interval}s.")
     
-    # 8. تشغيل البوت بطريقة مستقرة (غير حاجزة)
     try:
-        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت OKX The Mastermind v5.3 بدأ 🚀العمل (بنية قوية و مستقرة)...*", parse_mode=ParseMode.MARKDOWN)
+        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت OKX The Mastermind v5.5 بدأ العمل (بقلب WebSocket نابض)...*", parse_mode=ParseMode.MARKDOWN)
         
-        # استخدام async with يضمن الإغلاق الآمن للتطبيق
         async with app:
             await app.start()
             await app.updater.start_polling()
             logger.info("Bot is now running and polling for updates...")
             
-            # حلقة لا نهائية لإبقاء البرنامج يعمل
-            while True:
-                await asyncio.sleep(3600) # يمكن أن تكون أي مدة طويلة
+            await asyncio.gather(ws_task) # تأكد من أن مهمة الـ WS تعمل مع البوت
                 
     except (KeyboardInterrupt, SystemExit):
         logger.info("Bot shutting down gracefully...")
     except Exception as e:
         logger.critical(f"An unhandled error occurred in main loop: {e}", exc_info=True)
     finally:
-        # الإغلاق الآمن عند الخروج
+        ws_task.cancel()
         if app.updater and app.updater.is_running:
             await app.updater.stop()
         if app.running:
@@ -937,3 +994,4 @@ if __name__ == '__main__':
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped by user.")
+
