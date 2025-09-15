@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 بوت OKX القناص v5.3 (The Mastermind - Stable) - النسخة النهائية المتكاملة 🚀 ---
+# --- 🚀 بوت OKX القناص v5.2 (The Mastermind - Patched) - النسخة النهائية المتكاملة 🚀 ---
 # =======================================================================================
 # هذا الإصدار هو إصدار تصحيحي شامل بناءً على الملاحظات الحية:
-# - [إصلاح حاسم] إصلاح الخطأ البرمجي (AttributeError) الذي كان يمنع بدء تشغيل البوت.
-# - [إكمال الميزات] برمجة زر "تقرير أداء الاستراتيجيات" و "تقرير التشخيص" ليعملا بشكل كامل ومستقر.
-# - [إضافة] إضافة "حالة اتصال المنصة" إلى تقرير التشخيص.
+# - [إصلاح حاسم] إصلاح الخطأ البرمجي (TypeError) الذي كان يمنع بدء عملية الفحص.
+# - [إكمال الميزات] برمجة زر "تقرير أداء الاستراتيجيات" ليعمل بشكل كامل.
+# - [إعادة ميزة] إضافة زر "تقرير التشخيص" إلى لوحة التحكم مع كامل وظائفه.
 # - [تحسينات] مراجعة شاملة للكود لضمان الاستقرار والموثوقية.
 #
 # للتثبيت: pip install "ccxt[async]" pandas pandas-ta python-telegram-bot httpx feedparser nltk
@@ -123,15 +123,13 @@ STRATEGIES_MAP = {
 # =======================================================================================
 def escape_markdown(text: str) -> str:
     """Helper function to escape telegram markdown symbols."""
-    if not isinstance(text, str):
-        text = str(text)
     escape_chars = r"_*[]()~`>#+-=|{}.!"
     return re.sub(f"([{re.escape(escape_chars)}])", r"\\\1", text)
 
 def load_settings():
     try:
         if os.path.exists(SETTINGS_FILE):
-            with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
+            with open(SETTINGS_FILE, 'r') as f:
                 bot_state.settings = json.load(f)
         else:
             bot_state.settings = DEFAULT_SETTINGS.copy()
@@ -150,8 +148,8 @@ def load_settings():
 
 def save_settings():
     try:
-        with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(bot_state.settings, f, indent=4, ensure_ascii=False)
+        with open(SETTINGS_FILE, 'w') as f:
+            json.dump(bot_state.settings, f, indent=4)
     except Exception as e:
         logger.error(f"Failed to save settings: {e}")
 
@@ -548,7 +546,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
 # =======================================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"]]
-    await update.message.reply_text("أهلاً بك في بوت OKX القناص v5.3 (The Mastermind)", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True))
+    await update.message.reply_text("أهلاً بك في بوت OKX القناص v5.2 (The Mastermind)", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True))
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -644,31 +642,28 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 stats = defaultdict(lambda: {'wins': 0, 'losses': 0, 'pnl': 0.0})
                 for reason, status, pnl_val in trades:
                     if not reason or not status: continue
-                    reasons = reason.split(' + ')
-                    for r in reasons:
-                        s = stats[r.strip()]
-                        if status.startswith('ناجحة'): s['wins'] += 1
-                        else: s['losses'] += 1
-                        if pnl_val: s['pnl'] += pnl_val / len(reasons)
+                    s = stats[reason]
+                    if status.startswith('ناجحة'): s['wins'] += 1
+                    else: s['losses'] += 1
+                    if pnl_val: s['pnl'] += pnl_val
                 report = ["**📜 تقرير أداء الاستراتيجيات**"]
                 for r, s in stats.items():
                     total = s['wins'] + s['losses']
                     wr = (s['wins'] / total * 100) if total > 0 else 0
-                    report.append(f"\n--- *{escape_markdown(r)}* ---\n  - الصفقات: {total} ({s['wins']}✅ / {s['losses']}❌)\n  - النجاح: {wr:.2f}%\n  - صافي الربح: ${s['pnl']:+.2f}")
+                    report.append(f"\n--- *{r}* ---\n  - الصفقات: {total} ({s['wins']}✅ / {s['losses']}❌)\n  - النجاح: {wr:.2f}%\n  - صافي الربح: ${s['pnl']:+.2f}")
                 await query.message.reply_text("\n".join(report), parse_mode=ParseMode.MARKDOWN)
             elif report_type == "mood":
                 mood = bot_state.market_mood
-                await query.message.reply_text(f"*🌡️ حالة مزاج السوق*\n- **النتيجة:** {mood['mood']}\n- **السبب:** {escape_markdown(mood['reason'])}\n- **مؤشر BTC:** {mood['btc_mood']}\n- **الخوف والطمع:** {mood['fng']}\n- **الأخبار:** {escape_markdown(mood['news'])}", parse_mode=ParseMode.MARKDOWN)
+                await query.message.reply_text(f"*🌡️ حالة مزاج السوق*\n- **النتيجة:** {mood['mood']}\n- **السبب:** {mood['reason']}\n- **مؤشر BTC:** {mood['btc_mood']}\n- **الخوف والطمع:** {mood['fng']}\n- **الأخبار:** {mood['news']}", parse_mode=ParseMode.MARKDOWN)
             elif report_type == "diagnostics":
                 mood, scan, settings = bot_state.market_mood, bot_state.scan_stats, bot_state.settings
                 with sqlite3.connect(DB_FILE) as conn:
                     total_trades, active_trades = conn.cursor().execute("SELECT COUNT(*) FROM trades").fetchone()[0], conn.cursor().execute("SELECT COUNT(*) FROM trades WHERE status = 'active'").fetchone()[0]
-                conn_status = "متصل ✅" if bot_state.exchange and bot_state.exchange.check_required_credentials() else "غير متصل ❌"
                 report = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v5.2)**\n",
                           f"--- **📊 حالة السوق الحالية** ---\n- **المزاج العام:** {mood['mood']} ({escape_markdown(mood['reason'])})\n- **مؤشر BTC:** {mood['btc_mood']}\n- **الخوف والطمع:** {mood['fng']}\n",
                           f"--- **🔬 أداء آخر فحص** ---\n- **وقت البدء:** {scan['last_start']}\n- **المدة:** {scan['last_duration']}\n- **العملات المفحوصة:** {scan['markets_scanned']}\n- **فشل في تحليل:** {scan['failures']} عملات\n",
                           f"--- **🔧 الإعدادات النشطة** ---\n- **النمط الحالي:** {settings['active_preset']}\n- **الماسحات المفعلة:** {escape_markdown(', '.join(settings['active_scanners']))}\n",
-                          f"--- **🔩 حالة العمليات الداخلية** ---\n- **اتصال المنصة:** {conn_status}\n- **قاعدة البيانات:** متصلة ✅ ({total_trades} صفقة / {active_trades} نشطة)"]
+                          f"--- **🔩 حالة العمليات الداخلية** ---\n- **قاعدة البيانات:** متصلة ✅ ({total_trades} صفقة / {active_trades} نشطة)"]
                 await query.message.reply_text("\n".join(report), parse_mode=ParseMode.MARKDOWN)
 
         elif data.startswith("toggle_scanner_"):
@@ -709,6 +704,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         logger.error(f"General error in button handler: {e}", exc_info=True)
         await query.message.reply_text("حدث خطأ غير متوقع.")
 
+
 # =======================================================================================
 # --- 🚀 نقطة انطلاق البوت 🚀 ---
 # =======================================================================================
@@ -719,39 +715,36 @@ async def post_init(app: Application):
     if NLTK_AVAILABLE:
         try: nltk.data.find('sentiment/vader_lexicon.zip')
         except LookupError: logger.info("Downloading NLTK data..."); nltk.download('vader_lexicon')
-    logger.info("🚀 Starting OKX Mastermind v5.3 (Stable)...")
+    logger.info("🚀 Starting OKX Mastermind v5.2 (Patched)...")
     if 'YOUR_OKX_API_KEY' in OKX_API_KEY or 'YOUR_BOT_TOKEN' in TELEGRAM_BOT_TOKEN:
         logger.critical("FATAL: API keys or Bot Token are not set."); return
 
-    # [FIX v5.3] The correct, stable way to monkey-patch ccxt
-    original_fetch2 = ccxt.base.exchange.Exchange.fetch2
-    def patched_fetch2(self, path, api='public', method='GET', params=None, headers=None, body=None, config=None, context=None):
+    # [FIX v5.2] The correct, safe way to monkey-patch ccxt
+    original_request = ccxt.okx.request
+    def patched_request(self, path, api='public', method='GET', params={}, headers=None, body=None, config={}):
         params = params or {}
-        if self.id == 'okx':
-            if (path == 'trade/order-algo') or (path == 'trade/order' and 'attachAlgoOrds' in params):
-                if params.get("side") == "sell":
-                    params.pop("tgtCcy", None)
-        return original_fetch2(self, path, api, method, params, headers, body, config)
-
-    ccxt.base.exchange.Exchange.fetch2 = patched_fetch2
-    logger.info("Applied STABLE global monkey-patch for CCXT.")
+        if (path == 'trade/order-algo') or (path == 'trade/order' and 'attachAlgoOrds' in params):
+            if params.get("side") == "sell":
+                params.pop("tgtCcy", None)
+        return original_request(self, path, api, method, params, headers, body, config)
     
     bot_state.exchange = ccxt.okx({'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 'password': OKX_API_PASSPHRASE, 'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
+    bot_state.exchange.request = types.MethodType(patched_request, bot_state.exchange)
+    logger.info("Applied STABLE monkey-patch to fix OKX 'tgtCcy' parameter issue.")
     
     scan_interval = bot_state.settings.get("scan_interval_seconds", 900)
     track_interval = bot_state.settings.get("track_interval_seconds", 60)
     app.job_queue.run_repeating(perform_scan, interval=scan_interval, first=10, name="perform_scan")
     app.job_queue.run_repeating(track_open_trades, interval=track_interval, first=30, name="track_trades")
     logger.info(f"Scan job every {scan_interval}s. Tracker job every {track_interval}s.")
-    await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت OKX The Mastermind v5.3 بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+    await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت OKX The Mastermind v5.2 بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
 
 def main():
     load_settings()
     init_database()
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start_command))
-    # Regex updated to better handle various inputs and avoid conflicts
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^[+-]?(\d*\.\d+|\d+\.?\d*)([eE][+-]?\d+)?$'), text_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^[+-]?\d*\.?\d+$'), text_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, input_handler))
     app.add_handler(CallbackQueryHandler(button_callback_handler))
     app.run_polling()
