@@ -39,6 +39,17 @@ from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 from telegram.error import BadRequest, Forbidden
 
+# --- المكتبات المطلوبة ---
+import ccxt.async_support as ccxt
+# ... باقي الـ imports
+
+from dotenv import load_dotenv
+load_dotenv()
+
+# --- ⚙️ الإعدادات الأساسية ⚙️ ---
+OKX_API_KEY = os.getenv('OKX_API_KEY')
+# ... باقي الكود
+
 # =======================================================================================
 # --- ⚙️ الإعدادات الأساسية ⚙️ ---
 # =======================================================================================
