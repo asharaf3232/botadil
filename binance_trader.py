@@ -71,9 +71,207 @@ bot_state = BotState()
 scan_lock = asyncio.Lock()
 
 # =======================================================================================
+# --- UI Constants ---
+# =======================================================================================
+DEFAULT_SETTINGS = {
+    "active_preset": "PRO", "real_trade_size_usdt": 15.0, "top_n_symbols_by_volume": 200,
+    "atr_sl_multiplier": 2.5, "risk_reward_ratio": 2.0,
+    "active_scanners": ["momentum_breakout", "breakout_squeeze_pro", "support_rebound", "whale_radar", "sniper_pro"],
+    "market_mood_filter_enabled": True, "fear_and_greed_threshold": 30,
+    "liquidity_filters": {"min_quote_volume_24h_usd": 5000000, "max_spread_percent": 0.5, "min_rvol": 1.5},
+    "volatility_filters": {"min_atr_percent": 0.8}, "trend_filters": {"ema_period": 200, "htf_period": 50},
+    "min_tp_sl_filter": {"min_tp_percent": 1.0, "min_sl_percent": 0.5},
+    "scan_interval_seconds": 900, "track_interval_seconds": 60, "trailing_sl_enabled": True,
+    "trailing_sl_activation_percent": 1.5, "trailing_sl_callback_percent": 1.0
+}
+PRESETS = {
+    "PRO": {"liquidity_filters": {"min_quote_volume_24h_usd": 5000000, "min_rvol": 1.5}, "volatility_filters": {"min_atr_percent": 0.8}, "name": "🚦 احترافية (سيولة عالية)"},
+    "STRICT": {"liquidity_filters": {"min_quote_volume_24h_usd": 10000000, "min_rvol": 2.2}, "volatility_filters": {"min_atr_percent": 1.4}, "name": "🎯 متشددة (سيولة فائقة)"},
+    "LAX": {"liquidity_filters": {"min_quote_volume_24h_usd": 2000000, "min_rvol": 1.1}, "volatility_filters": {"min_atr_percent": 0.4}, "name": "🌙 متساهلة (سيولة متوسطة)"},
+    "VERY_LAX": {"liquidity_filters": {"min_quote_volume_24h_usd": 1000000, "min_rvol": 0.8}, "volatility_filters": {"min_atr_percent": 0.2}, "name": "⚠️ فائق التساهل (تجريبي)"}
+}
+EDITABLE_PARAMS = {
+    "إعدادات المخاطر": ["real_trade_size_usdt", "atr_sl_multiplier", "risk_reward_ratio"],
+    "إعدادات الوقف المتحرك": ["trailing_sl_enabled", "trailing_sl_activation_percent", "trailing_sl_callback_percent"],
+    "إعدادات الفحص والسيولة": ["top_n_symbols_by_volume", "fear_and_greed_threshold", "market_mood_filter_enabled", "scan_interval_seconds", "min_quote_volume_24h_usd"]
+}
+PARAM_DISPLAY_NAMES = {
+    "real_trade_size_usdt": "💵 حجم الصفقة ($)", "atr_sl_multiplier": "مضاعف وقف الخسارة (ATR)",
+    "risk_reward_ratio": "نسبة المخاطرة/العائد", "trailing_sl_enabled": "⚙️ تفعيل الوقف المتحرك",
+    "trailing_sl_activation_percent": "تفعيل الوقف المتحرك (%)", "trailing_sl_callback_percent": "مسافة تتبع الوقف (%)",
+    "top_n_symbols_by_volume": "عدد العملات للفحص", "fear_and_greed_threshold": "حد مؤشر الخوف",
+    "market_mood_filter_enabled": "فلتر مزاج السوق", "scan_interval_seconds": "⏱️ الفاصل الزمني للفحص (ثواني)",
+    "min_quote_volume_24h_usd": "حد السيولة الأدنى ($)"
+}
+STRATEGIES_MAP = {
+    "momentum_breakout": {"func_name": "analyze_momentum_breakout", "name": "زخم اختراقي"},
+    "breakout_squeeze_pro": {"func_name": "analyze_breakout_squeeze_pro", "name": "اختراق انضغاطي"},
+    "support_rebound": {"func_name": "analyze_support_rebound", "name": "ارتداد الدعم"},
+    "sniper_pro": {"func_name": "analyze_sniper_pro", "name": "القناص المحترف"},
+    "whale_radar": {"func_name": "analyze_whale_radar", "name": "رادار الحيتان"},
+}
+
+# =======================================================================================
+# --- 🛠️ Helper Functions (Defined before use) 🛠️ ---
+# =======================================================================================
+async def ensure_libraries_loaded():
+    global pd, ta, ccxt
+    if pd is None: logger.info("تحميل مكتبة pandas لأول مرة..."); import pandas as pd_lib; pd = pd_lib
+    if ta is None: logger.info("تحميل مكتبة pandas-ta لأول مرة..."); import pandas_ta as ta_lib; ta = ta_lib
+    if ccxt is None: logger.info("تحميل مكتبة ccxt لأول مرة..."); import ccxt.async_support as ccxt_lib; ccxt = ccxt_lib
+
+def escape_markdown(text: str) -> str:
+    if not isinstance(text, str): text = str(text)
+    escape_chars = r"_*[]()~`>#+-=|{}.!"
+    return re.sub(f"([{re.escape(escape_chars)}])", r"\\\1", text)
+
+def create_safe_task(coro):
+    async def task_wrapper():
+        try:
+            await coro
+        except Exception as e:
+            logger.critical(f"Unhandled exception in background task '{coro.__name__}': {e}", exc_info=True)
+    asyncio.create_task(task_wrapper())
+
+def load_settings():
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, 'r') as f: bot_state.settings = json.load(f)
+        else: bot_state.settings = DEFAULT_SETTINGS.copy()
+        for key, default_value in DEFAULT_SETTINGS.items():
+            if key not in bot_state.settings:
+                bot_state.settings[key] = default_value
+            elif isinstance(default_value, dict):
+                for sub_key, sub_default_value in default_value.items():
+                    if sub_key not in bot_state.settings.get(key, {}):
+                        bot_state.settings[key][sub_key] = sub_default_value
+        save_settings()
+        logger.info("Settings loaded successfully.")
+    except Exception as e:
+        logger.error(f"Failed to load settings: {e}")
+        bot_state.settings = DEFAULT_SETTINGS.copy()
+
+def save_settings():
+    try:
+        with open(SETTINGS_FILE, 'w') as f: json.dump(bot_state.settings, f, indent=4)
+    except Exception as e: logger.error(f"Failed to save settings: {e}")
+
+async def init_database():
+    try:
+        async with aiosqlite.connect(DB_FILE) as conn:
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, symbol TEXT NOT NULL,
+                    entry_price REAL, take_profit REAL, stop_loss REAL, quantity REAL, entry_value_usdt REAL,
+                    status TEXT DEFAULT 'active', exit_price REAL, closed_at TEXT, pnl_usdt REAL,
+                    reason TEXT, order_id TEXT, algo_id TEXT,
+                    highest_price REAL, trailing_sl_active BOOLEAN DEFAULT 0
+                )''')
+            await conn.commit()
+        logger.info(f"Database initialized/verified at: {DB_FILE}")
+    except Exception as e: logger.error(f"Failed to initialize database: {e}")
+
+async def get_fear_and_greed_index():
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get("https://api.alternative.me/fng/?limit=1", timeout=10)
+            return int(r.json()['data'][0]['value'])
+    except Exception: return None
+
+async def get_market_mood():
+    await ensure_libraries_loaded()
+    try:
+        exchange = bot_state.exchange
+        htf_period = bot_state.settings['trend_filters']['htf_period']
+        ohlcv = await exchange.fetch_ohlcv('BTC/USDT', '4h', limit=htf_period + 5)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['sma'] = ta.sma(df['close'], length=htf_period)
+        is_btc_bullish = df['close'].iloc[-1] > df['sma'].iloc[-1]
+        btc_mood_text = "إيجابي ✅" if is_btc_bullish else "سلبي ❌"
+        if not is_btc_bullish:
+            return {"mood": "NEGATIVE", "reason": "اتجاه BTC هابط (تحت متوسط 50 على 4 ساعات)", "btc_mood": btc_mood_text, "fng": "N/A"}
+    except Exception as e:
+        logger.warning(f"Could not fetch BTC trend: {e}")
+        return {"mood": "DANGEROUS", "reason": "فشل جلب بيانات BTC", "btc_mood": "UNKNOWN", "fng": "N/A"}
+    
+    fng = await get_fear_and_greed_index()
+    fng_text = str(fng) if fng is not None else "N/A"
+    if fng is not None and fng < bot_state.settings['fear_and_greed_threshold']:
+        return {"mood": "NEGATIVE", "reason": f"مشاعر خوف شديد (مؤشر F&G: {fng})", "btc_mood": btc_mood_text, "fng": fng_text}
+        
+    return {"mood": "POSITIVE", "reason": "وضع السوق مناسب", "btc_mood": btc_mood_text, "fng": fng_text}
+
+# =======================================================================================
+# --- 🔬 Analysis Functions 🔬 ---
+# =======================================================================================
+def find_col(df_columns, prefix):
+    try: return next(col for col in df_columns if col.startswith(prefix))
+    except StopIteration: return None
+def analyze_momentum_breakout(df, rvol):
+    df.ta.vwap(append=True); df.ta.bbands(length=20, std=2.0, append=True); df.ta.macd(fast=12, slow=26, signal=9, append=True); df.ta.rsi(length=14, append=True)
+    last, prev = df.iloc[-2], df.iloc[-3]
+    macd_col, macds_col, bbu_col, rsi_col = find_col(df.columns, "MACD_"), find_col(df.columns, "MACDs_"), find_col(df.columns, "BBU_"), find_col(df.columns, "RSI_")
+    if not all([macd_col, macds_col, bbu_col, rsi_col]): return None
+    if (prev[macd_col] <= prev[macds_col] and last[macd_col] > last[macds_col] and last['close'] > last[bbu_col] and last['close'] > last["VWAP_D"] and last[rsi_col] < 68):
+        return {"reason": STRATEGIES_MAP['momentum_breakout']['name'], "type": "long"}
+    return None
+def analyze_breakout_squeeze_pro(df, rvol):
+    df.ta.bbands(length=20, std=2.0, append=True); df.ta.kc(length=20, scalar=1.5, append=True); df.ta.obv(append=True)
+    bbu_col, bbl_col, kcu_col, kcl_col = find_col(df.columns, "BBU_20"), find_col(df.columns, "BBL_20"), find_col(df.columns, "KCUe_20"), find_col(df.columns, "KCLEe_20")
+    if not all([bbu_col, bbl_col, kcu_col, kcl_col]): return None
+    last, prev = df.iloc[-2], df.iloc[-3]
+    is_in_squeeze = prev[bbl_col] > prev[kcl_col] and prev[bbu_col] < prev[kcu_col]
+    if is_in_squeeze:
+        breakout_fired = last['close'] > last[bbu_col]
+        volume_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-2] * 1.5
+        obv_rising = df['OBV'].iloc[-2] > df['OBV'].iloc[-3]
+        if breakout_fired and volume_ok and obv_rising: return {"reason": STRATEGIES_MAP['breakout_squeeze_pro']['name'], "type": "long"}
+    return None
+async def analyze_support_rebound(df, rvol, exchange, symbol):
+    try:
+        ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', limit=100)
+        if not ohlcv_1h or len(ohlcv_1h) < 50: return None
+        df_1h = pd.DataFrame(ohlcv_1h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        current_price = df_1h['close'].iloc[-1]
+        recent_lows = df_1h['low'].rolling(window=10, center=True).min()
+        supports = recent_lows[recent_lows.notna()]
+        closest_support = max([s for s in supports if s < current_price], default=None)
+        if not closest_support: return None
+        if (current_price - closest_support) / closest_support * 100 < 1.0:
+            last_candle_15m = df.iloc[-2]
+            avg_volume_15m = df['volume'].rolling(window=20).mean().iloc[-2]
+            if last_candle_15m['close'] > last_candle_15m['open'] and last_candle_15m['volume'] > avg_volume_15m * 1.5:
+                return {"reason": STRATEGIES_MAP['support_rebound']['name'], "type": "long"}
+    except Exception: return None
+    return None
+def analyze_sniper_pro(df, rvol):
+    try:
+        compression_candles = int(6 * 4)
+        if len(df) < compression_candles + 2: return None
+        compression_df = df.iloc[-compression_candles-1:-1]
+        highest_high, lowest_low = compression_df['high'].max(), compression_df['low'].min()
+        volatility = (highest_high - lowest_low) / lowest_low * 100 if lowest_low > 0 else float('inf')
+        if volatility < 12.0:
+            last_candle = df.iloc[-2]
+            if last_candle['close'] > highest_high and last_candle['volume'] > compression_df['volume'].mean() * 2:
+                return {"reason": STRATEGIES_MAP['sniper_pro']['name'], "type": "long"}
+    except Exception: return None
+    return None
+async def analyze_whale_radar(df, rvol, exchange, symbol):
+    try:
+        ob = await exchange.fetch_order_book(symbol, limit=20)
+        if not ob or not ob.get('bids'): return None
+        total_bid_value = sum(float(price) * float(qty) for price, qty in ob['bids'][:10])
+        if total_bid_value > 30000:
+            return {"reason": STRATEGIES_MAP['whale_radar']['name'], "type": "long"}
+    except Exception: return None
+    return None
+
+# =======================================================================================
 # --- 🎻 The Symphony Conductor: TradeManager 🎻 ---
 # =======================================================================================
 class TradeManager:
+    # ... (Class definition as before) ...
     def __init__(self, exchange, bot):
         self.exchange = exchange
         self.bot = bot
@@ -434,7 +632,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
 # --- Telegram UI Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"]]
-    await update.message.reply_text("أهلاً بك في بوت OKX القناص v10.0 (The Symphony)", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True))
+    await update.message.reply_text("أهلاً بك في بوت OKX القناص v11.0 (The Final Blueprint)", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True))
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -553,7 +751,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 if bot_state.trade_manager: active_trades_count = len([t for t in bot_state.trade_manager.active_trades.values() if t['status'] in ['active', 'pending_protection']])
                 ws_status = 'متصل ✅' if bot_state.ws_manager and bot_state.ws_manager.is_connected() else 'غير متصل ❌'
                 scanners_text = escape_markdown(', '.join(settings.get('active_scanners',[])))
-                report = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v10.0)**\n",
+                report = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v11.0)**\n",
                           f"--- **📊 حالة السوق الحالية** ---\n- **المزاج العام:** {mood['mood']} ({escape_markdown(mood['reason'])})\n- **مؤشر BTC:** {mood.get('btc_mood', 'N/A')}\n",
                           f"--- **🔬 أداء آخر فحص** ---\n- **وقت البدء:** {scan.get('last_start', 'N/A')}\n",
                           f"--- **🔧 الإعدادات النشطة** ---\n- **النمط الحالي:** {settings.get('active_preset', 'N/A')}\n- **الماسحات المفعلة:** {scanners_text}\n",
@@ -590,14 +788,24 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             if query.message: await query.message.delete()
     except Exception as e: logger.error(f"Error in button handler: {e}", exc_info=True)
 
+async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
+    if bot_state.trade_manager:
+        await bot_state.trade_manager.track_all_trades(bot_state.settings)
+
+# =======================================================================================
+# --- 🚀 Main Application Entry Point 🚀 ---
+# =======================================================================================
 async def main():
     logger.info("--- Bot process starting ---")
     if not all([OKX_API_KEY, OKX_API_SECRET, OKX_API_PASSPHRASE, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
         logger.critical("FATAL: Environment variables not set. Exiting."); return
+    
     load_settings()
     await init_database()
+    
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     bot_state.application = app
+    
     await ensure_libraries_loaded()
     
     bot_state.exchange = ccxt.okx({
@@ -625,7 +833,7 @@ async def main():
     try:
         await bot_state.exchange.fetch_balance()
         logger.info("✅ OKX connection test SUCCEEDED.")
-        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Phoenix v10.0 (The Symphony) بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Phoenix v11.0 (The Final Blueprint) بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
         
         async with app:
             await app.start()
@@ -646,3 +854,5 @@ if __name__ == '__main__':
         asyncio.run(main())
     except Exception as e:
         logger.critical(f"Failed to start bot due to an error in initial setup: {e}", exc_info=True)
+
+
