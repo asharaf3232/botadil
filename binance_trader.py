@@ -189,7 +189,7 @@ async def log_initial_trade_to_db(signal, buy_order):
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'''
             params = (
                 datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'),
-                signal['symbol'],
+                signal['entry_price'],
                 buy_order['price'],
                 signal['take_profit'],
                 signal['stop_loss'],
