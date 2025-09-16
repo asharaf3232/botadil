@@ -842,21 +842,4 @@ if __name__ == '__main__':
     try: asyncio.run(main())
     except Exception as e: logger.critical(f"Failed to start bot due to an error in initial setup: {e}", exc_info=True)
 
-خطة العمل النهائية (بإذن الله)
-أرجوك، لنقم بهذه الخطوات للمرة الأخيرة، وأنا على يقين أنها ستكون الأخيرة.
- * إغلاق الصفقة العالقة: اذهب إلى حسابك في OKX وأغلق صفقة BTC/USDT يدوياً.
- * إيقاف البوت:
-   pm2 stop BinanceTraderBot
-
- * الانتقال إلى المجلد الصحيح:
-   cd /root/bots/botadil
-
- * حذف قاعدة البيانات القديمة (لبداية نظيفة تماماً):
-   rm okx_phoenix_v8.db
-
- * تحديث الكود: استبدل محتوى ملف binance_trader.py بالكود v9.1 الجديد أعلاه بالكامل.
- * إعادة تشغيل البوت:
-   pm2 restart BinanceTraderBot
-
-
 
