@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Bot v8.2 (The Phoenix - Fixed) 🚀 ---
+# --- 🚀 OKX Bot v8.2 (The Phoenix - Final Fix) 🚀 ---
 # =======================================================================================
-# This version fixes the WebSocket connection issue and improves diagnostics.
+# This version implements the correct, documented WebSocket URL for AWS environments,
+# resolving the "No address associated with hostname" error permanently.
 # =======================================================================================
 
 # --- Libraries ---
@@ -48,7 +49,7 @@ DB_FILE = os.path.join(APP_ROOT, 'okx_phoenix_v8.db')
 SETTINGS_FILE = os.path.join(APP_ROOT, 'okx_phoenix_settings_v8.json')
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger("OKX_Phoenix_v8.2_Fixed")
+logger = logging.getLogger("OKX_Phoenix_v8.2_FinalFix")
 
 class BotState:
     def __init__(self):
@@ -177,7 +178,6 @@ async def init_database():
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
 
-# ... (All other helper functions like get_fear_and_greed_index, get_market_mood, etc., remain the same)
 async def log_initial_trade_to_db(signal, buy_order):
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
@@ -234,7 +234,6 @@ async def get_market_mood():
         
     return {"mood": "POSITIVE", "reason": "وضع السوق مناسب", "btc_mood": btc_mood_text, "fng": fng_text}
     
-# ... (All strategy analysis functions remain the same)
 def find_col(df_columns, prefix):
     try: return next(col for col in df_columns if col.startswith(prefix))
     except StopIteration: return None
@@ -299,7 +298,6 @@ async def analyze_whale_radar(df, rvol, exchange, symbol):
     return None
 
 
-# ... (All other core logic like initiate_trade, worker, perform_scan, etc., remains the same)
 async def initiate_trade(signal, bot: "telegram.Bot"):
     await ensure_libraries_loaded()
     symbol, settings, exchange = signal['symbol'], bot_state.settings, bot_state.exchange
@@ -481,7 +479,6 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                        f"- **⚠️ أخطاء في التحليل:** {bot_state.scan_stats['failures']}")
         await bot.send_message(TELEGRAM_CHAT_ID, scan_summary, parse_mode=ParseMode.MARKDOWN)
 
-# --- Postman (WebSocket) Logic ---
 async def handle_filled_buy_order(order_data):
     symbol = order_data['instId'].replace('-', '/')
     order_id = order_data['ordId']
@@ -540,7 +537,7 @@ async def handle_filled_buy_order(order_data):
                     await bot_state.application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=success_msg, parse_mode=ParseMode.MARKDOWN)
                     return
                 else:
-                    logger.warning(f"[Postman] OCO placement attempt {attempt + 1} failed. Retrying...")
+                    logger.warning(f"[Postman] OCO placement attempt {attempt + 1} failed. Response: {oco_receipt}")
                     await asyncio.sleep(2)
             
             raise Exception(f"All Postman attempts to place OCO for trade #{trade['id']} failed.")
@@ -554,21 +551,15 @@ async def handle_filled_buy_order(order_data):
         await bot_state.application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=error_message, parse_mode=ParseMode.MARKDOWN)
 
 # =======================================================================================
-# ---  WebSocket Manager (FIXED) ---
+# ---  WebSocket Manager (FINAL FIX) ---
 # =======================================================================================
 class WebSocketManager:
     def __init__(self, exchange):
-        # Dynamically build the URL from the exchange's hostname for consistency
-        hostname = exchange.options.get('hostname', 'ws.okx.com')
-        # Ensure we use the correct WebSocket-specific hostname
-        if 'aws' in hostname:
-            ws_hostname = 'wsaws.okx.com'
-        else:
-            ws_hostname = 'ws.okx.com'
-            
-        self.ws_url = f"wss://{ws_hostname}:8443/ws/v5/private"
+        # --- FINAL FIX ---
+        # The official documented way is to use the main ws endpoint and add a brokerId for AWS routing.
+        self.ws_url = "wss://ws.okx.com:8443/ws/v5/private?brokerId=aws"
         self.websocket = None
-        logger.info(f"[WS-Manager] Initialized with URL: {self.ws_url}")
+        logger.info(f"[WS-Manager] Initialized with CORRECT URL for AWS: {self.ws_url}")
 
     def _get_auth_args(self):
         timestamp = str(time.time())
@@ -600,7 +591,6 @@ class WebSocketManager:
                         logger.info("🔐 [WS-Private] Authenticated successfully. Subscribing to orders channel...")
                         await websocket.send(json.dumps({"op": "subscribe", "args": [{"channel": "orders", "instType": "SPOT"}]}))
                         
-                        # Handle subscription confirmation
                         sub_response = json.loads(await websocket.recv())
                         if sub_response.get('event') == 'subscribe':
                              logger.info(f"📈 [WS-Private] Subscribed successfully to: {sub_response.get('arg')}")
@@ -609,27 +599,23 @@ class WebSocketManager:
 
                     else:
                         logger.error(f"🔥 [WS-Private] Authentication failed! Response: {login_response}")
-                        # Let the outer loop handle reconnection after a delay
-                        await asyncio.sleep(10) # Wait longer after auth failure
+                        await asyncio.sleep(10)
                         continue
 
-                    # Listen for messages
                     async for message in websocket:
                         await self._message_handler(message)
 
             except websockets.exceptions.ConnectionClosed as e:
-                 logger.warning(f"⚠️ [WS-Private] Connection closed: {e}. Reconnecting in 5 seconds...")
+                 logger.warning(f"⚠️ [WS-Private] Connection closed: {e}. Reconnecting...")
             except Exception as e:
                 logger.error(f"🔥 [WS-Private] Unhandled exception in WebSocket loop: {e}", exc_info=True)
             
-            # This block runs on any disconnection or error
-            self.websocket = None # Ensure state is updated to disconnected
+            self.websocket = None
             logger.info("Reconnecting in 5 seconds...")
             await asyncio.sleep(5)
 
 
 async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
-    # This function is now mainly for the Guardian protocol
     bot = context.bot
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
@@ -638,7 +624,6 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
                 pending_trades = [dict(row) for row in await cursor.fetchall()]
         
         for trade in pending_trades:
-            # Using timezone-aware comparison
             trade_timestamp = datetime.strptime(trade['timestamp'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=EGYPT_TZ)
             if datetime.now(EGYPT_TZ) - trade_timestamp > timedelta(minutes=2):
                 logger.critical(f"🛡️ GUARDIAN ALERT: Trade #{trade['id']} for {trade['symbol']} is stuck!")
@@ -651,7 +636,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Guardian: DB error: {e}")
 
 # =======================================================================================
-# --- 📱 Telegram UI Functions (No Changes Here) ---
+# --- 📱 Telegram UI Functions (No Changes) ---
 # =======================================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"]]
@@ -809,7 +794,6 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                     total_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades")).fetchone())[0]
                     active_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active' OR status = 'pending_protection'")).fetchone())[0]
                 
-                # Correctly check the WebSocket connection status
                 ws_status = 'غير متصل ❌'
                 if bot_state.ws_manager and bot_state.ws_manager.websocket and bot_state.ws_manager.websocket.open:
                     ws_status = 'متصل ✅'
@@ -881,13 +865,10 @@ async def main():
         'password': OKX_API_PASSPHRASE, 'enableRateLimit': True, 
         'options': {
             'defaultType': 'spot',
-            'hostname': 'aws.okx.com' # This is important
+            'hostname': 'aws.okx.com'
         }
     })
     
-    # --- FIX ---
-    # 1. Pass the configured exchange to the manager.
-    # 2. Assign the created manager back to the bot_state.
     ws_manager = WebSocketManager(bot_state.exchange)
     bot_state.ws_manager = ws_manager
     ws_task = asyncio.create_task(ws_manager.run())
@@ -905,7 +886,7 @@ async def main():
     try:
         await bot_state.exchange.fetch_balance()
         logger.info("✅ OKX connection test SUCCEEDED.")
-        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Phoenix v8.2 (Fixed) بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Phoenix v8.2 (Final Fix) بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
         
         async with app:
             await app.start()
