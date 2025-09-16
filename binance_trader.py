@@ -651,6 +651,144 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         try: await query.message.reply_text("حدث خطأ غير متوقع.")
         except: pass
 
+
+# =======================================================================================
+# --- 🌐 ساعي البريد: مدير WebSocket الخاص والمؤمن 🌐 ---
+# =======================================================================================
+
+async def handle_filled_buy_order(order_data):
+    """
+    This is the "Postman." It is called when a buy order fill event is received.
+    Its job is to apply protection and update the database.
+    """
+    symbol = order_data['instId'].replace('-', '/')
+    order_id = order_data['ordId']
+    filled_qty = float(order_data.get('fillSz', 0))
+    avg_price = float(order_data.get('avgPx', 0))
+
+    if filled_qty == 0 or avg_price == 0:
+        logger.warning(f"[Postman] Ignoring fill event for {symbol} with zero quantity/price.")
+        return
+
+    logger.info(f"📬 [Postman] Received fill event for order {order_id} ({symbol}). Preparing protection...")
+    try:
+        async with aiosqlite.connect(DB_FILE) as conn:
+            conn.row_factory = aiosqlite.Row
+            async with conn.execute("SELECT * FROM trades WHERE order_id = ? AND status = 'pending_protection'", (order_id,)) as cursor:
+                trade = await cursor.fetchone()
+
+            if not trade:
+                logger.warning(f"[Postman] No matching 'pending_protection' trade for order {order_id}. Might be already protected or a manual trade.")
+                return
+
+            trade = dict(trade)
+            original_risk = trade['entry_price'] - trade['stop_loss']
+            final_tp = avg_price + (original_risk * bot_state.settings['risk_reward_ratio'])
+            final_sl = avg_price - original_risk
+            
+            oco_params = {
+                'instId': bot_state.exchange.market_id(symbol), 'tdMode': 'cash', 'side': 'sell', 'ordType': 'oco',
+                'sz': bot_state.exchange.amount_to_precision(symbol, filled_qty),
+                'tpTriggerPx': bot_state.exchange.price_to_precision(symbol, final_tp), 'tpOrdPx': '-1',
+                'slTriggerPx': bot_state.exchange.price_to_precision(symbol, final_sl), 'slOrdPx': '-1'
+            }
+            
+            for attempt in range(3):
+                oco_receipt = await bot_state.exchange.private_post_trade_order_algo(oco_params)
+                if oco_receipt and oco_receipt.get('data') and oco_receipt['data'][0].get('sCode') == '0':
+                    algo_id = oco_receipt['data'][0]['algoId']
+                    logger.info(f"✅ [Postman] Successfully placed OCO protection for trade #{trade['id']}. Algo ID: {algo_id}")
+                    
+                    await conn.execute("""
+                        UPDATE trades 
+                        SET status = 'active', entry_price = ?, quantity = ?, entry_value_usdt = ?, 
+                            take_profit = ?, stop_loss = ?, algo_id = ?, highest_price = ?
+                        WHERE id = ?
+                    """, (avg_price, filled_qty, avg_price * filled_qty, final_tp, final_sl, algo_id, avg_price, trade['id']))
+                    await conn.commit()
+
+                    tp_percent = (final_tp / avg_price - 1) * 100
+                    sl_percent = (1 - final_sl / avg_price) * 100
+                    success_msg = (f"**✅🛡️ صفقة مصفحة | {symbol} (ID: {trade['id']})**\n"
+                                   f"🔍 **الاستراتيجية:** {trade['reason']}\n\n"
+                                   f"📈 **الشراء:** `{avg_price:,.4f}`\n"
+                                   f"🎯 **الهدف:** `{final_tp:,.4f}` (+{tp_percent:.2f}%)\n"
+                                   f"🛑 **الوقف:** `{final_sl:,.4f}` (-{sl_percent:.2f}%)\n\n"
+                                   f"***تم تأمين الصفقة بنجاح عبر ساعي البريد.***")
+                    await bot_state.application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=success_msg, parse_mode=ParseMode.MARKDOWN)
+                    return
+                else:
+                    logger.warning(f"[Postman] OCO placement attempt {attempt + 1} failed. Retrying...")
+                    await asyncio.sleep(2)
+            
+            raise Exception(f"All Postman attempts to place OCO for trade #{trade['id']} failed.")
+            
+    except Exception as e:
+        logger.critical(f"🔥 [Postman] CRITICAL FAILURE while protecting trade for order {order_id}: {e}", exc_info=True)
+        error_message = (f"**🔥🔥🔥 فشل حرج لساعي البريد - {symbol}**\n\n"
+                         f"🚨 **خطر!** تم تنفيذ الشراء ولكن **فشل وضع الحماية تلقائيًا**.\n"
+                         f"**معرف الأمر:** `{order_id}`\n\n"
+                         f"**❗️ تدخل يدوي فوري ضروري لوضع وقف الخسارة!**")
+        await bot_state.application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=error_message, parse_mode=ParseMode.MARKDOWN)
+
+
+class WebSocketManager:
+    def __init__(self, bot_state):
+        self.ws_url = "wss://ws.okx.com:8443/ws/v5/private"
+        self.bot_state = bot_state
+
+    def _get_auth_args(self):
+        timestamp = str(time.time())
+        message = timestamp + 'GET' + '/users/self/verify'
+        mac = hmac.new(bytes(OKX_API_SECRET, encoding='utf8'), bytes(message, encoding='utf8'), digestmod='sha256')
+        sign = base64.b64encode(mac.digest()).decode()
+        return [{
+            "apiKey": OKX_API_KEY,
+            "passphrase": OKX_API_PASSPHRASE,
+            "timestamp": timestamp,
+            "sign": sign,
+        }]
+
+    async def _message_handler(self, message):
+        if message == 'ping':
+            await self.websocket.send('pong')
+            return
+        
+        data = json.loads(message)
+        
+        if data.get('arg', {}).get('channel') == 'orders':
+            for order_data in data.get('data', []):
+                if order_data.get('state') == 'filled' and order_data.get('side') == 'buy':
+                    asyncio.create_task(handle_filled_buy_order(order_data))
+
+    async def run(self):
+        while True:
+            try:
+                async with websockets.connect(self.ws_url) as websocket:
+                    self.websocket = websocket
+                    logger.info("✅ [WS-Private] Connected. Authenticating...")
+                    
+                    await websocket.send(json.dumps({"op": "login", "args": self._get_auth_args()}))
+                    
+                    login_response = json.loads(await websocket.recv())
+                    if login_response.get('event') == 'login' and login_response.get('code') == '0':
+                        logger.info("🔐 [WS-Private] Authenticated. Subscribing to orders channel...")
+                        await websocket.send(json.dumps({
+                            "op": "subscribe", 
+                            "args": [{"channel": "orders", "instType": "SPOT"}]
+                        }))
+                    else:
+                        logger.error(f"🔥 [WS-Private] Authentication failed: {login_response}")
+                        continue
+
+                    async for message in websocket:
+                        await self._message_handler(message)
+            except Exception as e:
+                logger.error(f"🔥 [WS-Private] Unhandled exception: {e}", exc_info=True)
+            
+            logger.warning("⚠️ [WS-Private] Disconnected. Reconnecting in 5 seconds...")
+            await asyncio.sleep(5)
+
 # =======================================================================================
 # --- 🚀 نقطة انطلاق البوت (مع ساعي البريد) 🚀 ---
 # =======================================================================================
@@ -677,16 +815,15 @@ async def main():
     ws_task = asyncio.create_task(ws_manager.run())
     logger.info("🚀 [Postman] Postman scheduled to run in the background.")
 
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-    app.add_handler(MessageHandler(filters.TEXT & filters.UpdateType.MESSAGE, input_handler))
-    app.add_handler(CallbackQueryHandler(button_callback_handler))
+    # Add Telegram handlers here
+    # e.g., app.add_handler(CommandHandler("start", start_command))
 
     scan_interval = bot_state.settings.get("scan_interval_seconds", 900)
     app.job_queue.run_repeating(perform_scan, interval=scan_interval, first=10, name="perform_scan")
+    # Add other jobs here if needed
     
     try:
-        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Postman v7.1 بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Postman v7.0 بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
         async with app:
             await app.start()
             await app.updater.start_polling()
@@ -694,10 +831,6 @@ async def main():
             await asyncio.gather(ws_task) 
     except Exception as e:
         logger.critical(f"An unhandled error occurred in main loop: {e}", exc_info=True)
-        try:
-            await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🔥 خطأ فادح أدى إلى توقف البوت: {e}")
-        except Exception as tg_e:
-            logger.error(f"Could not send final error message to Telegram: {tg_e}")
     finally:
         if 'ws_task' in locals() and not ws_task.done(): ws_task.cancel()
         if 'app' in locals() and app.updater and app.updater._running: await app.updater.stop()
