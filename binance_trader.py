@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Bot v9.2 (The Phoenix - The Network Shield) 🚀 ---
+# --- 🚀 OKX Bot v9.3 (The Phoenix - The Watchdog) 🚀 ---
 # =======================================================================================
-# Based on the final "Timed out" error, this version addresses the true root cause:
-# insufficient network timeout. The default CCXT timeout is explicitly increased
-# to 60 seconds during exchange initialization. This provides robust protection
-# against temporary network congestion or slow API responses, preventing the initial
-# trade placement from failing and causing a cascade of downstream errors. The logic
-# of the "Auditor" postman remains as the primary, correct way to handle fills.
+# This version introduces a critical architectural fix inspired by user feedback
+# to stop "silent failures". A `create_safe_task` helper function is implemented
+# to act as a "Watchdog" for all background tasks. It wraps coroutines in a
+# guaranteed try...except block that logs any and all exceptions with a full
+# traceback. This permanently solves the issue of tasks like `handle_filled_buy_order`
+# failing without leaving a trace in the logs, providing complete diagnostic clarity.
 # =======================================================================================
 
 # --- Libraries ---
@@ -53,7 +53,7 @@ DB_FILE = os.path.join(APP_ROOT, 'okx_phoenix_v8.db')
 SETTINGS_FILE = os.path.join(APP_ROOT, 'okx_phoenix_settings_v9.json')
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger("OKX_Phoenix_v9.2_NetworkShield")
+logger = logging.getLogger("OKX_Phoenix_v9.3_Watchdog")
 
 class BotState:
     def __init__(self):
@@ -125,10 +125,24 @@ async def ensure_libraries_loaded():
     if pd is None: logger.info("تحميل مكتبة pandas لأول مرة..."); import pandas as pd_lib; pd = pd_lib
     if ta is None: logger.info("تحميل مكتبة pandas-ta لأول مرة..."); import pandas_ta as ta_lib; ta = ta_lib
     if ccxt is None: logger.info("تحميل مكتبة ccxt لأول مرة..."); import ccxt.async_support as ccxt_lib; ccxt = ccxt_lib
+
 def escape_markdown(text: str) -> str:
     if not isinstance(text, str): text = str(text)
     escape_chars = r"_*[]()~`>#+-=|{}.!"
     return re.sub(f"([{re.escape(escape_chars)}])", r"\\\1", text)
+
+# --- WATCHDOG IMPLEMENTATION ---
+def create_safe_task(coro):
+    """Creates a task that logs exceptions instead of letting them pass silently."""
+    async def task_wrapper():
+        try:
+            await coro
+        except Exception as e:
+            # This is the watchdog's bark. It will always be heard.
+            logger.critical(f"Unhandled exception in background task '{coro.__name__}': {e}", exc_info=True)
+    
+    asyncio.create_task(task_wrapper())
+
 def load_settings():
     try:
         if os.path.exists(SETTINGS_FILE):
@@ -308,8 +322,6 @@ async def initiate_trade(signal, bot: "telegram.Bot"):
             msg = f"**⏳ تم بدء صفقة | {symbol} (ID: {trade_id})**\nتم إرسال أمر الشراء المحدد بنجاح.\nيقوم 'ساعي البريد' الآن بمراقبة الأمر لتأمينه فور التنفيذ."
             await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode=ParseMode.MARKDOWN)
         else:
-            # This is a safe-guard, but the order might have executed despite the timeout.
-            # Manual check is still advised if a timeout occurs.
             try:
                 await exchange.cancel_order(buy_order['id'], symbol)
             except Exception as cancel_e:
@@ -511,7 +523,7 @@ async def handle_filled_buy_order(order_data):
                f"**معرف الأمر:** `{order_id}`\n\n**❗️ تدخل يدوي فوري ضروري لوضع وقف الخسارة!**")
         await bot_state.application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode=ParseMode.MARKDOWN)
 
-# --- WebSocket Manager (No change) ---
+# --- WebSocket Manager ---
 class WebSocketManager:
     def __init__(self, exchange):
         self.ws_url = "wss://ws.okx.com:8443/ws/v5/private?brokerId=aws"
@@ -531,7 +543,8 @@ class WebSocketManager:
         if data.get('arg', {}).get('channel') == 'orders':
             for order_data in data.get('data', []):
                 if order_data.get('state') == 'filled' and order_data.get('side') == 'buy':
-                    asyncio.create_task(handle_filled_buy_order(order_data))
+                    # --- WATCHDOG ACTIVATED ---
+                    create_safe_task(handle_filled_buy_order(order_data))
     async def run(self):
         while True:
             try:
@@ -626,7 +639,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
 # --- Telegram UI & Main Startup (No change) ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"]]
-    await update.message.reply_text("أهلاً بك في بوت OKX القناص v9.2 (Network Shield)", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True))
+    await update.message.reply_text("أهلاً بك في بوت OKX القناص v9.3 (The Watchdog)", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True))
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📊 الإحصائيات العامة", callback_data="dashboard_stats")],
@@ -758,7 +771,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                     active_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status IN ('active', 'pending_protection')")).fetchone())[0]
                 ws_status = 'متصل ✅' if bot_state.ws_manager and bot_state.ws_manager.is_connected() else 'غير متصل ❌'
                 scanners_text = escape_markdown(', '.join(settings.get('active_scanners',[])))
-                report = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v9.2)**\n",
+                report = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v9.3)**\n",
                           f"--- **📊 حالة السوق الحالية** ---\n- **المزاج العام:** {mood['mood']} ({escape_markdown(mood['reason'])})\n- **مؤشر BTC:** {mood.get('btc_mood', 'N/A')}\n",
                           f"--- **🔬 أداء آخر فحص** ---\n- **وقت البدء:** {scan.get('last_start', 'N/A')}\n",
                           f"--- **🔧 الإعدادات النشطة** ---\n- **النمط الحالي:** {settings.get('active_preset', 'N/A')}\n- **الماسحات المفعلة:** {scanners_text}\n",
@@ -830,7 +843,7 @@ async def main():
     ws_manager = WebSocketManager(bot_state.exchange)
     bot_state.ws_manager = ws_manager
     ws_task = asyncio.create_task(ws_manager.run())
-    logger.info("🚀 [Auditor] Postman (Auditor Mode) scheduled to run.")
+    logger.info("🚀 [Auditor] Postman (Auditor Mode) with Watchdog scheduled to run.")
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, universal_text_handler))
     app.add_handler(CallbackQueryHandler(button_callback_handler))
@@ -841,7 +854,7 @@ async def main():
     try:
         await bot_state.exchange.fetch_balance()
         logger.info("✅ OKX connection test SUCCEEDED.")
-        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Phoenix v9.2 (Network Shield) بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Phoenix v9.3 (The Watchdog) بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
         async with app:
             await app.start()
             await app.updater.start_polling()
