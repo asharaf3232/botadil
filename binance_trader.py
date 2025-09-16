@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Bot v8.2 (The Phoenix - Final Fix) 🚀 ---
+# --- 🚀 OKX Bot v8.2 (The Phoenix - Final Fix v2) 🚀 ---
 # =======================================================================================
-# This version implements the correct, documented WebSocket URL for AWS environments,
-# resolving the "No address associated with hostname" error permanently.
+# This version corrects the attribute used to check the WebSocket status in the
+# diagnostic report, resolving the final 'AttributeError'.
 # =======================================================================================
 
 # --- Libraries ---
@@ -49,7 +49,7 @@ DB_FILE = os.path.join(APP_ROOT, 'okx_phoenix_v8.db')
 SETTINGS_FILE = os.path.join(APP_ROOT, 'okx_phoenix_settings_v8.json')
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger("OKX_Phoenix_v8.2_FinalFix")
+logger = logging.getLogger("OKX_Phoenix_v8.2_FinalFix_v2")
 
 class BotState:
     def __init__(self):
@@ -114,7 +114,6 @@ STRATEGIES_MAP = {
     "whale_radar": {"func_name": "analyze_whale_radar", "name": "رادار الحيتان"},
 }
 
-
 # --- Lazy Loader ---
 async def ensure_libraries_loaded():
     global pd, ta, ccxt
@@ -122,7 +121,7 @@ async def ensure_libraries_loaded():
     if ta is None: logger.info("تحميل مكتبة pandas-ta لأول مرة..."); import pandas_ta as ta_lib; ta = ta_lib
     if ccxt is None: logger.info("تحميل مكتبة ccxt لأول مرة..."); import ccxt.async_support as ccxt_lib; ccxt = ccxt_lib
 
-# --- Helper Functions ---
+# --- Helper Functions (No changes) ---
 def escape_markdown(text: str) -> str:
     if not isinstance(text, str):
         text = str(text)
@@ -136,6 +135,7 @@ def load_settings():
                 bot_state.settings = json.load(f)
         else:
             bot_state.settings = DEFAULT_SETTINGS.copy()
+        # Ensure all default keys exist
         for key, value in DEFAULT_SETTINGS.items():
             if key not in bot_state.settings:
                 bot_state.settings[key] = value
@@ -233,7 +233,8 @@ async def get_market_mood():
         return {"mood": "NEGATIVE", "reason": f"مشاعر خوف شديد (مؤشر F&G: {fng})", "btc_mood": btc_mood_text, "fng": fng_text}
         
     return {"mood": "POSITIVE", "reason": "وضع السوق مناسب", "btc_mood": btc_mood_text, "fng": fng_text}
-    
+
+# --- Analysis Functions (No changes) ---
 def find_col(df_columns, prefix):
     try: return next(col for col in df_columns if col.startswith(prefix))
     except StopIteration: return None
@@ -297,7 +298,7 @@ async def analyze_whale_radar(df, rvol, exchange, symbol):
     except Exception: return None
     return None
 
-
+# --- Core Logic (No changes) ---
 async def initiate_trade(signal, bot: "telegram.Bot"):
     await ensure_libraries_loaded()
     symbol, settings, exchange = signal['symbol'], bot_state.settings, bot_state.exchange
@@ -531,8 +532,8 @@ async def handle_filled_buy_order(order_data):
                     success_msg = (f"**✅🛡️ صفقة مصفحة | {symbol} (ID: {trade['id']})**\n"
                                    f"🔍 **الاستراتيجية:** {trade['reason']}\n\n"
                                    f"📈 **الشراء:** `{avg_price:,.4f}`\n"
-                                   f"🎯 **الهدف:** `{final_tp:,.4f}` (+{tp_percent:.2f}%)\n"
-                                   f"🛑 **الوقف:** `{final_sl:,.4f}` (-{sl_percent:.2f}%)\n\n"
+                                   f"🎯 **الهدف:** `{final_tp:,.4f}` (+ {tp_percent:.2f}%)\n"
+                                   f"🛑 **الوقف:** `{final_sl:,.4f}` (- {sl_percent:.2f}%)\n\n"
                                    f"***تم تأمين الصفقة بنجاح عبر ساعي البريد.***")
                     await bot_state.application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=success_msg, parse_mode=ParseMode.MARKDOWN)
                     return
@@ -550,13 +551,9 @@ async def handle_filled_buy_order(order_data):
                          f"**❗️ تدخل يدوي فوري ضروري لوضع وقف الخسارة!**")
         await bot_state.application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=error_message, parse_mode=ParseMode.MARKDOWN)
 
-# =======================================================================================
-# ---  WebSocket Manager (FINAL FIX) ---
-# =======================================================================================
+# --- WebSocket Manager (FINAL FIX v2) ---
 class WebSocketManager:
     def __init__(self, exchange):
-        # --- FINAL FIX ---
-        # The official documented way is to use the main ws endpoint and add a brokerId for AWS routing.
         self.ws_url = "wss://ws.okx.com:8443/ws/v5/private?brokerId=aws"
         self.websocket = None
         logger.info(f"[WS-Manager] Initialized with CORRECT URL for AWS: {self.ws_url}")
@@ -636,7 +633,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Guardian: DB error: {e}")
 
 # =======================================================================================
-# --- 📱 Telegram UI Functions (No Changes) ---
+# --- 📱 Telegram UI Functions ---
 # =======================================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"]]
@@ -721,7 +718,7 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         if edit_message_id:
             await context.bot.edit_message_text(chat_id=target_message.chat_id, message_id=edit_message_id, text=message_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
         elif update.callback_query:
-            await query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+            await update.callback_query.edit_message_text(message_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
         else:
             await target_message.reply_text(message_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
     except BadRequest as e:
@@ -795,7 +792,9 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                     active_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active' OR status = 'pending_protection'")).fetchone())[0]
                 
                 ws_status = 'غير متصل ❌'
-                if bot_state.ws_manager and bot_state.ws_manager.websocket and bot_state.ws_manager.websocket.open:
+                # --- FINAL FIX v2 ---
+                # The correct attribute to check is .is_open, not .open
+                if bot_state.ws_manager and bot_state.ws_manager.websocket and bot_state.ws_manager.websocket.is_open:
                     ws_status = 'متصل ✅'
                 
                 scanners_text = escape_markdown(', '.join(settings.get('active_scanners',[])))
@@ -844,7 +843,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
 
 # =======================================================================================
-# --- 🚀 Main Bot Startup (FIXED) ---
+# --- 🚀 Main Bot Startup ---
 # =======================================================================================
 async def main():
     logger.info("--- Bot process starting ---")
@@ -886,7 +885,7 @@ async def main():
     try:
         await bot_state.exchange.fetch_balance()
         logger.info("✅ OKX connection test SUCCEEDED.")
-        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Phoenix v8.2 (Final Fix) بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Phoenix v8.2 (Final Fix v2) بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
         
         async with app:
             await app.start()
