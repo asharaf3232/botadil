@@ -185,14 +185,16 @@ async def init_database():
 async def log_initial_trade_to_db(signal, buy_order):
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
+            # --- [الإصلاح هنا] ---
+            # إضافة أعمدة take_profit و stop_loss
             sql = '''INSERT INTO trades (timestamp, symbol, entry_price, take_profit, stop_loss, quantity, reason, order_id, status)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'''
             params = (
                 datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'),
+                signal['symbol'],
                 signal['entry_price'],
-                buy_order['price'],
-                signal['take_profit'],
-                signal['stop_loss'],
+                signal['take_profit'],    # <-- إضافة جديدة
+                signal['stop_loss'],      # <-- إضافة جديدة
                 buy_order['amount'],
                 signal['reason'],
                 buy_order['id'],
@@ -204,13 +206,6 @@ async def log_initial_trade_to_db(signal, buy_order):
     except Exception as e:
         logger.error(f"Failed to log initial trade to DB: {e}", exc_info=True)
         return None
-
-async def get_fear_and_greed_index():
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.get("https://api.alternative.me/fng/?limit=1", timeout=10)
-            return int(r.json()['data'][0]['value'])
-    except Exception: return None
 
 async def get_market_mood():
     await ensure_libraries_loaded()
