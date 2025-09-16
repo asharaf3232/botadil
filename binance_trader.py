@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Bot v8.4 (The Phoenix - Bulletproof) 🚀 ---
+# --- 🚀 OKX Bot v8.5 (The Phoenix - Trailing SL Activated) 🚀 ---
 # =======================================================================================
-# This version implements a comprehensive fix for both the UI and the core logic.
-# 1. Fixes the UI button handler 'AttributeError' for flawless dashboard operation.
-# 2. Fixes the critical race condition in the Postman by adding a retry mechanism,
-#    ensuring trades are always found in the DB for protection.
+# This version fully implements the trailing stop-loss logic within the
+# track_open_trades function, enabling the bot to dynamically adjust stop-losses
+# for profitable trades based on user settings.
 # =======================================================================================
 
 # --- Libraries ---
@@ -51,7 +50,7 @@ DB_FILE = os.path.join(APP_ROOT, 'okx_phoenix_v8.db')
 SETTINGS_FILE = os.path.join(APP_ROOT, 'okx_phoenix_settings_v8.json')
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger("OKX_Phoenix_v8.4_Bulletproof")
+logger = logging.getLogger("OKX_Phoenix_v8.5_TSL")
 
 class BotState:
     def __init__(self):
@@ -66,6 +65,8 @@ class BotState:
 
 bot_state = BotState()
 scan_lock = asyncio.Lock()
+# A lock to prevent multiple TSL adjustments for the same trade simultaneously
+tsl_locks = defaultdict(asyncio.Lock)
 
 # =======================================================================================
 # --- UI Constants ---
@@ -125,25 +126,20 @@ async def ensure_libraries_loaded():
 
 # --- Helper Functions ---
 def escape_markdown(text: str) -> str:
-    if not isinstance(text, str):
-        text = str(text)
+    if not isinstance(text, str): text = str(text)
     escape_chars = r"_*[]()~`>#+-=|{}.!"
     return re.sub(f"([{re.escape(escape_chars)}])", r"\\\1", text)
 
 def load_settings():
     try:
         if os.path.exists(SETTINGS_FILE):
-            with open(SETTINGS_FILE, 'r') as f:
-                bot_state.settings = json.load(f)
-        else:
-            bot_state.settings = DEFAULT_SETTINGS.copy()
+            with open(SETTINGS_FILE, 'r') as f: bot_state.settings = json.load(f)
+        else: bot_state.settings = DEFAULT_SETTINGS.copy()
         for key, value in DEFAULT_SETTINGS.items():
-            if key not in bot_state.settings:
-                bot_state.settings[key] = value
+            if key not in bot_state.settings: bot_state.settings[key] = value
             elif isinstance(value, dict):
                  for sub_key, sub_value in value.items():
-                      if sub_key not in bot_state.settings.get(key, {}):
-                           bot_state.settings[key][sub_key] = sub_value
+                      if sub_key not in bot_state.settings.get(key, {}): bot_state.settings[key][sub_key] = sub_value
         save_settings()
         logger.info("Settings loaded successfully.")
     except Exception as e:
@@ -152,10 +148,8 @@ def load_settings():
 
 def save_settings():
     try:
-        with open(SETTINGS_FILE, 'w') as f:
-            json.dump(bot_state.settings, f, indent=4)
-    except Exception as e:
-        logger.error(f"Failed to save settings: {e}")
+        with open(SETTINGS_FILE, 'w') as f: json.dump(bot_state.settings, f, indent=4)
+    except Exception as e: logger.error(f"Failed to save settings: {e}")
 
 async def init_database():
     try:
@@ -176,14 +170,13 @@ async def init_database():
                     await conn.execute(f'ALTER TABLE trades ADD COLUMN {col} ' + ('REAL' if col == 'highest_price' else 'TEXT' if col == 'algo_id' else 'BOOLEAN DEFAULT 0'))
                     await conn.commit()
         logger.info(f"Database initialized/verified at: {DB_FILE}")
-    except Exception as e:
-        logger.error(f"Failed to initialize database: {e}")
+    except Exception as e: logger.error(f"Failed to initialize database: {e}")
 
 async def log_initial_trade_to_db(signal, buy_order):
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
-            sql = '''INSERT INTO trades (timestamp, symbol, entry_price, take_profit, stop_loss, quantity, reason, order_id, status, entry_value_usdt)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'''
+            sql = '''INSERT INTO trades (timestamp, symbol, entry_price, take_profit, stop_loss, quantity, reason, order_id, status, entry_value_usdt, highest_price)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'''
             params = (
                 datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'),
                 signal['symbol'],
@@ -194,7 +187,8 @@ async def log_initial_trade_to_db(signal, buy_order):
                 signal['reason'],
                 buy_order['id'],
                 'pending_protection',
-                buy_order['cost']
+                buy_order['cost'],
+                signal['entry_price'] # Initialize highest_price with entry price
             )
             cursor = await conn.execute(sql, params)
             await conn.commit()
@@ -236,7 +230,7 @@ async def get_market_mood():
         
     return {"mood": "POSITIVE", "reason": "وضع السوق مناسب", "btc_mood": btc_mood_text, "fng": fng_text}
 
-# --- Analysis Functions ---
+# --- Analysis Functions (No change) ---
 def find_col(df_columns, prefix):
     try: return next(col for col in df_columns if col.startswith(prefix))
     except StopIteration: return None
@@ -300,7 +294,7 @@ async def analyze_whale_radar(df, rvol, exchange, symbol):
     except Exception: return None
     return None
 
-# --- Core Logic ---
+# --- Core Logic (No change) ---
 async def initiate_trade(signal, bot: "telegram.Bot"):
     await ensure_libraries_loaded()
     symbol, settings, exchange = signal['symbol'], bot_state.settings, bot_state.exchange
@@ -495,8 +489,7 @@ async def handle_filled_buy_order(order_data):
     logger.info(f"📬 [Postman] Received fill event for order {order_id} ({symbol}). Preparing protection...")
     try:
         trade = None
-        # --- BULLETPROOF FIX: Retry mechanism to solve the race condition ---
-        for attempt in range(5): # Retry for up to 2.5 seconds
+        for attempt in range(5):
             async with aiosqlite.connect(DB_FILE) as conn:
                 conn.row_factory = aiosqlite.Row
                 async with conn.execute("SELECT * FROM trades WHERE order_id = ? AND status = 'pending_protection'", (order_id,)) as cursor:
@@ -505,11 +498,11 @@ async def handle_filled_buy_order(order_data):
                 logger.info(f"[Postman] Found matching trade for order {order_id} on attempt {attempt + 1}.")
                 break
             else:
-                logger.warning(f"[Postman] Attempt {attempt + 1}: No matching trade for order {order_id} yet. Retrying...")
+                logger.warning(f"[Postman] Attempt {attempt + 1}: No matching trade for {order_id}. Retrying...")
                 await asyncio.sleep(0.5)
         
         if not trade:
-            logger.error(f"[Postman] CRITICAL: Could not find trade for order {order_id} after all retries. Manual intervention required!")
+            logger.error(f"[Postman] CRITICAL: Could not find trade for order {order_id} after all retries!")
             return
 
         trade = dict(trade)
@@ -524,12 +517,12 @@ async def handle_filled_buy_order(order_data):
             'slTriggerPx': bot_state.exchange.price_to_precision(symbol, final_sl), 'slOrdPx': '-1'
         }
         
-        async with aiosqlite.connect(DB_FILE) as conn: # Re-open connection for writing
+        async with aiosqlite.connect(DB_FILE) as conn:
             for attempt in range(3):
                 oco_receipt = await bot_state.exchange.private_post_trade_order_algo(oco_params)
                 if oco_receipt and oco_receipt.get('data') and oco_receipt['data'][0].get('sCode') == '0':
                     algo_id = oco_receipt['data'][0]['algoId']
-                    logger.info(f"✅ [Postman] Successfully placed OCO protection for trade #{trade['id']}. Algo ID: {algo_id}")
+                    logger.info(f"✅ [Postman] Successfully placed OCO for trade #{trade['id']}. Algo ID: {algo_id}")
                     
                     await conn.execute("""
                         UPDATE trades 
@@ -563,7 +556,7 @@ async def handle_filled_buy_order(order_data):
                          f"**❗️ تدخل يدوي فوري ضروري لوضع وقف الخسارة!**")
         await bot_state.application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=error_message, parse_mode=ParseMode.MARKDOWN)
 
-# --- WebSocket Manager ---
+# --- WebSocket Manager (No change) ---
 class WebSocketManager:
     def __init__(self, exchange):
         self.ws_url = "wss://ws.okx.com:8443/ws/v5/private?brokerId=aws"
@@ -581,9 +574,7 @@ class WebSocketManager:
         return [{"apiKey": OKX_API_KEY, "passphrase": OKX_API_PASSPHRASE, "timestamp": timestamp, "sign": sign}]
 
     async def _message_handler(self, message):
-        if message == 'ping':
-            await self.websocket.send('pong')
-            return
+        if message == 'ping': await self.websocket.send('pong'); return
         data = json.loads(message)
         if data.get('arg', {}).get('channel') == 'orders':
             for order_data in data.get('data', []):
@@ -600,35 +591,27 @@ class WebSocketManager:
                     login_response = json.loads(await websocket.recv())
                     
                     if login_response.get('event') == 'login' and login_response.get('code') == '0':
-                        logger.info("🔐 [WS-Private] Authenticated successfully. Subscribing to orders channel...")
+                        logger.info("🔐 [WS-Private] Authenticated. Subscribing to orders channel...")
                         await websocket.send(json.dumps({"op": "subscribe", "args": [{"channel": "orders", "instType": "SPOT"}]}))
-                        
                         sub_response = json.loads(await websocket.recv())
-                        if sub_response.get('event') == 'subscribe':
-                             logger.info(f"📈 [WS-Private] Subscribed successfully to: {sub_response.get('arg')}")
-                        else:
-                             logger.warning(f"⚠️ [WS-Private] Unexpected response after subscription: {sub_response}")
-
+                        if sub_response.get('event') == 'subscribe': logger.info(f"📈 [WS-Private] Subscribed to: {sub_response.get('arg')}")
+                        else: logger.warning(f"⚠️ [WS-Private] Unexpected response after subscription: {sub_response}")
                     else:
-                        logger.error(f"🔥 [WS-Private] Authentication failed! Response: {login_response}")
-                        await asyncio.sleep(10)
-                        continue
-
-                    async for message in websocket:
-                        await self._message_handler(message)
-
-            except websockets.exceptions.ConnectionClosed as e:
-                 logger.warning(f"⚠️ [WS-Private] Connection closed: {e}. Reconnecting...")
-            except Exception as e:
-                logger.error(f"🔥 [WS-Private] Unhandled exception in WebSocket loop: {e}", exc_info=True)
-            
-            self.websocket = None
-            logger.info("Reconnecting in 5 seconds...")
-            await asyncio.sleep(5)
+                        logger.error(f"🔥 [WS-Private] Authentication failed: {login_response}")
+                        await asyncio.sleep(10); continue
+                    async for message in websocket: await self._message_handler(message)
+            except websockets.exceptions.ConnectionClosed as e: logger.warning(f"⚠️ [WS-Private] Connection closed: {e}. Reconnecting...")
+            except Exception as e: logger.error(f"🔥 [WS-Private] Unhandled exception in WebSocket loop: {e}", exc_info=True)
+            self.websocket = None; logger.info("Reconnecting in 5 seconds..."); await asyncio.sleep(5)
 
 
+# =======================================================================================
+# --- ⚙️ TRAILING STOP LOSS IMPLEMENTATION (The Night Watcher) ⚙️ ---
+# =======================================================================================
 async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
-    bot = context.bot
+    bot, exchange, settings = context.bot, bot_state.exchange, bot_state.settings
+    
+    # --- Part 1: Guardian Protocol (Checks for stuck trades) ---
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
             conn.row_factory = aiosqlite.Row
@@ -639,20 +622,83 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
             trade_timestamp = datetime.strptime(trade['timestamp'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=EGYPT_TZ)
             if datetime.now(EGYPT_TZ) - trade_timestamp > timedelta(minutes=2):
                 logger.critical(f"🛡️ GUARDIAN ALERT: Trade #{trade['id']} for {trade['symbol']} is stuck!")
-                alert_msg = (f"**🔥🔥🔥 تنبيه من الحارس**\n\n"
-                             f"**صفقة:** `#{trade['id']} {trade['symbol']}`\n"
-                             f"**الحالة:** عالقة في انتظار الحماية لأكثر من دقيقتين.\n\n"
-                             f"**يرجى التحقق من الصفقة يدويًا فورًا!**")
+                alert_msg = f"**🔥🔥🔥 تنبيه من الحارس**\n\n**صفقة:** `#{trade['id']} {trade['symbol']}`\n**الحالة:** عالقة في انتظار الحماية.\n\n**يرجى التحقق من الصفقة يدويًا فورًا!**"
                 await bot.send_message(TELEGRAM_CHAT_ID, alert_msg, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
-        logger.error(f"Guardian: DB error: {e}")
+        logger.error(f"Guardian Protocol failed: {e}")
+
+    # --- Part 2: Trailing Stop Loss Protocol ---
+    if not settings.get('trailing_sl_enabled', False):
+        return
+
+    async with aiosqlite.connect(DB_FILE) as conn:
+        conn.row_factory = aiosqlite.Row
+        async with conn.execute("SELECT * FROM trades WHERE status = 'active'") as cursor:
+            active_trades = await cursor.fetchall()
+            
+    for trade in active_trades:
+      async with tsl_locks[trade['id']]: # Ensure only one check per trade at a time
+        try:
+            trade = dict(trade)
+            symbol = trade['symbol']
+            ticker = await exchange.fetch_ticker(symbol)
+            current_price = ticker['last']
+            
+            # Update the highest price reached
+            highest_price = max(trade.get('highest_price', trade['entry_price']), current_price)
+            if highest_price > trade.get('highest_price', 0):
+                await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (highest_price, trade['id']))
+                await conn.commit()
+
+            # Check if trailing stop should be activated
+            activation_price = trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100)
+            
+            if not trade['trailing_sl_active'] and current_price >= activation_price:
+                logger.info(f"🚀 TSL Activated for {symbol} at price {current_price}")
+                await conn.execute("UPDATE trades SET trailing_sl_active = 1 WHERE id = ?", (trade['id'],))
+                await conn.commit()
+                trade['trailing_sl_active'] = True # Update local copy
+                await bot.send_message(TELEGRAM_CHAT_ID, f"**🚀 الوقف المتحرك مُفعّل لـ {symbol}**", parse_mode=ParseMode.MARKDOWN)
+
+
+            # If TSL is active, check if we need to move the stop loss up
+            if trade['trailing_sl_active']:
+                callback_factor = 1 - (settings['trailing_sl_callback_percent'] / 100)
+                new_stop_loss = highest_price * callback_factor
+                
+                if new_stop_loss > trade['stop_loss']:
+                    logger.info(f"📈 Trailing SL for {symbol}. New SL: {new_stop_loss}")
+                    
+                    # Cancel existing OCO order
+                    await exchange.private_post_trade_cancel_algo_order([{'instId': exchange.market_id(symbol), 'algoId': trade['algo_id']}])
+                    
+                    # Place new OCO order with updated SL
+                    new_oco_params = {
+                        'instId': exchange.market_id(symbol), 'tdMode': 'cash', 'side': 'sell', 'ordType': 'oco',
+                        'sz': exchange.amount_to_precision(symbol, trade['quantity']),
+                        'tpTriggerPx': exchange.price_to_precision(symbol, trade['take_profit']), 'tpOrdPx': '-1',
+                        'slTriggerPx': exchange.price_to_precision(symbol, new_stop_loss), 'slOrdPx': '-1'
+                    }
+                    new_oco_receipt = await exchange.private_post_trade_order_algo(new_oco_params)
+                    new_algo_id = new_oco_receipt['data'][0]['algoId']
+
+                    # Update database
+                    await conn.execute("UPDATE trades SET stop_loss = ?, algo_id = ? WHERE id = ?", (new_stop_loss, new_algo_id, trade['id']))
+                    await conn.commit()
+
+                    sl_percent = (1 - new_stop_loss / trade['entry_price']) * 100
+                    await bot.send_message(TELEGRAM_CHAT_ID, f"**📈 تم رفع وقف الخسارة لـ {symbol}**\n**الوقف الجديد:** `{new_stop_loss:,.4f}` (now at {sl_percent:+.2f}%)", parse_mode=ParseMode.MARKDOWN)
+
+        except Exception as e:
+            logger.error(f"Error during TSL for trade #{trade['id']} ({trade['symbol']}): {e}")
+
 
 # =======================================================================================
-# --- 📱 Telegram UI Functions ---
+# --- 📱 Telegram UI Functions (No change, but fixes are implicitly inherited) ---
 # =======================================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"]]
-    await update.message.reply_text("أهلاً بك في بوت OKX القناص v8.4 (Bulletproof)", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True))
+    await update.message.reply_text("أهلاً بك في بوت OKX القناص v8.5 (TSL Active)", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True))
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -810,12 +856,10 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                     total_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades")).fetchone())[0]
                     active_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status IN ('active', 'pending_protection')")).fetchone())[0]
                 
-                # --- BULLETPROOF FIX: Use the reliable is_connected() method ---
                 ws_status = 'متصل ✅' if bot_state.ws_manager and bot_state.ws_manager.is_connected() else 'غير متصل ❌'
-                
                 scanners_text = escape_markdown(', '.join(settings.get('active_scanners',[])))
                 
-                report = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v8.4)**\n",
+                report = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v8.5)**\n",
                           f"--- **📊 حالة السوق الحالية** ---\n- **المزاج العام:** {mood['mood']} ({escape_markdown(mood['reason'])})\n- **مؤشر BTC:** {mood.get('btc_mood', 'N/A')}\n",
                           f"--- **🔬 أداء آخر فحص** ---\n- **وقت البدء:** {scan.get('last_start', 'N/A')}\n",
                           f"--- **🔧 الإعدادات النشطة** ---\n- **النمط الحالي:** {settings.get('active_preset', 'N/A')}\n- **الماسحات المفعلة:** {scanners_text}\n",
@@ -878,10 +922,7 @@ async def main():
     bot_state.exchange = ccxt.okx({
         'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 
         'password': OKX_API_PASSPHRASE, 'enableRateLimit': True, 
-        'options': {
-            'defaultType': 'spot',
-            'hostname': 'aws.okx.com'
-        }
+        'options': {'defaultType': 'spot', 'hostname': 'aws.okx.com'}
     })
     
     ws_manager = WebSocketManager(bot_state.exchange)
@@ -901,7 +942,7 @@ async def main():
     try:
         await bot_state.exchange.fetch_balance()
         logger.info("✅ OKX connection test SUCCEEDED.")
-        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Phoenix v8.4 (Bulletproof) بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Phoenix v8.5 (TSL Active) بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
         
         async with app:
             await app.start()
