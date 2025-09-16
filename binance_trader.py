@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 بوت OKX القناص v6.0 (The Resilient) - نسخة الموارد المحدودة 🚀 ---
+# --- 🚀 بوت OKX القناص v6.1 (The Resilient - نسخة مُعدلة بالحل الجذري) 🚀 ---
 # =======================================================================================
-# هذا الإصدار يعالج مشاكل بدء التشغيل على السيرفرات ذات الموارد المحدودة.
-# المبدأ: تأخير تحميل المكتبات الثقيلة (pandas, ccxt) إلى لحظة استخدامها فقط.
+# هذا الإصدار يحتوي على تعديل جذري في منطق تنفيذ الصفقات لحل مشكلة خطأ الرصيد (51008).
+# المبدأ: بعد تأكيد الشراء، ينتظر البوت بشكل فعال حتى تتم تسوية الرصيد وظهوره في المحفظة
+# قبل محاولة وضع أوامر الحماية، مما يقضي على السباق الزمني (Race Condition).
 # =======================================================================================
 
 # --- المكتبات الخفيفة (يتم تحميلها دائمًا) ---
@@ -54,7 +55,7 @@ DB_FILE = os.path.join(APP_ROOT, 'okx_mastermind_v6.db')
 SETTINGS_FILE = os.path.join(APP_ROOT, 'okx_mastermind_settings_v6.json')
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger("OKX_Mastermind_v6.0")
+logger = logging.getLogger("OKX_Mastermind_v6.1")
 
 class BotState:
     def __init__(self):
@@ -435,8 +436,33 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
 # =======================================================================================
 # --- 🦾 جسد البوت: منطق التشغيل والفحص والتداول 🦾 ---
 # =======================================================================================
+
+async def wait_for_balance(exchange, currency: str, expected_quantity: float, timeout_seconds=60):
+    """
+    تنتظر بشكل ذكي حتى يظهر رصيد عملة معينة في الحساب بعد عملية شراء.
+    """
+    logger.info(f"⏳ Waiting for balance of {currency} to appear...")
+    start_time = time.time()
+    while time.time() - start_time < timeout_seconds:
+        try:
+            balance = await exchange.fetch_balance()
+            available_balance = balance.get('free', {}).get(currency, 0.0)
+            
+            # نتحقق إذا كان الرصيد المتاح قريبًا بما فيه الكفاية من الكمية المتوقعة
+            # نسمح بهامش خطأ بسيط جداً بسبب رسوم التداول وغيره
+            if available_balance >= expected_quantity * 0.995:
+                logger.info(f"✅ Balance for {currency} confirmed: {available_balance}")
+                return True
+        except Exception as e:
+            logger.warning(f"Could not fetch balance while waiting for {currency}: {e}")
+        
+        await asyncio.sleep(2) # انتظر ثانيتين قبل المحاولة التالية
+
+    logger.error(f"TIMEOUT: Failed to confirm balance for {currency} within {timeout_seconds} seconds.")
+    return False
+
 async def execute_atomic_trade(signal, bot: "telegram.Bot"):
-    await ensure_libraries_loaded() # <-- تحميل المكتبات عند الحاجة
+    await ensure_libraries_loaded()
     symbol, settings, exchange = signal['symbol'], bot_state.settings, bot_state.exchange
     logger.info(f"Executing ARMORED trade for {symbol}.")
     
@@ -445,18 +471,33 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
         quantity_to_buy = settings['real_trade_size_usdt'] / signal['entry_price']
         buy_order = await exchange.create_market_buy_order(symbol, quantity_to_buy)
         buy_order_id = buy_order['id']
-        for i in range(24):
+
+        # --- الجزء المعدل للتحقق من أمر الشراء ---
+        for i in range(24): # انتظر دقيقة كحد أقصى
             await asyncio.sleep(2.5)
-            order_status = await exchange.fetch_order(buy_order_id, symbol)
-            if order_status and order_status.get('status') in ['filled', 'closed']:
-                verified_order = order_status
-                logger.info(f"✅ STAGE 1 PASSED: Buy order {verified_order['id']} confirmed.")
-                break
-        if not verified_order: raise Exception(f"Buy order confirmation failed. Manual check required for order ID {buy_order_id}.")
+            try:
+                order_status = await exchange.fetch_order(buy_order_id, symbol)
+                if order_status and order_status.get('status') in ['closed', 'filled'] and order_status.get('filled', 0) > 0:
+                    verified_order = order_status
+                    logger.info(f"✅ STAGE 1 PASSED: Buy order {verified_order['id']} confirmed as filled.")
+                    break
+            except ccxt.OrderNotFound:
+                logger.warning(f"Order {buy_order_id} not found yet, retrying...")
+                continue # استمر في المحاولة
         
-        avg_price, filled_qty = verified_order.get('average', signal['entry_price']), verified_order.get('filled', 0)
-        if not avg_price or not filled_qty: raise Exception(f"Order confirmed but has no avg price or filled quantity.")
+        if not verified_order: 
+            raise Exception(f"Buy order confirmation failed. Manual check required for order ID {buy_order_id}.")
         
+        avg_price = verified_order.get('average', signal['entry_price'])
+        filled_qty = verified_order.get('filled', 0)
+        base_currency = symbol.split('/')[0]
+
+        # --- [الحل الجذري] انتظر حتى تتم تسوية الرصيد ---
+        balance_confirmed = await wait_for_balance(exchange, base_currency, filled_qty)
+        if not balance_confirmed:
+            raise Exception(f"Balance settlement failed for {base_currency}. Position might be unprotected.")
+        # ------------------------------------------------
+
         original_risk = signal['entry_price'] - signal['stop_loss']
         final_sl, final_tp = avg_price - original_risk, avg_price + (original_risk * settings['risk_reward_ratio'])
         
@@ -466,17 +507,16 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
             'tpTriggerPx': exchange.price_to_precision(symbol, final_tp), 'tpOrdPx': '-1',
             'slTriggerPx': exchange.price_to_precision(symbol, final_sl), 'slOrdPx': '-1'
         }
-        for attempt in range(6):
-            oco_receipt = await exchange.private_post_trade_order_algo(oco_params)
-            if oco_receipt and oco_receipt.get('data') and oco_receipt['data'][0].get('sCode') == '0':
-                algo_id = oco_receipt['data'][0]['algoId']
-                logger.info(f"✅ STAGE 2 PASSED: OCO protection placed. Algo ID: {algo_id}")
-                break
-            elif oco_receipt and oco_receipt.get('data') and oco_receipt['data'][0].get('sCode') == '51008':
-                logger.warning(f"OCO failed with Insufficient Funds (51008), retrying in 10s...")
-                if attempt < 5: await asyncio.sleep(10)
-                continue
-            else: raise ccxt.ExchangeError(f"Failed to place OCO: {json.dumps(oco_receipt)}")
+        
+        # الآن، محاولة واحدة لوضع أمر الحماية يجب أن تكون كافية
+        oco_receipt = await exchange.private_post_trade_order_algo(oco_params)
+        if oco_receipt and oco_receipt.get('data') and oco_receipt['data'][0].get('sCode') == '0':
+            algo_id = oco_receipt['data'][0]['algoId']
+            logger.info(f"✅ STAGE 2 PASSED: OCO protection placed. Algo ID: {algo_id}")
+        else:
+            # إذا فشل الأمر حتى بعد تأكيد الرصيد، فهناك مشكلة أخرى
+            raise ccxt.ExchangeError(f"Failed to place OCO despite balance confirmation: {json.dumps(oco_receipt)}")
+        
         if not algo_id: raise Exception("Failed to place OCO protection. Position is UNPROTECTED.")
         
         signal['final_tp'], signal['final_sl'] = final_tp, final_sl
@@ -489,12 +529,21 @@ async def execute_atomic_trade(signal, bot: "telegram.Bot"):
                        f"🛑 **الوقف:** `{final_sl:,.4f}` (-{sl_percent:.2f}%)\n\n"
                        f"***تم تأمين الصفقة بنجاح بأمر OCO.***")
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=success_msg, parse_mode=ParseMode.MARKDOWN)
+
     except Exception as e:
         logger.critical(f"CRITICAL FAILURE during armored trade for {symbol}: {e}", exc_info=True)
         error_message = f"**🔥🔥🔥 فشل حرج - {symbol}**\n\n"
-        if verified_order and not algo_id: error_message += f"🚨 **خطر! تم الشراء ولكن فشل وضع الحماية.**\n**الكمية:** `{verified_order.get('filled', 'N/A')}`\n**السعر:** `{verified_order.get('average', 'N/A')}`\n\n**❗️ الصفقة مفتوحة وبدون حماية! تدخل يدوي فوري.**"
-        elif buy_order_id and not verified_order: error_message += f"⚠️ **تحذير: لم أتمكن من تأكيد الشراء.**\n**معرف الأمر:** `{buy_order_id}`\n\n**يرجى التحقق من المنصة يدويًا.**"
-        else: error_message += f"**الخطأ:** `{str(e)}`"
+        if verified_order and not algo_id:
+            error_message += (f"🚨 **خطر! تم شراء الصفقة بنجاح ولكن فشلت كل محاولات وضع أمر الحماية.**\n"
+                            f"**الكمية المشتراة:** `{verified_order.get('filled', 'N/A')}`\n"
+                            f"**متوسط السعر:** `{verified_order.get('average', 'N/A')}`\n\n"
+                            f"**❗️ الصفقة مفتوحة الآن وبدون حماية! يرجى التدخل اليدوي الفوري لوضع وقف الخسارة.**")
+        elif buy_order_id and not verified_order:
+            error_message += (f"⚠️ **تحذير: لم أتمكن من تأكيد الشراء.**\n"
+                            f"**معرف الأمر:** `{buy_order_id}`\n\n"
+                            f"**يرجى التحقق من المنصة يدوياً.**")
+        else:
+            error_message += f"**الخطأ:** `{str(e)}`\n\n**يرجى التحقق من المنصة يدوياً.**"
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=error_message, parse_mode=ParseMode.MARKDOWN)
 
 async def worker(queue, signals_list, failure_counter):
@@ -624,12 +673,9 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
 # =======================================================================================
 # --- 📱 واجهة التحكم عبر تليجرام (النسخة الكاملة) 📱 ---
 # =======================================================================================
-# ... (All Telegram handler functions remain the same as v5.5) ...
-# To save space, I will omit the full Telegram UI code here, but it should be pasted from the v5.5 version.
-# Just paste all functions from `start_command` to `button_callback_handler` here.
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"]]
-    await update.message.reply_text("أهلاً بك في بوت OKX القناص v6.0 (The Resilient)", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True))
+    await update.message.reply_text("أهلاً بك في بوت OKX القناص v6.1 (The Resilient)", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True))
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -757,7 +803,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 ws_status = 'غير متصل ❌'
                 if bot_state.ws_manager and bot_state.ws_manager.is_connected.is_set():
                     ws_status = 'متصل ✅'
-                report = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v6.0)**\n",
+                report = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v6.1)**\n",
                           f"--- **📊 حالة السوق الحالية** ---\n- **المزاج العام:** {mood['mood']} ({escape_markdown(mood['reason'])})\n- **مؤشر BTC:** {mood['btc_mood']}\n- **الخوف والطمع:** {mood['fng']}\n",
                           f"--- **🔬 أداء آخر فحص** ---\n- **وقت البدء:** {scan['last_start'].strftime('%Y-%m-%d %H:%M') if scan['last_start'] else 'N/A'}\n- **المدة:** {scan['last_duration']}\n- **العملات المفحوصة:** {scan['markets_scanned']}\n- **فشل في تحليل:** {scan['failures']} عملات\n",
                           f"--- **🔧 الإعدادات النشطة** ---\n- **النمط الحالي:** {settings['active_preset']}\n- **الماسحات المفعلة:** {escape_markdown(', '.join(settings['active_scanners']))}\n",
@@ -858,7 +904,7 @@ async def main():
         await bot_state.exchange.fetch_balance()
         logger.info("✅ OKX connection test SUCCEEDED.")
         
-        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Resilient v6.0 بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Resilient v6.1 بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
         
         async with app:
             await app.start()
