@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Bot v8.3 (The Phoenix - Stable) 🚀 ---
+# --- 🚀 OKX Bot v8.4 (The Phoenix - Bulletproof) 🚀 ---
 # =======================================================================================
-# This version provides a comprehensive fix for the UI button handlers,
-# resolving the 'sqlite3.Row' object attribute error and ensuring all
-# dashboard functions operate correctly. This should be the final stable version.
+# This version implements a comprehensive fix for both the UI and the core logic.
+# 1. Fixes the UI button handler 'AttributeError' for flawless dashboard operation.
+# 2. Fixes the critical race condition in the Postman by adding a retry mechanism,
+#    ensuring trades are always found in the DB for protection.
 # =======================================================================================
 
 # --- Libraries ---
@@ -50,7 +51,7 @@ DB_FILE = os.path.join(APP_ROOT, 'okx_phoenix_v8.db')
 SETTINGS_FILE = os.path.join(APP_ROOT, 'okx_phoenix_settings_v8.json')
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger("OKX_Phoenix_v8.3_Stable")
+logger = logging.getLogger("OKX_Phoenix_v8.4_Bulletproof")
 
 class BotState:
     def __init__(self):
@@ -181,8 +182,8 @@ async def init_database():
 async def log_initial_trade_to_db(signal, buy_order):
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
-            sql = '''INSERT INTO trades (timestamp, symbol, entry_price, take_profit, stop_loss, quantity, reason, order_id, status)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'''
+            sql = '''INSERT INTO trades (timestamp, symbol, entry_price, take_profit, stop_loss, quantity, reason, order_id, status, entry_value_usdt)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'''
             params = (
                 datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'),
                 signal['symbol'],
@@ -192,7 +193,8 @@ async def log_initial_trade_to_db(signal, buy_order):
                 buy_order['amount'],
                 signal['reason'],
                 buy_order['id'],
-                'pending_protection'
+                'pending_protection',
+                buy_order['cost']
             )
             cursor = await conn.execute(sql, params)
             await conn.commit()
@@ -492,27 +494,37 @@ async def handle_filled_buy_order(order_data):
 
     logger.info(f"📬 [Postman] Received fill event for order {order_id} ({symbol}). Preparing protection...")
     try:
-        async with aiosqlite.connect(DB_FILE) as conn:
-            conn.row_factory = aiosqlite.Row
-            async with conn.execute("SELECT * FROM trades WHERE order_id = ? AND status = 'pending_protection'", (order_id,)) as cursor:
-                trade = await cursor.fetchone()
+        trade = None
+        # --- BULLETPROOF FIX: Retry mechanism to solve the race condition ---
+        for attempt in range(5): # Retry for up to 2.5 seconds
+            async with aiosqlite.connect(DB_FILE) as conn:
+                conn.row_factory = aiosqlite.Row
+                async with conn.execute("SELECT * FROM trades WHERE order_id = ? AND status = 'pending_protection'", (order_id,)) as cursor:
+                    trade = await cursor.fetchone()
+            if trade:
+                logger.info(f"[Postman] Found matching trade for order {order_id} on attempt {attempt + 1}.")
+                break
+            else:
+                logger.warning(f"[Postman] Attempt {attempt + 1}: No matching trade for order {order_id} yet. Retrying...")
+                await asyncio.sleep(0.5)
+        
+        if not trade:
+            logger.error(f"[Postman] CRITICAL: Could not find trade for order {order_id} after all retries. Manual intervention required!")
+            return
 
-            if not trade:
-                logger.warning(f"[Postman] No matching 'pending_protection' trade for order {order_id}.")
-                return
-
-            trade = dict(trade)
-            original_risk = trade['entry_price'] - trade['stop_loss']
-            final_tp = avg_price + (original_risk * bot_state.settings['risk_reward_ratio'])
-            final_sl = avg_price - original_risk
-            
-            oco_params = {
-                'instId': bot_state.exchange.market_id(symbol), 'tdMode': 'cash', 'side': 'sell', 'ordType': 'oco',
-                'sz': bot_state.exchange.amount_to_precision(symbol, filled_qty),
-                'tpTriggerPx': bot_state.exchange.price_to_precision(symbol, final_tp), 'tpOrdPx': '-1',
-                'slTriggerPx': bot_state.exchange.price_to_precision(symbol, final_sl), 'slOrdPx': '-1'
-            }
-            
+        trade = dict(trade)
+        original_risk = trade['entry_price'] - trade['stop_loss']
+        final_tp = avg_price + (original_risk * bot_state.settings['risk_reward_ratio'])
+        final_sl = avg_price - original_risk
+        
+        oco_params = {
+            'instId': bot_state.exchange.market_id(symbol), 'tdMode': 'cash', 'side': 'sell', 'ordType': 'oco',
+            'sz': bot_state.exchange.amount_to_precision(symbol, filled_qty),
+            'tpTriggerPx': bot_state.exchange.price_to_precision(symbol, final_tp), 'tpOrdPx': '-1',
+            'slTriggerPx': bot_state.exchange.price_to_precision(symbol, final_sl), 'slOrdPx': '-1'
+        }
+        
+        async with aiosqlite.connect(DB_FILE) as conn: # Re-open connection for writing
             for attempt in range(3):
                 oco_receipt = await bot_state.exchange.private_post_trade_order_algo(oco_params)
                 if oco_receipt and oco_receipt.get('data') and oco_receipt['data'][0].get('sCode') == '0':
@@ -541,7 +553,7 @@ async def handle_filled_buy_order(order_data):
                     logger.warning(f"[Postman] OCO placement attempt {attempt + 1} failed. Response: {oco_receipt}")
                     await asyncio.sleep(2)
             
-            raise Exception(f"All Postman attempts to place OCO for trade #{trade['id']} failed.")
+        raise Exception(f"All Postman attempts to place OCO for trade #{trade['id']} failed.")
             
     except Exception as e:
         logger.critical(f"🔥 [Postman] CRITICAL FAILURE while protecting trade for order {order_id}: {e}", exc_info=True)
@@ -557,6 +569,9 @@ class WebSocketManager:
         self.ws_url = "wss://ws.okx.com:8443/ws/v5/private?brokerId=aws"
         self.websocket = None
         logger.info(f"[WS-Manager] Initialized with CORRECT URL for AWS: {self.ws_url}")
+
+    def is_connected(self):
+        return self.websocket is not None and self.websocket.state == websockets.protocol.State.OPEN
 
     def _get_auth_args(self):
         timestamp = str(time.time())
@@ -637,7 +652,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
 # =======================================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"]]
-    await update.message.reply_text("أهلاً بك في بوت OKX القناص v8.3 (Stable)", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True))
+    await update.message.reply_text("أهلاً بك في بوت OKX القناص v8.4 (Bulletproof)", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True))
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -732,15 +747,13 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     try:
         if data.startswith("dashboard_"):
             if query.message: 
-                try:
-                    await query.message.delete()
-                except BadRequest:
-                    pass # Message might have been deleted already
+                try: await query.message.delete()
+                except BadRequest: pass
             report_type = data.split("_", 1)[1]
             if report_type == "stats":
                 stats = []
                 async with aiosqlite.connect(DB_FILE) as conn:
-                     async with conn.execute("SELECT status, COUNT(*), SUM(pnl_usdt) FROM trades WHERE status != 'active' AND status != 'pending_protection' GROUP BY status") as cursor:
+                     async with conn.execute("SELECT status, COUNT(*), SUM(pnl_usdt) FROM trades WHERE status NOT IN ('active', 'pending_protection') GROUP BY status") as cursor:
                          stats = await cursor.fetchall()
                 counts, pnl = defaultdict(int), defaultdict(float)
                 for status, count, p in stats: counts[status], pnl[status] = count, p or 0
@@ -754,23 +767,22 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 trades = []
                 async with aiosqlite.connect(DB_FILE) as conn:
                     conn.row_factory = aiosqlite.Row
-                    async with conn.execute("SELECT id, symbol, entry_value_usdt, status FROM trades WHERE status = 'active' OR status = 'pending_protection' ORDER BY id DESC") as cursor:
+                    async with conn.execute("SELECT id, symbol, entry_value_usdt, status FROM trades WHERE status IN ('active', 'pending_protection') ORDER BY id DESC") as cursor:
                         trades = await cursor.fetchall()
                 if not trades: return await query.message.reply_text("لا توجد صفقات نشطة حالياً.")
                 keyboard = []
                 for t in trades:
-                    status_emoji = "🛡️" if t['status'] == 'active' else "⏳"
-                    # --- COMPREHENSIVE FIX ---
-                    # Use bracket notation for sqlite3.Row and check for key existence
-                    entry_value = t['entry_value_usdt'] if 'entry_value_usdt' in t.keys() and t['entry_value_usdt'] is not None else 0
-                    button_text = f"#{t['id']} {status_emoji} | {t['symbol']} | ${entry_value:.2f}"
-                    keyboard.append([InlineKeyboardButton(button_text, callback_data=f"check_{t['id']}")])
+                    trade_dict = dict(t)
+                    status_emoji = "🛡️" if trade_dict['status'] == 'active' else "⏳"
+                    entry_value = trade_dict.get('entry_value_usdt', 0)
+                    button_text = f"#{trade_dict['id']} {status_emoji} | {trade_dict['symbol']} | ${entry_value:.2f}"
+                    keyboard.append([InlineKeyboardButton(button_text, callback_data=f"check_{trade_dict['id']}")])
                 await query.message.reply_text("اختر صفقة لمتابعتها:", reply_markup=InlineKeyboardMarkup(keyboard))
             
             elif report_type == "strategy_report":
                 trades = []
                 async with aiosqlite.connect(DB_FILE) as conn:
-                    async with conn.execute("SELECT reason, status, pnl_usdt FROM trades WHERE status != 'active' AND status != 'pending_protection'") as cursor:
+                    async with conn.execute("SELECT reason, status, pnl_usdt FROM trades WHERE status NOT IN ('active', 'pending_protection')") as cursor:
                         trades = await cursor.fetchall()
                 if not trades: return await query.message.reply_text("لا توجد صفقات مغلقة لتحليلها.")
                 stats = defaultdict(lambda: {'wins': 0, 'losses': 0, 'pnl': 0.0})
@@ -796,15 +808,14 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 total_trades, active_trades = 0, 0
                 async with aiosqlite.connect(DB_FILE) as conn:
                     total_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades")).fetchone())[0]
-                    active_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active' OR status = 'pending_protection'")).fetchone())[0]
+                    active_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status IN ('active', 'pending_protection')")).fetchone())[0]
                 
-                ws_status = 'غير متصل ❌'
-                if bot_state.ws_manager and bot_state.ws_manager.websocket and bot_state.ws_manager.websocket.is_open:
-                    ws_status = 'متصل ✅'
+                # --- BULLETPROOF FIX: Use the reliable is_connected() method ---
+                ws_status = 'متصل ✅' if bot_state.ws_manager and bot_state.ws_manager.is_connected() else 'غير متصل ❌'
                 
                 scanners_text = escape_markdown(', '.join(settings.get('active_scanners',[])))
                 
-                report = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v8.3)**\n",
+                report = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v8.4)**\n",
                           f"--- **📊 حالة السوق الحالية** ---\n- **المزاج العام:** {mood['mood']} ({escape_markdown(mood['reason'])})\n- **مؤشر BTC:** {mood.get('btc_mood', 'N/A')}\n",
                           f"--- **🔬 أداء آخر فحص** ---\n- **وقت البدء:** {scan.get('last_start', 'N/A')}\n",
                           f"--- **🔧 الإعدادات النشطة** ---\n- **النمط الحالي:** {settings.get('active_preset', 'N/A')}\n- **الماسحات المفعلة:** {scanners_text}\n",
@@ -890,7 +901,7 @@ async def main():
     try:
         await bot_state.exchange.fetch_balance()
         logger.info("✅ OKX connection test SUCCEEDED.")
-        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Phoenix v8.3 (Stable) بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Phoenix v8.4 (Bulletproof) بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
         
         async with app:
             await app.start()
