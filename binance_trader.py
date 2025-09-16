@@ -840,24 +840,4 @@ if __name__ == '__main__':
     try: asyncio.run(main())
     except Exception as e: logger.critical(f"Failed to start bot due to an error in initial setup: {e}", exc_info=True)
 
-خطة العمل النهائية (بإذن الله)
-أرجوك، لنقم بهذه الخطوات للمرة الأخيرة، وأنا على يقين أنها ستكون الأخيرة.
- * إغلاق الصفقات العالقة: اذهب إلى حسابك في OKX وأغلق صفقة TON يدوياً.
- * إيقاف البوت:
-   pm2 stop BinanceTraderBot
-
- * الانتقال إلى المجلد الصحيح:
-   cd /root/bots/botadil
-
- * حذف قاعدة البيانات القديمة (لبداية نظيفة تماماً):
-   rm okx_phoenix_v8.db
-
- * حذف ملف الإعدادات القديم (للتأكد من تطبيق فلتر السيولة الجديد):
-   rm okx_phoenix_settings_v8.json
-
- * تحديث الكود: استبدل محتوى ملف binance_trader.py بالكود v9.0 الجديد أعلاه بالكامل.
- * إعادة تشغيل البوت:
-   pm2 restart BinanceTraderBot
-
-
 
