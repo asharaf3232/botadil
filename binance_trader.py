@@ -868,7 +868,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         except: pass
 
 # =======================================================================================
-# --- 🚀 نقطة انطلاق البوت (مع تعديل نقطة الوصول) 🚀 ---
+# --- 🚀 نقطة انطلاق البوت 🚀 ---
 # =======================================================================================
 async def main():
     logger.info("--- Bot process starting ---")
@@ -883,17 +883,11 @@ async def main():
     bot_state.application = app
 
     await ensure_libraries_loaded()
-    
-    # =====================[ التعديل الجديد هنا ]=====================
     bot_state.exchange = ccxt.okx({
         'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 
         'password': OKX_API_PASSPHRASE, 'enableRateLimit': True, 
-        'options': {
-            'defaultType': 'spot',
-            'hostname': 'aws.okx.com'  # <-- توجيه الاتصال إلى سيرفرات أمازون الخاصة بالمنصة
-         }
+        'options': {'defaultType': 'spot'}
     })
-    # ===============================================================
     
     ws_manager = WebSocketManager(bot_state)
     ws_task = asyncio.create_task(ws_manager.run())
@@ -906,7 +900,7 @@ async def main():
     scan_interval = bot_state.settings.get("scan_interval_seconds", 900)
     track_interval = bot_state.settings.get("track_interval_seconds", 60)
     app.job_queue.run_repeating(perform_scan, interval=scan_interval, first=10, name="perform_scan")
-    app.job_queue.run_repeating(track_trades, interval=track_interval, first=30, name="track_trades")
+    app.job_queue.run_repeating(track_open_trades, interval=track_interval, first=30, name="track_trades")
     
     try:
         await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Phoenix v8.0 بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
@@ -927,3 +921,9 @@ async def main():
         if 'app' in locals() and app.running: await app.stop()
         if bot_state.exchange: await bot_state.exchange.close(); logger.info("CCXT exchange connection closed.")
         logger.info("Bot has been shut down.")
+
+if __name__ == '__main__':
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        logger.critical(f"Failed to start bot due to an error in initial setup: {e}", exc_info=True)
