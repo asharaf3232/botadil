@@ -1,21 +1,20 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Ultimate Trader v21.0 (The Postman) 🚀 ---
+# --- 🚀 OKX Guardian Trader v22.0 🚀 ---
 # =======================================================================================
-# This is the definitive version, fusing the best elements from all predecessors.
+# This is the definitive, reliable version built on proven, stable components.
 #
 # ARCHITECTURE:
-# 1. FOCUS: Operates exclusively on OKX for both scanning and real trading.
-# 2. INTELLIGENCE: Utilizes a multi-strategy analytical brain with advanced asset filters.
-# 3. EXECUTION: Employs the "Postman" protocol. After a buy order is filled,
-#    it immediately dispatches an OCO (One-Cancels-the-Other) order to the
-#    exchange itself. This ensures trades are protected by TP/SL directly on
-#    the exchange servers, offering maximum reliability and speed.
+# 1. FOCUS: Operates exclusively on OKX.
+# 2. INTELLIGENCE: Uses a multi-strategy brain with a powerful asset blacklist.
+# 3. EXECUTION: Employs the "Guardian" protocol. After a buy order is filled,
+#    the bot itself takes full responsibility for monitoring the trade's price
+#    in real-time via a dedicated Public WebSocket. It actively watches to
+#    close the trade at TP or SL.
 #
-# DEPRECATED:
-# - Multi-exchange scanning logic.
-# - The self-hosted TradeGuardian and Public WebSocket price tracker are now
-#   obsolete, replaced by the far superior server-side OCO protection.
+# DEPRECATED AND REMOVED:
+# - The unreliable "Postman" (OCO) protocol due to its instability.
+# - All multi-exchange logic.
 # =======================================================================================
 
 # --- Core Libraries ---
@@ -27,7 +26,6 @@ import re
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from collections import defaultdict
 import hmac
 import base64
 
@@ -61,24 +59,21 @@ except ImportError:
 # =======================================================================================
 load_dotenv()
 
-# --- API Keys & Telegram ---
 OKX_API_KEY = os.getenv('OKX_API_KEY')
 OKX_API_SECRET = os.getenv('OKX_API_SECRET')
 OKX_API_PASSPHRASE = os.getenv('OKX_API_PASSPHRASE')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-# --- Bot Settings ---
 TIMEFRAME = '15m'
 SCAN_INTERVAL_SECONDS = 900
 
-# --- File Paths & Logging ---
 APP_ROOT = '.'
-DB_FILE = os.path.join(APP_ROOT, 'ultimate_trader_v21.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'ultimate_trader_settings_v21.json')
+DB_FILE = os.path.join(APP_ROOT, 'guardian_trader_v22.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'guardian_trader_settings_v22.json')
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger("OKX_Ultimate_Trader")
+logger = logging.getLogger("OKX_Guardian_Trader")
 
 # =======================================================================================
 # --- 🔬 Global Bot State & Locks 🔬 ---
@@ -88,11 +83,15 @@ class BotState:
         self.settings = {}
         self.last_signal_time = {}
         self.application = None
-        self.exchange = None # This will be our single, powerful connection to OKX
-        self.private_ws = None
+        self.exchange = None
+        # --- The Guardian's Tools ---
+        self.private_ws = None # The 'ear' for order confirmations
+        self.public_ws = None  # The 'eyes' for price tracking
+        self.trade_guardian = None # The 'brain' for managing active trades
 
 bot_data = BotState()
 scan_lock = asyncio.Lock()
+trade_management_lock = asyncio.Lock()
 
 # =======================================================================================
 # --- 💡 Default Settings & Filters 💡 ---
@@ -103,22 +102,21 @@ DEFAULT_SETTINGS = {
     "top_n_symbols_by_volume": 300,
     "atr_sl_multiplier": 2.5,
     "risk_reward_ratio": 2.0,
+    "trailing_sl_enabled": True,
+    "trailing_sl_activation_percent": 1.5,
+    "trailing_sl_callback_percent": 1.0,
     "active_scanners": ["momentum_breakout", "breakout_squeeze_pro", "rsi_divergence", "supertrend_pullback"],
     "min_signal_strength": 1,
-    # --- The new advanced asset filter ---
     "asset_blacklist": [
-        # Stablecoins
-        "USDC", "DAI", "TUSD", "FDUSD", "USDD", "PYUSD",
-        # Exchange Tokens (for Sharia compliance)
-        "BNB", "OKB", "KCS", "BGB", "MX", "GT", "HT",
-        # "Giants" (for strategic reasons)
-        "BTC", "ETH"
+        "USDC", "DAI", "TUSD", "FDUSD", "USDD", "PYUSD", # Stablecoins
+        "BNB", "OKB", "KCS", "BGB", "MX", "GT", "HT",    # Exchange Tokens
+        "BTC", "ETH"                                    # Giants
     ],
     "liquidity_filters": {"min_quote_volume_24h_usd": 1000000, "max_spread_percent": 0.5},
     "strategy_params": {
         "momentum_breakout": {"rsi_max_level": 68},
         "breakout_squeeze_pro": {"bbands_period": 20, "keltner_period": 20, "keltner_atr_multiplier": 1.5},
-        "rsi_divergence": {"rsi_period": 14, "lookback_period": 35, "confirm_with_rsi_exit": True},
+        "rsi_divergence": {"rsi_period": 14, "lookback_period": 35},
         "supertrend_pullback": {"atr_period": 10, "atr_multiplier": 3.0}
     }
 }
@@ -155,11 +153,12 @@ async def init_database():
                     id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, symbol TEXT,
                     entry_price REAL, take_profit REAL, stop_loss REAL, quantity REAL,
                     status TEXT, -- pending, active, successful, failed
-                    reason TEXT, order_id TEXT, algo_id TEXT -- algo_id for OCO
+                    reason TEXT, order_id TEXT,
+                    highest_price REAL DEFAULT 0, trailing_sl_active BOOLEAN DEFAULT 0
                 )
             ''')
             await conn.commit()
-        logger.info("Ultimate database initialized successfully.")
+        logger.info("Guardian database initialized successfully.")
     except Exception as e: logger.critical(f"Database initialization failed: {e}")
 
 async def log_pending_trade_to_db(signal, buy_order):
@@ -177,7 +176,7 @@ async def log_pending_trade_to_db(signal, buy_order):
 # =======================================================================================
 # --- 🧠 Advanced Scanners (The Brain) 🧠 ---
 # =======================================================================================
-# [Note: Analysis functions remain the same, they are the core intelligence]
+# [Analysis functions remain unchanged]
 def find_col(df_columns, prefix):
     try: return next(col for col in df_columns if col.startswith(prefix))
     except StopIteration: return None
@@ -234,79 +233,110 @@ SCANNERS = {
 }
 
 # =======================================================================================
-# --- 🦾 The Postman Protocol (Execution Body) 🦾 ---
+# --- 🛡️ The Guardian Protocol (Reliable Execution Body) 🛡️ ---
 # =======================================================================================
 async def handle_filled_buy_order(order_data):
-    """
-    The Postman's core task: Triggered by the Private WS on a successful buy.
-    It immediately dispatches the OCO protection order.
-    """
     symbol = order_data['instId'].replace('-', '/'); order_id = order_data['ordId']
     filled_qty = float(order_data.get('fillSz', 0)); avg_price = float(order_data.get('avgPx', 0))
     if filled_qty == 0 or avg_price == 0: return
 
-    logger.info(f"📬 [Postman] Received fill for order {order_id} ({symbol}). Preparing OCO protection...")
+    logger.info(f"✅ Order {order_id} filled for {symbol}. Activating Guardian protocol.")
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
             conn.row_factory = aiosqlite.Row
-            cursor = await conn.execute("SELECT * FROM trades WHERE order_id = ? AND status = 'pending'", (order_id,))
-            trade = await cursor.fetchone()
-            if not trade:
-                logger.warning(f"[Postman] No matching 'pending' trade for order {order_id}. Ignoring.")
-                return
-
-            trade = dict(trade)
-            # Recalculate TP/SL based on actual fill price for max accuracy
-            risk = avg_price - trade['stop_loss']
-            final_tp = avg_price + (risk * bot_data.settings['risk_reward_ratio'])
-
-            # Prepare the OCO order parameters for the exchange API
-            oco_params = {
-                'instId': bot_data.exchange.market_id(symbol), 'tdMode': 'cash', 'side': 'sell', 'ordType': 'oco',
-                'sz': bot_data.exchange.amount_to_precision(symbol, filled_qty),
-                'tpTriggerPx': bot_data.exchange.price_to_precision(symbol, final_tp), 'tpOrdPx': '-1', # -1 for market order
-                'slTriggerPx': bot_data.exchange.price_to_precision(symbol, trade['stop_loss']), 'slOrdPx': '-1'
-            }
-
-            # Attempt to place the OCO order with retries
-            for attempt in range(3):
-                oco_receipt = await bot_data.exchange.private_post_trade_order_algo(oco_params)
-                if oco_receipt and oco_receipt.get('data') and oco_receipt['data'][0].get('sCode') == '0':
-                    algo_id = oco_receipt['data'][0]['algoId']
-                    logger.info(f"✅ [Postman] OCO protection delivered for trade ID {trade['id']}. Algo ID: {algo_id}")
-
-                    await conn.execute(
-                        "UPDATE trades SET status = 'active', entry_price = ?, quantity = ?, take_profit = ?, algo_id = ? WHERE id = ?",
-                        (avg_price, filled_qty, final_tp, algo_id, trade['id'])
-                    )
-                    await conn.commit()
-
-                    tp_percent = (final_tp / avg_price - 1) * 100
-                    sl_percent = (1 - trade['stop_loss'] / avg_price) * 100
-                    success_msg = (f"**✅🛡️ صفقة مصفحة | {symbol} (ID: {trade['id']})**\n"
-                                   f"🔍 **الاستراتيجية:** {trade['reason']}\n\n"
-                                   f"📈 **الشراء:** `{avg_price:,.4f}`\n"
-                                   f"🎯 **الهدف:** `{final_tp:,.4f}` (+{tp_percent:.2f}%)\n"
-                                   f"🛑 **الوقف:** `{trade['stop_loss']:,.4f}` (-{sl_percent:.2f}%)\n\n"
-                                   f"***تم تأمين الصفقة بنجاح على خوادم المنصة.***")
-                    await safe_send_message(bot_data.application.bot, success_msg)
-                    return # Mission accomplished
-                else:
-                    logger.warning(f"[Postman] OCO placement attempt {attempt + 1} failed. Retrying...")
-                    await asyncio.sleep(2)
+            cursor = await conn.execute("SELECT * FROM trades WHERE order_id = ?", (order_id,))
+            trade = dict(await cursor.fetchone())
             
-            raise Exception(f"All Postman attempts to place OCO for trade #{trade['id']} failed.")
+            risk = avg_price - trade['stop_loss']
+            new_take_profit = avg_price + (risk * bot_data.settings['risk_reward_ratio'])
 
+            await conn.execute(
+                "UPDATE trades SET status = 'active', entry_price = ?, quantity = ?, take_profit = ? WHERE order_id = ?",
+                (avg_price, filled_qty, new_take_profit, order_id)
+            )
+            await conn.commit()
+
+        # This is the critical step: Tell the Guardian to start watching this symbol
+        await bot_data.public_ws.subscribe([symbol])
+        
+        success_msg = f"**✅ تم تنفيذ الشراء | {symbol}**\n\nالصفقة الآن نشطة والحارس الأمين يراقبها لحظة بلحظة."
+        await safe_send_message(bot_data.application.bot, success_msg)
     except Exception as e:
-        logger.critical(f"🔥 [Postman] CRITICAL FAILURE while protecting {order_id}: {e}", exc_info=True)
-        error_message = (f"**🔥🔥🔥 فشل حرج لساعي البريد - {symbol}**\n\n"
-                         f"🚨 **خطر!** تم تنفيذ الشراء ولكن **فشل وضع الحماية تلقائيًا**.\n"
-                         f"**معرف الأمر:** `{order_id}`\n\n"
-                         f"**❗️ تدخل يدوي فوري ضروري لوضع وقف الخسارة!**")
-        await safe_send_message(bot_data.application.bot, error_message)
+        logger.error(f"Handle Fill Error for {order_id}: {e}", exc_info=True)
+
+class TradeGuardian:
+    """The heart of the execution body. Monitors active trades via live WebSocket ticker data."""
+    def __init__(self, application): self.application = application
+
+    async def handle_ticker_update(self, ticker_data):
+        async with trade_management_lock:
+            symbol = ticker_data['instId'].replace('-', '/'); current_price = float(ticker_data['last'])
+            try:
+                async with aiosqlite.connect(DB_FILE) as conn:
+                    conn.row_factory = aiosqlite.Row
+                    cursor = await conn.execute("SELECT * FROM trades WHERE symbol = ? AND status = 'active'", (symbol,))
+                    trade = await cursor.fetchone()
+                    if not trade: return
+
+                    trade = dict(trade)
+                    # This logic handles Trailing Stop Loss if enabled
+                    settings = bot_data.settings
+                    if settings['trailing_sl_enabled']:
+                        new_highest_price = max(trade.get('highest_price', 0), current_price)
+                        if new_highest_price > trade.get('highest_price', 0):
+                            await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (new_highest_price, trade['id']))
+
+                        if not trade['trailing_sl_active'] and current_price >= trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100):
+                            trade['trailing_sl_active'] = True
+                            await conn.execute("UPDATE trades SET trailing_sl_active = 1 WHERE id = ?", (trade['id'],))
+                            logger.info(f"Guardian: TSL activated for trade #{trade['id']}.")
+                            await safe_send_message(self.application.bot, f"**🚀 تأمين الأرباح! | #{trade['id']} {symbol}**")
+
+                        if trade['trailing_sl_active']:
+                            new_sl = new_highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
+                            if new_sl > trade['stop_loss']:
+                                trade['stop_loss'] = new_sl
+                                await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
+                    await conn.commit()
+                
+                # Check for TP/SL breach
+                if current_price >= trade['take_profit']: await self._close_trade(trade, "ناجحة (TP)", current_price)
+                elif current_price <= trade['stop_loss']: await self._close_trade(trade, "فاشلة (SL)", current_price)
+
+            except Exception as e: logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
+
+    async def _close_trade(self, trade, reason, close_price):
+        symbol = trade['symbol']
+        logger.info(f"Guardian: Closing trade #{trade['id']} for {symbol}. Reason: {reason}")
+        try:
+            # In a real scenario, we place the MARKET SELL order here
+            # For simplicity, we assume it's filled instantly at the trigger price
+            await bot_data.exchange.create_market_sell_order(symbol, trade['quantity'])
+            
+            pnl = (close_price - trade['entry_price']) * trade['quantity']
+            async with aiosqlite.connect(DB_FILE) as conn:
+                await conn.execute("UPDATE trades SET status = ?, exit_price = ? WHERE id = ?", (reason, close_price, trade['id']))
+                await conn.commit()
+
+            await bot_data.public_ws.unsubscribe([symbol])
+            pnl_percent = (close_price / trade['entry_price'] - 1) * 100
+            emoji = "✅" if pnl > 0 else "🛑"
+            msg = (f"**{emoji} تم إغلاق الصفقة | {symbol}**\n**السبب:** {reason}\n**الربح/الخسارة:** `${pnl:,.2f}` ({pnl_percent:+.2f}%)")
+            await safe_send_message(self.application.bot, msg)
+        except Exception as e: logger.critical(f"Guardian Close Trade Error #{trade['id']}: {e}", exc_info=True)
+
+    async def sync_subscriptions(self):
+        try:
+            async with aiosqlite.connect(DB_FILE) as conn:
+                cursor = await conn.execute("SELECT DISTINCT symbol FROM trades WHERE status = 'active'")
+                active_symbols = [row[0] for row in await cursor.fetchall()]
+            if active_symbols:
+                logger.info(f"Guardian: Syncing subscriptions for: {active_symbols}")
+                await bot_data.public_ws.subscribe(active_symbols)
+        except Exception as e: logger.error(f"Guardian Sync Error: {e}")
 
 class PrivateWebSocketManager:
-    """The bot's 'ear', listening for order fill confirmations from OKX."""
+    # [Identical to previous versions, handles order confirmations]
     def __init__(self): self.ws_url = "wss://ws.okx.com:8443/ws/v5/private"; self.websocket = None
     def _get_auth_args(self):
         timestamp = str(time.time()); message = timestamp + 'GET' + '/users/self/verify'
@@ -333,93 +363,89 @@ class PrivateWebSocketManager:
                         async for msg in ws: await self._message_handler(msg)
                     else: logger.error(f"🔥 [WS-Private] Auth failed: {login_response}")
             except Exception as e: logger.error(f"🔥 [WS-Private] Connection Error: {e}")
-            self.websocket = None; logger.warning("⚠️ [WS-Private] Disconnected. Reconnecting in 5s..."); await asyncio.sleep(5)
+            self.websocket = None; logger.warning("⚠️ [WS-Private] Disconnected. Reconnecting..."); await asyncio.sleep(5)
+
+class PublicWebSocketManager:
+    # [Identical to previous versions, handles price tickers for the Guardian]
+    def __init__(self, handler_coro): self.ws_url = "wss://ws.okx.com:8443/ws/v5/public"; self.handler = handler_coro; self.subscriptions = set(); self.websocket = None
+    async def _send_op(self, op, symbols):
+        if not symbols or self.websocket is None: return
+        try: await self.websocket.send(json.dumps({"op": op, "args": [{"channel": "tickers", "instId": s.replace('/', '-')} for s in symbols]}))
+        except websockets.exceptions.ConnectionClosed: logger.warning(f"Could not send '{op}' op; websocket is closed.")
+    async def subscribe(self, symbols):
+        new = [s for s in symbols if s not in self.subscriptions]
+        if new: await self._send_op('subscribe', new); self.subscriptions.update(new); logger.info(f"👁️ [Guardian] Now watching: {new}")
+    async def unsubscribe(self, symbols):
+        old = [s for s in symbols if s in self.subscriptions]
+        if old: await self._send_op('unsubscribe', old); [self.subscriptions.discard(s) for s in old]; logger.info(f"👁️ [Guardian] Stopped watching: {old}")
+    async def run(self):
+        while True:
+            try:
+                async with websockets.connect(self.ws_url, ping_interval=20, ping_timeout=20) as ws:
+                    self.websocket = ws; logger.info("✅ [WS-Public] Guardian's eyes are open.")
+                    if self.subscriptions: await self.subscribe(list(self.subscriptions))
+                    async for msg in ws:
+                        if msg == 'ping': await ws.send('pong'); continue
+                        data = json.loads(msg)
+                        if data.get('arg', {}).get('channel') == 'tickers' and 'data' in data:
+                            for ticker in data['data']: asyncio.create_task(self.handler(ticker))
+            except Exception as e: logger.error(f"🔥 [WS-Public] Error: {e}")
+            self.websocket = None; logger.warning("⚠️ [WS-Public] Disconnected. Reconnecting..."); await asyncio.sleep(5)
 
 # =======================================================================================
 # --- ⚡ Core Scanner & Trade Initiation Logic ⚡ ---
 # =======================================================================================
 async def get_okx_markets():
-    """Fetches, filters, and sorts markets exclusively from OKX."""
-    settings = bot_data.settings
-    exchange = bot_data.exchange
+    settings, exchange = bot_data.settings, bot_data.exchange
     try:
         tickers = await exchange.fetch_tickers()
-        # Apply all filters: USDT pair, volume, and the new blacklist
         blacklist = settings.get('asset_blacklist', [])
-        
-        valid_markets = []
-        for ticker in tickers.values():
-            symbol = ticker.get('symbol')
-            if not symbol or not symbol.endswith('/USDT'): continue
-            
-            base_currency = symbol.split('/')[0]
-            if base_currency in blacklist: continue
-            
-            if ticker.get('quoteVolume', 0) < settings['liquidity_filters']['min_quote_volume_24h_usd']: continue
-            
-            # Additional check for derivative-like names
-            if any(k in symbol for k in ['-SWAP', 'UP', 'DOWN', '3L', '3S']): continue
-
-            valid_markets.append(ticker)
-            
-        # Sort by volume and take the top N
+        valid_markets = [
+            t for t in tickers.values() if
+            t.get('symbol') and t['symbol'].endswith('/USDT') and
+            t['symbol'].split('/')[0] not in blacklist and
+            t.get('quoteVolume', 0) > settings['liquidity_filters']['min_quote_volume_24h_usd'] and
+            not any(k in t['symbol'] for k in ['-SWAP', 'UP', 'DOWN', '3L', '3S'])
+        ]
         valid_markets.sort(key=lambda m: m.get('quoteVolume', 0), reverse=True)
         return valid_markets[:settings['top_n_symbols_by_volume']]
-    except Exception as e:
-        logger.error(f"Failed to fetch and filter OKX markets: {e}")
-        return []
+    except Exception as e: logger.error(f"Failed to fetch and filter OKX markets: {e}"); return []
 
-async def worker(queue, results_list, failure_counter):
-    settings = bot_data.settings
-    exchange = bot_data.exchange
+async def worker(queue, results_list):
+    settings, exchange = bot_data.settings, bot_data.exchange
     while not queue.empty():
         market = await queue.get(); symbol = market['symbol']
         try:
             ohlcv = await exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=220)
             if len(ohlcv) < 200: continue
-            
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df.set_index('timestamp', inplace=True)
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms'); df.set_index('timestamp', inplace=True)
 
-            confirmed_reasons = []
-            for name in settings['active_scanners']:
-                params = settings.get('strategy_params', {}).get(name, {})
-                if result := SCANNERS[name](df.copy(), params):
-                    confirmed_reasons.append(result['reason'])
-
+            confirmed_reasons = {SCANNERS[name](df.copy(), params)['reason']
+                                 for name in settings['active_scanners']
+                                 if (params := settings.get('strategy_params', {}).get(name)) and SCANNERS[name](df.copy(), params)}
+            
             if len(confirmed_reasons) >= settings.get("min_signal_strength", 1):
-                reason_str = ' + '.join(map(str, set(confirmed_reasons)))
+                reason_str = ' + '.join(confirmed_reasons)
                 entry_price = df.iloc[-2]['close']
                 df.ta.atr(length=14, append=True)
-                atr_col = find_col(df.columns, "ATRr_14")
-                current_atr = df.iloc[-2].get(atr_col, 0)
-
-                if current_atr > 0 and entry_price > 0:
-                    risk = current_atr * settings['atr_sl_multiplier']
-                    stop_loss = entry_price - risk
-                    take_profit = entry_price + (risk * settings['risk_reward_ratio'])
-                    results_list.append({"symbol": symbol, "entry_price": entry_price, 
-                                         "take_profit": take_profit, "stop_loss": stop_loss, 
-                                         "reason": reason_str, "strength": len(confirmed_reasons)})
-        except Exception as e:
-            logger.debug(f"Worker error for {symbol}: {e}")
-            failure_counter[0] += 1
+                atr = df.iloc[-2].get(find_col(df.columns, "ATRr_14"), 0)
+                risk = atr * settings['atr_sl_multiplier']
+                stop_loss = entry_price - risk
+                take_profit = entry_price + (risk * settings['risk_reward_ratio'])
+                results_list.append({"symbol": symbol, "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "reason": reason_str})
+        except Exception as e: logger.debug(f"Worker error for {symbol}: {e}")
         finally: queue.task_done()
 
 async def initiate_real_trade(signal):
-    settings = bot_data.settings
-    exchange = bot_data.exchange
     try:
-        trade_size_usdt = settings['real_trade_size_usdt']
-        amount = trade_size_usdt / signal['entry_price']
-
+        settings, exchange = bot_data.settings, bot_data.exchange
+        trade_size = settings['real_trade_size_usdt']
+        amount = trade_size / signal['entry_price']
         logger.info(f"--- INITIATING REAL TRADE: {signal['symbol']} ---")
         buy_order = await exchange.create_market_buy_order(signal['symbol'], amount)
-        logger.info(f"Order sent to OKX. ID: {buy_order['id']}. Awaiting Postman confirmation...")
-
         await log_pending_trade_to_db(signal, buy_order)
-        await safe_send_message(bot_data.application.bot, f"🚀 تم إرسال أمر شراء لـ `{signal['symbol']}`. في انتظار تأكيد التنفيذ...")
+        await safe_send_message(bot_data.application.bot, f"🚀 تم إرسال أمر شراء لـ `{signal['symbol']}`.")
     except Exception as e:
         logger.error(f"REAL TRADE FAILED for {signal['symbol']}: {e}", exc_info=True)
         await safe_send_message(bot_data.application.bot, f"🔥 فشل فتح صفقة لـ `{signal['symbol']}`.")
@@ -428,41 +454,35 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
     async with scan_lock:
         logger.info("--- Starting new OKX-focused market scan... ---")
         async with aiosqlite.connect(DB_FILE) as conn:
-            cursor = await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active' OR status = 'pending'")
-            active_trades_count = (await cursor.fetchone())[0]
+            active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active' OR status = 'pending'")).fetchone())[0]
 
         settings = bot_data.settings
         if active_trades_count >= settings['max_concurrent_trades']:
-            logger.info(f"Scan skipped: Max concurrent trades ({active_trades_count}) reached.")
+            logger.info(f"Scan skipped: Max trades ({active_trades_count}) reached.")
             return
 
         top_markets = await get_okx_markets()
-        if not top_markets:
-            logger.info("Scan complete: No markets passed asset and liquidity filters."); return
+        if not top_markets: logger.info("Scan complete: No markets passed filters."); return
 
-        queue, signals_found, failure_counter = asyncio.Queue(), [], [0]
+        queue, signals_found = asyncio.Queue(), []
         for market in top_markets: await queue.put(market)
-
-        worker_tasks = [asyncio.create_task(worker(queue, signals_found, failure_counter)) for _ in range(10)]
+        worker_tasks = [asyncio.create_task(worker(queue, signals_found)) for _ in range(10)]
         await queue.join(); [task.cancel() for task in worker_tasks]
-
         logger.info(f"--- Scan complete. Found {len(signals_found)} potential signals. ---")
         
-        for signal in sorted(signals_found, key=lambda s: s.get('strength', 0), reverse=True):
+        for signal in signals_found:
             if active_trades_count >= settings['max_concurrent_trades']: break
             if time.time() - bot_data.last_signal_time.get(signal['symbol'], 0) > (SCAN_INTERVAL_SECONDS * 2):
                 bot_data.last_signal_time[signal['symbol']] = time.time()
                 await initiate_real_trade(signal)
                 active_trades_count += 1
-                await asyncio.sleep(5) # Small delay between initiating trades
+                await asyncio.sleep(2)
 
 # =======================================================================================
 # --- 🤖 Telegram UI & Bot Startup 🤖 ---
 # =======================================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("أهلاً بك في OKX Ultimate Trader v21.0 (The Postman)")
-
-# [Note: Other UI functions like dashboard, settings etc. would be here]
+    await update.message.reply_text("أهلاً بك في OKX Guardian Trader v22.0")
 
 async def post_init(application: Application):
     bot_data.application = application
@@ -470,19 +490,27 @@ async def post_init(application: Application):
         logger.critical("FATAL: Missing critical API or Bot keys."); return
 
     try:
-        exchange_config = {'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 'password': OKX_API_PASSPHRASE, 'enableRateLimit': True}
-        bot_data.exchange = ccxt.okx(exchange_config)
+        config = {'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 'password': OKX_API_PASSPHRASE, 'enableRateLimit': True}
+        bot_data.exchange = ccxt.okx(config)
         await bot_data.exchange.fetch_balance()
-        logger.info("✅ Successfully connected to OKX for scanning and trading.")
+        logger.info("✅ Successfully connected to OKX.")
     except Exception as e:
         logger.critical(f"🔥 FATAL: Could not connect to OKX: {e}"); return
 
+    # --- Initialize and start the Guardian's components ---
+    bot_data.trade_guardian = TradeGuardian(application)
+    bot_data.public_ws = PublicWebSocketManager(bot_data.trade_guardian.handle_ticker_update)
     bot_data.private_ws = PrivateWebSocketManager()
+    asyncio.create_task(bot_data.public_ws.run())
     asyncio.create_task(bot_data.private_ws.run())
+    
+    logger.info("Waiting 5s for WebSocket connections...")
+    await asyncio.sleep(5)
+    await bot_data.trade_guardian.sync_subscriptions() # Important for restarts
 
     application.job_queue.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
     logger.info(f"Scanner scheduled for every {SCAN_INTERVAL_SECONDS} seconds.")
-    await safe_send_message(application.bot, "*🚀 OKX Ultimate Trader (The Postman) بدأ العمل...*")
+    await safe_send_message(application.bot, "*🚀 OKX Guardian Trader v22.0 بدأ العمل...*")
     logger.info("--- Bot is now fully operational ---")
 
 async def post_shutdown(application: Application):
@@ -490,14 +518,14 @@ async def post_shutdown(application: Application):
     logger.info("Bot has shut down.")
 
 def main():
-    logger.info("--- Starting OKX Ultimate Trader v21.0 ---")
+    logger.info("--- Starting OKX Guardian Trader v22.0 ---")
     load_settings(); asyncio.run(init_database())
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
     application = app_builder.build()
     
     application.add_handler(CommandHandler("start", start_command))
-    # Add other handlers as needed
+    # Add other handlers as needed for the UI
     
     application.run_polling()
 
