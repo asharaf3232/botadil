@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Bot v8.6 (The Phoenix - Final Version) 🚀 ---
+# --- 🚀 OKX Bot v8.7 (The Phoenix - The Patient Postman) 🚀 ---
 # =======================================================================================
-# This definitive version fixes the OCO order placement failure by ensuring all
-# numeric parameters (price, size) are explicitly cast to strings, matching the
-# strict data type requirements of the OKX API. Enhanced logging has also been
-# added to capture the exact API error codes if a failure ever occurs again.
+# This version introduces the definitive fix for the "InsufficientFunds" error by
+# implementing a balance-check loop within the Postman. After a buy order is filled,
+# the bot now patiently polls the balance for up to 5 seconds, waiting for the
+# exchange to settle the asset. Only after confirming the asset is available in the
+# trading account does it proceed to place the protective OCO order. This eliminates
+# the exchange-side settlement race condition.
 # =======================================================================================
 
 # --- Libraries ---
@@ -51,13 +53,12 @@ DB_FILE = os.path.join(APP_ROOT, 'okx_phoenix_v8.db')
 SETTINGS_FILE = os.path.join(APP_ROOT, 'okx_phoenix_settings_v8.json')
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger("OKX_Phoenix_v8.6_Final")
+logger = logging.getLogger("OKX_Phoenix_v8.7_Patient")
 
 class BotState:
     def __init__(self):
         self.exchange = None
         self.settings = {}
-        self.live_tickers = {}
         self.last_signal_time = {}
         self.market_mood = {"mood": "UNKNOWN", "reason": "تحليل لم يتم بعد"}
         self.scan_stats = {"last_start": None, "last_duration": "N/A"}
@@ -222,24 +223,71 @@ async def get_market_mood():
         
     return {"mood": "POSITIVE", "reason": "وضع السوق مناسب", "btc_mood": btc_mood_text, "fng": fng_text}
 
-# --- Analysis Functions (No change) ---
+# --- Analysis Functions (Re-enabled) ---
 def find_col(df_columns, prefix):
     try: return next(col for col in df_columns if col.startswith(prefix))
     except StopIteration: return None
-def analyze_momentum_breakout(df, rvol): return None # Disabled for simplicity in debugging if needed
-def analyze_breakout_squeeze_pro(df, rvol): return None # Disabled
-async def analyze_support_rebound(df, rvol, exchange, symbol): return None # Disabled
-def analyze_sniper_pro(df, rvol):
+def analyze_momentum_breakout(df, rvol):
     df.ta.vwap(append=True); df.ta.bbands(length=20, std=2.0, append=True); df.ta.macd(fast=12, slow=26, signal=9, append=True); df.ta.rsi(length=14, append=True)
     last, prev = df.iloc[-2], df.iloc[-3]
     macd_col, macds_col, bbu_col, rsi_col = find_col(df.columns, "MACD_"), find_col(df.columns, "MACDs_"), find_col(df.columns, "BBU_"), find_col(df.columns, "RSI_")
     if not all([macd_col, macds_col, bbu_col, rsi_col]): return None
     if (prev[macd_col] <= prev[macds_col] and last[macd_col] > last[macds_col] and last['close'] > last[bbu_col] and last['close'] > last["VWAP_D"] and last[rsi_col] < 68):
-        return {"reason": STRATEGIES_MAP['sniper_pro']['name'], "type": "long"}
+        return {"reason": STRATEGIES_MAP['momentum_breakout']['name'], "type": "long"}
     return None
-async def analyze_whale_radar(df, rvol, exchange, symbol): return None # Disabled
+def analyze_breakout_squeeze_pro(df, rvol):
+    df.ta.bbands(length=20, std=2.0, append=True); df.ta.kc(length=20, scalar=1.5, append=True); df.ta.obv(append=True)
+    bbu_col, bbl_col, kcu_col, kcl_col = find_col(df.columns, "BBU_20"), find_col(df.columns, "BBL_20"), find_col(df.columns, "KCUe_20"), find_col(df.columns, "KCLEe_20")
+    if not all([bbu_col, bbl_col, kcu_col, kcl_col]): return None
+    last, prev = df.iloc[-2], df.iloc[-3]
+    is_in_squeeze = prev[bbl_col] > prev[kcl_col] and prev[bbu_col] < prev[kcu_col]
+    if is_in_squeeze:
+        breakout_fired = last['close'] > last[bbu_col]
+        volume_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-2] * 1.5
+        obv_rising = df['OBV'].iloc[-2] > df['OBV'].iloc[-3]
+        if breakout_fired and volume_ok and obv_rising: return {"reason": STRATEGIES_MAP['breakout_squeeze_pro']['name'], "type": "long"}
+    return None
+async def analyze_support_rebound(df, rvol, exchange, symbol):
+    try:
+        ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', limit=100)
+        if not ohlcv_1h or len(ohlcv_1h) < 50: return None
+        df_1h = pd.DataFrame(ohlcv_1h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        current_price = df_1h['close'].iloc[-1]
+        recent_lows = df_1h['low'].rolling(window=10, center=True).min()
+        supports = recent_lows[recent_lows.notna()]
+        closest_support = max([s for s in supports if s < current_price], default=None)
+        if not closest_support: return None
+        if (current_price - closest_support) / closest_support * 100 < 1.0:
+            last_candle_15m = df.iloc[-2]
+            avg_volume_15m = df['volume'].rolling(window=20).mean().iloc[-2]
+            if last_candle_15m['close'] > last_candle_15m['open'] and last_candle_15m['volume'] > avg_volume_15m * 1.5:
+                return {"reason": STRATEGIES_MAP['support_rebound']['name'], "type": "long"}
+    except Exception: return None
+    return None
+def analyze_sniper_pro(df, rvol):
+    try:
+        compression_candles = int(6 * 4)
+        if len(df) < compression_candles + 2: return None
+        compression_df = df.iloc[-compression_candles-1:-1]
+        highest_high, lowest_low = compression_df['high'].max(), compression_df['low'].min()
+        volatility = (highest_high - lowest_low) / lowest_low * 100 if lowest_low > 0 else float('inf')
+        if volatility < 12.0:
+            last_candle = df.iloc[-2]
+            if last_candle['close'] > highest_high and last_candle['volume'] > compression_df['volume'].mean() * 2:
+                return {"reason": STRATEGIES_MAP['sniper_pro']['name'], "type": "long"}
+    except Exception: return None
+    return None
+async def analyze_whale_radar(df, rvol, exchange, symbol):
+    try:
+        ob = await exchange.fetch_order_book(symbol, limit=20)
+        if not ob or not ob.get('bids'): return None
+        total_bid_value = sum(float(price) * float(qty) for price, qty in ob['bids'][:10])
+        if total_bid_value > 30000:
+            return {"reason": STRATEGIES_MAP['whale_radar']['name'], "type": "long"}
+    except Exception: return None
+    return None
 
-# --- Core Logic & Postman (Key Fixes Applied) ---
+# --- Core Logic & Postman ---
 async def initiate_trade(signal, bot: "telegram.Bot"):
     await ensure_libraries_loaded()
     symbol, settings, exchange = signal['symbol'], bot_state.settings, bot_state.exchange
@@ -383,10 +431,28 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_filled_buy_order(order_data):
     symbol, order_id = order_data['instId'].replace('-', '/'), order_data['ordId']
+    base_currency = symbol.split('/')[0]
     filled_qty, avg_price = float(order_data.get('fillSz', 0)), float(order_data.get('avgPx', 0))
     if filled_qty == 0 or avg_price == 0: return logger.warning(f"[Postman] Ignoring fill event for {symbol} with zero values.")
     logger.info(f"📬 [Postman] Received fill event for order {order_id} ({symbol}). Preparing protection...")
     try:
+        # --- PATIENT POSTMAN FIX: Wait for balance to appear ---
+        balance_appeared = False
+        for i in range(10): # Check for 5 seconds
+            try:
+                balance = await bot_state.exchange.fetch_balance()
+                available_balance = balance.get(base_currency, {}).get('free', 0.0)
+                if available_balance >= filled_qty:
+                    logger.info(f"[Postman] Balance for {base_currency} confirmed ({available_balance}). Proceeding.")
+                    balance_appeared = True
+                    break
+            except Exception as e:
+                logger.warning(f"[Postman] Balance check attempt {i+1} failed: {e}")
+            await asyncio.sleep(0.5)
+
+        if not balance_appeared:
+            raise Exception(f"Asset {base_currency} did not appear in balance after purchase.")
+
         trade = None
         for attempt in range(5):
             async with aiosqlite.connect(DB_FILE) as conn:
@@ -396,11 +462,11 @@ async def handle_filled_buy_order(order_data):
             if trade: logger.info(f"[Postman] Found trade for order {order_id} on attempt {attempt + 1}."); break
             else: logger.warning(f"[Postman] Attempt {attempt + 1}: No matching trade for {order_id}. Retrying..."); await asyncio.sleep(0.5)
         if not trade: return logger.error(f"[Postman] CRITICAL: Could not find trade for order {order_id} after all retries!")
+        
         trade = dict(trade)
         original_risk = trade['entry_price'] - trade['stop_loss']
         final_tp, final_sl = avg_price + (original_risk * bot_state.settings['risk_reward_ratio']), avg_price - original_risk
         
-        # --- FINAL FIX: Ensure all numeric values are cast to string for the API call ---
         oco_params = {
             'instId': bot_state.exchange.market_id(symbol), 'tdMode': 'cash', 'side': 'sell', 'ordType': 'oco',
             'sz': str(bot_state.exchange.amount_to_precision(symbol, filled_qty)),
@@ -424,7 +490,6 @@ async def handle_filled_buy_order(order_data):
                     await bot_state.application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode=ParseMode.MARKDOWN)
                     return
                 else:
-                    # --- FINAL FIX: Enhanced Logging ---
                     error_code = oco_receipt.get('data', [{}])[0].get('sCode', 'N/A')
                     error_msg = oco_receipt.get('data', [{}])[0].get('sMsg', 'No message')
                     logger.warning(f"[Postman] OCO attempt {attempt + 1} failed. Code: {error_code}, Msg: {error_msg}. Full Response: {json.dumps(oco_receipt)}")
@@ -479,7 +544,7 @@ class WebSocketManager:
             except Exception as e: logger.error(f"🔥 [WS-Private] Unhandled exception in WebSocket loop: {e}", exc_info=True)
             self.websocket = None; logger.info("Reconnecting in 5 seconds..."); await asyncio.sleep(5)
 
-# --- Trailing SL (The Night Watcher) ---
+# --- Trailing SL (The Night Watcher) (No change) ---
 async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
     bot, exchange, settings = context.bot, bot_state.exchange, bot_state.settings
     try:
@@ -540,12 +605,10 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Error during TSL for trade #{trade['id']} ({trade['symbol']}): {e}", exc_info=True)
 
-# =======================================================================================
 # --- Telegram UI & Main Startup (No change) ---
-# =======================================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"]]
-    await update.message.reply_text("أهلاً بك في بوت OKX القناص v8.6 (Final)", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True))
+    await update.message.reply_text("أهلاً بك في بوت OKX القناص v8.7 (Patient Postman)", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True))
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📊 الإحصائيات العامة", callback_data="dashboard_stats")],
@@ -669,7 +732,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                     active_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status IN ('active', 'pending_protection')")).fetchone())[0]
                 ws_status = 'متصل ✅' if bot_state.ws_manager and bot_state.ws_manager.is_connected() else 'غير متصل ❌'
                 scanners_text = escape_markdown(', '.join(settings.get('active_scanners',[])))
-                report = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v8.6)**\n",
+                report = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v8.7)**\n",
                           f"--- **📊 حالة السوق الحالية** ---\n- **المزاج العام:** {mood['mood']} ({escape_markdown(mood['reason'])})\n- **مؤشر BTC:** {mood.get('btc_mood', 'N/A')}\n",
                           f"--- **🔬 أداء آخر فحص** ---\n- **وقت البدء:** {scan.get('last_start', 'N/A')}\n",
                           f"--- **🔧 الإعدادات النشطة** ---\n- **النمط الحالي:** {settings.get('active_preset', 'N/A')}\n- **الماسحات المفعلة:** {scanners_text}\n",
@@ -729,7 +792,7 @@ async def main():
     try:
         await bot_state.exchange.fetch_balance()
         logger.info("✅ OKX connection test SUCCEEDED.")
-        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Phoenix v8.6 (Final) بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Phoenix v8.7 (Patient Postman) بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
         async with app:
             await app.start()
             await app.updater.start_polling()
