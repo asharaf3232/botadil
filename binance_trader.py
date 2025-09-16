@@ -564,6 +564,7 @@ async def worker(queue, signals_list, failure_counter):
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             df.set_index('timestamp', inplace=True)
+            df.sort_index(inplace=True) # <--- [تم التعديل هنا] ضمان ترتيب البيانات زمنيًا لحل مشكلة VWAP
             
             df['volume_sma'] = ta.sma(df['volume'], length=20)
             if pd.isna(df['volume_sma'].iloc[-2]) or df['volume_sma'].iloc[-2] == 0: continue
