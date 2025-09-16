@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Bot v11.0 (The Phoenix - The Final Blueprint) 🚀 ---
+# --- 🚀 OKX Bot v12.0 (The Phoenix - The Forensic Investigator) 🚀 ---
 # =======================================================================================
-# This version is a complete, structurally sound implementation. It corrects the
-# fundamental `NameError` from v10 by ensuring a proper code layout where all
-# functions are defined before the main execution block. It integrates all successful
-# concepts: the centralized `TradeManager` (Symphony), the `ensure_trading_balance`
-# (Treasurer), and robust error logging (Watchdog) into a single, stable, and
-# correctly architected application. This is the definitive build.
+# This version addresses the final root cause: intermittent API failures when fetching
+# the balance. The `ensure_trading_balance` function is now a "Forensic Investigator".
+# It no longer trusts a single API call. It will retry fetching the balance multiple
+# times if the initial attempt fails or returns an empty result. This provides extreme
+# resilience against temporary network/API glitches that previously caused false
+# "Insufficient Funds" errors. This is the definitive reliability fix.
 # =======================================================================================
 
 # --- Libraries ---
@@ -50,11 +50,11 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 APP_ROOT = '.'
-DB_FILE = os.path.join(APP_ROOT, 'okx_phoenix_v11.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'okx_phoenix_settings_v11.json')
+DB_FILE = os.path.join(APP_ROOT, 'okx_phoenix_v12.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'okx_phoenix_settings_v12.json')
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger("OKX_Phoenix_v11_Blueprint")
+logger = logging.getLogger("OKX_Phoenix_v12_Investigator")
 
 class BotState:
     def __init__(self):
@@ -207,6 +207,7 @@ async def get_market_mood():
 def find_col(df_columns, prefix):
     try: return next(col for col in df_columns if col.startswith(prefix))
     except StopIteration: return None
+# ... (All analysis functions are identical to previous version) ...
 def analyze_momentum_breakout(df, rvol):
     df.ta.vwap(append=True); df.ta.bbands(length=20, std=2.0, append=True); df.ta.macd(fast=12, slow=26, signal=9, append=True); df.ta.rsi(length=14, append=True)
     last, prev = df.iloc[-2], df.iloc[-3]
@@ -429,7 +430,7 @@ class TradeManager:
             await conn.execute("UPDATE trades SET stop_loss = ?, algo_id = ? WHERE id = ?", (new_sl, new_algo_id, db_id)); await conn.commit()
 
 # =======================================================================================
-# --- WebSocket, Analysis, and Core Logic ---
+# --- 💸 The Treasurer & Core Logic 💸 ---
 # =======================================================================================
 class WebSocketManager:
     def __init__(self, trade_manager):
@@ -472,25 +473,35 @@ class WebSocketManager:
             self.websocket = None; logger.info("Reconnecting in 5 seconds..."); await asyncio.sleep(5)
 
 async def ensure_trading_balance(exchange, required_amount):
-    try:
-        balances = await exchange.fetch_balance()
-        trading_balance = balances.get('trading', {}).get('USDT', {}).get('free', 0.0)
-        if trading_balance >= required_amount:
-            logger.info(f"Treasurer: Sufficient USDT in TRADING account ({trading_balance:.2f}).")
-            return True
-        funding_balance = balances.get('funding', {}).get('USDT', {}).get('free', 0.0)
-        amount_to_transfer = required_amount - trading_balance
-        if funding_balance >= amount_to_transfer:
-            logger.info(f"Treasurer: Insufficient TRADING balance. Transferring {amount_to_transfer:.2f} USDT from FUNDING.")
-            await exchange.transfer('USDT', amount_to_transfer, 'funding', 'trading')
-            logger.info("Treasurer: Transfer successful.")
-            return True
-        else:
-            logger.error(f"Treasurer: Insufficient funds in both accounts. Needed ~{amount_to_transfer:.2f} more in FUNDING.")
-            return False
-    except Exception as e:
-        logger.error(f"Treasurer: Error during balance check/transfer: {e}", exc_info=True)
-        return False
+    for attempt in range(5):
+        try:
+            balances = await exchange.fetch_balance()
+            if not balances:
+                logger.warning(f"Treasurer (Attempt {attempt+1}/5): fetch_balance returned empty. Retrying...")
+                await asyncio.sleep(2)
+                continue
+
+            trading_balance = balances.get('trading', {}).get('USDT', {}).get('free', 0.0)
+            if trading_balance >= required_amount:
+                logger.info(f"Treasurer: Sufficient USDT in TRADING account ({trading_balance:.2f}).")
+                return True
+
+            funding_balance = balances.get('funding', {}).get('USDT', {}).get('free', 0.0)
+            amount_to_transfer = required_amount - trading_balance
+            
+            if funding_balance >= amount_to_transfer:
+                logger.info(f"Treasurer: Insufficient TRADING balance. Transferring {amount_to_transfer:.2f} USDT from FUNDING.")
+                await exchange.transfer('USDT', amount_to_transfer, 'funding', 'trading')
+                logger.info("Treasurer: Transfer successful.")
+                return True
+            else:
+                logger.error(f"Treasurer: Insufficient funds in both TRADING ({trading_balance:.2f}) and FUNDING ({funding_balance:.2f}) accounts.")
+                return False
+        except Exception as e:
+            logger.error(f"Treasurer (Attempt {attempt+1}/5): Error during balance check/transfer: {e}", exc_info=True)
+            await asyncio.sleep(2)
+    logger.critical("Treasurer: All attempts to fetch balance and transfer funds failed.")
+    return False
 
 async def initiate_trade(signal, bot: "telegram.Bot"):
     await ensure_libraries_loaded()
@@ -498,8 +509,8 @@ async def initiate_trade(signal, bot: "telegram.Bot"):
     logger.info(f"Initiating trade for {symbol}.")
     try:
         trade_size = settings['real_trade_size_usdt']
-        if not await ensure_trading_balance(exchange, trade_size * 1.02): # Add buffer
-            raise Exception("Treasurer check failed. Insufficient funds.")
+        if not await ensure_trading_balance(exchange, trade_size * 1.02):
+            raise Exception("Treasurer check failed. Insufficient funds after retries.")
         ticker = await exchange.fetch_ticker(symbol)
         limit_price = ticker['ask'] 
         if not limit_price or limit_price <= 0: raise ValueError(f"Invalid ask price: {limit_price}")
@@ -512,6 +523,7 @@ async def initiate_trade(signal, bot: "telegram.Bot"):
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"**🔥🔥🔥 فشل حرج عند بدء صفقة {symbol}**\n\n**الخطأ:** `{str(e)}`", parse_mode=ParseMode.MARKDOWN)
 
 async def worker(queue, signals_list, failure_counter):
+    # ... (Worker logic is identical to previous version) ...
     await ensure_libraries_loaded()
     settings, exchange = bot_state.settings, bot_state.exchange
     while not queue.empty():
@@ -605,31 +617,30 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         new_trades = 0
         if signals_found:
             logger.info(f"+++ Scan complete. Found {len(signals_found)} signals! +++")
-            try:
-                balances = await exchange.fetch_balance()
-                total_usdt = balances.get('total', {}).get('USDT', 0.0)
-                for signal in signals_found:
-                    if time.time() - bot_state.last_signal_time.get(signal['symbol'], 0) < settings['scan_interval_seconds'] * 2.5: continue
-                    trade_size = settings['real_trade_size_usdt']
-                    if total_usdt >= trade_size * (new_trades + 1):
-                        logger.info(f"Sufficient total USDT balance. Attempting trade for {signal['symbol']}...")
-                        bot_state.last_signal_time[signal['symbol']] = time.time()
-                        await initiate_trade(signal, bot)
-                        new_trades += 1
-                        logger.info("Waiting for 25 seconds before attempting next trade...")
-                        await asyncio.sleep(25) 
-                    else:
-                        logger.warning(f"Insufficient TOTAL USDT balance ({total_usdt:.2f}). Stopping further trades.")
-                        break
-            except Exception as e:
-                logger.error(f"Error during pre-trade balance check: {e}")
+            for signal in signals_found:
+                if time.time() - bot_state.last_signal_time.get(signal['symbol'], 0) < settings['scan_interval_seconds'] * 2.5: continue
+                try:
+                    await initiate_trade(signal, bot)
+                    new_trades += 1
+                    logger.info("Waiting for 25 seconds before attempting next trade...")
+                    await asyncio.sleep(25)
+                except Exception as e:
+                    # initiate_trade already logs and sends a message, so we just break the loop
+                    logger.error(f"Stopping scan loop due to critical error in initiate_trade for {signal['symbol']}.")
+                    break
         else: logger.info("--- Scan complete. No new signals found. ---")
         summary = (f"**🔬 ملخص الفحص الأخير**\n\n- **الحالة:** اكتمل بنجاح\n- **وضع السوق:** {bot_state.market_mood['mood']} ({bot_state.market_mood.get('btc_mood', 'N/A')})\n"
                    f"- **المدة:** {bot_state.scan_stats['last_duration']}\n- **العملات المفحوصة:** {bot_state.scan_stats['markets_scanned']}\n\n------------------------------------\n"
                    f"- **إجمالي الإشارات:** {len(signals_found)}\n- **✅ صفقات جديدة:** {new_trades}\n- **⚠️ أخطاء التحليل:** {bot_state.scan_stats['failures']}")
         await bot.send_message(TELEGRAM_CHAT_ID, summary, parse_mode=ParseMode.MARKDOWN)
 
-# --- Telegram UI Handlers ---
+async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
+    if bot_state.trade_manager:
+        await bot_state.trade_manager.track_all_trades(bot_state.settings)
+
+# =======================================================================================
+# --- 📱 Telegram UI Handlers 📱 ---
+# =======================================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"]]
     await update.message.reply_text("أهلاً بك في بوت OKX القناص v11.0 (The Final Blueprint)", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True))
@@ -652,8 +663,7 @@ async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_T
     text = update.message.text
     if 'awaiting_input_for_param' in context.user_data:
         param_key, msg_to_del, original_menu_msg_id = context.user_data.pop('awaiting_input_for_param')
-        new_value_str = update.message.text
-        settings = bot_state.settings
+        new_value_str = update.message.text; settings = bot_state.settings
         try:
             target_dict = settings
             if param_key == "min_quote_volume_24h_usd": target_dict = settings['liquidity_filters']
@@ -661,8 +671,7 @@ async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             if isinstance(current_value, bool): new_value = new_value_str.lower() in ['true', '1', 'on', 'yes', 'نعم', 'تفعيل']
             elif isinstance(current_value, float): new_value = float(new_value_str)
             else: new_value = int(new_value_str)
-            target_dict[param_key] = new_value
-            save_settings()
+            target_dict[param_key] = new_value; save_settings()
             await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=msg_to_del)
             await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=update.message.message_id)
             await show_parameters_menu(update, context, edit_message_id=original_menu_msg_id)
@@ -710,7 +719,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             report_type = data.split("_", 1)[1]
             if report_type == "stats":
                 async with aiosqlite.connect(DB_FILE) as conn:
-                     cursor = await conn.execute("SELECT status, COUNT(*), SUM(pnl_usdt) FROM trades WHERE status NOT IN ('active', 'pending_protection') GROUP BY status")
+                     cursor = await conn.execute("SELECT status, COUNT(*), SUM(pnl_usdt) FROM trades WHERE status NOT IN ('active', 'pending_protection', 'failed_protection') GROUP BY status")
                      stats = await cursor.fetchall()
                 counts, pnl = defaultdict(int), defaultdict(float)
                 for status, count, p in stats: counts[status], pnl[status] = count, p or 0
@@ -722,7 +731,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                     return await query.message.reply_text("لا توجد صفقات نشطة حالياً.")
                 keyboard = []; active_trades_list = sorted(bot_state.trade_manager.active_trades.values(), key=lambda t: t['id'], reverse=True)
                 for t in active_trades_list:
-                    status_emoji = "🛡️" if t.get('status') == 'active' else "⏳"
+                    status_emoji = "🛡️" if t.get('status') == 'active' else "⏳" if t.get('status') == 'pending_protection' else "🔥"
                     entry_value = t.get('entry_price', 0) * t.get('quantity', 0)
                     button_text = f"#{t['id']} {status_emoji} | {t['symbol']} | ${entry_value:.2f}"
                     keyboard.append([InlineKeyboardButton(button_text, callback_data=f"check_{t['id']}")])
@@ -788,10 +797,6 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             if query.message: await query.message.delete()
     except Exception as e: logger.error(f"Error in button handler: {e}", exc_info=True)
 
-async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
-    if bot_state.trade_manager:
-        await bot_state.trade_manager.track_all_trades(bot_state.settings)
-
 # =======================================================================================
 # --- 🚀 Main Application Entry Point 🚀 ---
 # =======================================================================================
@@ -818,7 +823,7 @@ async def main():
     
     ws_manager = WebSocketManager(bot_state.trade_manager)
     bot_state.ws_manager = ws_manager
-    ws_task = asyncio.create_task(ws_manager.run())
+    ws_task = create_safe_task(ws_manager.run())
     logger.info("🚀 [Symphony] Conductor is ready. WebSocket is tuning.")
 
     app.add_handler(CommandHandler("start", start_command))
@@ -839,12 +844,18 @@ async def main():
             await app.start()
             await app.updater.start_polling()
             logger.info("Bot is now running and polling for updates...")
-            await asyncio.gather(ws_task) 
+            # We don't await the ws_task directly here, as it's a fire-and-forget safe task.
+            # We need a way to keep the main coroutine alive.
+            # A simple forever sleep is a common pattern.
+            await asyncio.Event().wait()
+
     except Exception as e:
         logger.critical(f"An unhandled error occurred in main loop: {e}", exc_info=True)
     finally:
-        if 'ws_task' in locals() and not ws_task.done(): ws_task.cancel()
-        if hasattr(app, 'updater') and app.updater._running: await app.updater.stop()
+        # Proper shutdown sequence
+        if bot_state.ws_manager and bot_state.ws_manager.websocket:
+            await bot_state.ws_manager.websocket.close()
+        if hasattr(app, 'updater') and app.updater and app.updater._running: await app.updater.stop()
         if app.running: await app.stop()
         if bot_state.exchange: await bot_state.exchange.close(); logger.info("CCXT exchange connection closed.")
         logger.info("Bot has been shut down.")
@@ -852,7 +863,7 @@ async def main():
 if __name__ == '__main__':
     try:
         asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot shutdown requested.")
     except Exception as e:
         logger.critical(f"Failed to start bot due to an error in initial setup: {e}", exc_info=True)
-
-
