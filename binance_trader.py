@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Bot v8.7 (The Phoenix - The Patient Postman) 🚀 ---
+# --- 🚀 OKX Bot v8.8 (The Phoenix - The Marathon Runner) 🚀 ---
 # =======================================================================================
-# This version introduces the definitive fix for the "InsufficientFunds" error by
-# implementing a balance-check loop within the Postman. After a buy order is filled,
-# the bot now patiently polls the balance for up to 5 seconds, waiting for the
-# exchange to settle the asset. Only after confirming the asset is available in the
-# trading account does it proceed to place the protective OCO order. This eliminates
-# the exchange-side settlement race condition.
+# This version enhances the "Patient Postman" by extending the balance-check timeout
+# from 5 to 15 seconds, accommodating slower-settling assets. It also fixes a critical
+# UnboundLocalError bug in the Trailing Stop Loss (track_open_trades) function,
+# ensuring long-term stability and correct operation for all active trades.
 # =======================================================================================
 
 # --- Libraries ---
@@ -53,7 +51,7 @@ DB_FILE = os.path.join(APP_ROOT, 'okx_phoenix_v8.db')
 SETTINGS_FILE = os.path.join(APP_ROOT, 'okx_phoenix_settings_v8.json')
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger("OKX_Phoenix_v8.7_Patient")
+logger = logging.getLogger("OKX_Phoenix_v8.8_Marathon")
 
 class BotState:
     def __init__(self):
@@ -223,7 +221,7 @@ async def get_market_mood():
         
     return {"mood": "POSITIVE", "reason": "وضع السوق مناسب", "btc_mood": btc_mood_text, "fng": fng_text}
 
-# --- Analysis Functions (Re-enabled) ---
+# --- Analysis Functions (No change) ---
 def find_col(df_columns, prefix):
     try: return next(col for col in df_columns if col.startswith(prefix))
     except StopIteration: return None
@@ -436,13 +434,13 @@ async def handle_filled_buy_order(order_data):
     if filled_qty == 0 or avg_price == 0: return logger.warning(f"[Postman] Ignoring fill event for {symbol} with zero values.")
     logger.info(f"📬 [Postman] Received fill event for order {order_id} ({symbol}). Preparing protection...")
     try:
-        # --- PATIENT POSTMAN FIX: Wait for balance to appear ---
+        # --- PATIENT POSTMAN v2: Extended Wait Time ---
         balance_appeared = False
-        for i in range(10): # Check for 5 seconds
+        for i in range(30): # Check for 15 seconds (30 * 0.5s)
             try:
                 balance = await bot_state.exchange.fetch_balance()
                 available_balance = balance.get(base_currency, {}).get('free', 0.0)
-                if available_balance >= filled_qty:
+                if available_balance >= filled_qty * 0.999: # Use a small tolerance
                     logger.info(f"[Postman] Balance for {base_currency} confirmed ({available_balance}). Proceeding.")
                     balance_appeared = True
                     break
@@ -544,7 +542,7 @@ class WebSocketManager:
             except Exception as e: logger.error(f"🔥 [WS-Private] Unhandled exception in WebSocket loop: {e}", exc_info=True)
             self.websocket = None; logger.info("Reconnecting in 5 seconds..."); await asyncio.sleep(5)
 
-# --- Trailing SL (The Night Watcher) (No change) ---
+# --- Trailing SL (The Night Watcher) ---
 async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
     bot, exchange, settings = context.bot, bot_state.exchange, bot_state.settings
     try:
@@ -567,7 +565,9 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
       async with tsl_locks[trade['id']]:
         try:
             trade = dict(trade)
-            symbol, ticker = trade['symbol'], await exchange.fetch_ticker(symbol)
+            # --- TSL BUG FIX: Define symbol first for robust error handling ---
+            symbol = trade['symbol']
+            ticker = await exchange.fetch_ticker(symbol)
             current_price = ticker['last']
             highest_price = max(trade.get('highest_price', trade['entry_price']), current_price)
             if highest_price > trade.get('highest_price', 0):
@@ -603,12 +603,12 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
                         error_msg = new_oco_receipt.get('data', [{}])[0].get('sMsg', 'No message')
                         logger.error(f"Failed to place new TSL OCO for {symbol}. Code: {error_code}, Msg: {error_msg}")
         except Exception as e:
-            logger.error(f"Error during TSL for trade #{trade['id']} ({trade['symbol']}): {e}", exc_info=True)
+            logger.error(f"Error during TSL for trade #{trade['id']}: {e}", exc_info=True)
 
 # --- Telegram UI & Main Startup (No change) ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"]]
-    await update.message.reply_text("أهلاً بك في بوت OKX القناص v8.7 (Patient Postman)", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True))
+    await update.message.reply_text("أهلاً بك في بوت OKX القناص v8.8 (Marathon Runner)", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True))
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📊 الإحصائيات العامة", callback_data="dashboard_stats")],
@@ -732,7 +732,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                     active_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status IN ('active', 'pending_protection')")).fetchone())[0]
                 ws_status = 'متصل ✅' if bot_state.ws_manager and bot_state.ws_manager.is_connected() else 'غير متصل ❌'
                 scanners_text = escape_markdown(', '.join(settings.get('active_scanners',[])))
-                report = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v8.7)**\n",
+                report = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v8.8)**\n",
                           f"--- **📊 حالة السوق الحالية** ---\n- **المزاج العام:** {mood['mood']} ({escape_markdown(mood['reason'])})\n- **مؤشر BTC:** {mood.get('btc_mood', 'N/A')}\n",
                           f"--- **🔬 أداء آخر فحص** ---\n- **وقت البدء:** {scan.get('last_start', 'N/A')}\n",
                           f"--- **🔧 الإعدادات النشطة** ---\n- **النمط الحالي:** {settings.get('active_preset', 'N/A')}\n- **الماسحات المفعلة:** {scanners_text}\n",
@@ -792,7 +792,7 @@ async def main():
     try:
         await bot_state.exchange.fetch_balance()
         logger.info("✅ OKX connection test SUCCEEDED.")
-        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Phoenix v8.7 (Patient Postman) بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Phoenix v8.8 (Marathon Runner) بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
         async with app:
             await app.start()
             await app.updater.start_polling()
