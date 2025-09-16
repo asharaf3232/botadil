@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Bot v9.1 (The Phoenix - The Auditor) 🚀 ---
+# --- 🚀 OKX Bot v9.2 (The Phoenix - The Network Shield) 🚀 ---
 # =======================================================================================
-# This version introduces a fundamental logic change based on user discussion.
-# Instead of passively waiting for the balance to appear (which can be unreliable),
-# the Postman now acts as an "Auditor". It proactively fetches the specific order
-# details using the order ID. This provides direct, immediate confirmation of the
-# filled quantity, bypassing any potential delays in the general balance update API.
-# The old balance-check loop is kept as a secondary fallback, creating a more
-# resilient and logically sound protection mechanism.
+# Based on the final "Timed out" error, this version addresses the true root cause:
+# insufficient network timeout. The default CCXT timeout is explicitly increased
+# to 60 seconds during exchange initialization. This provides robust protection
+# against temporary network congestion or slow API responses, preventing the initial
+# trade placement from failing and causing a cascade of downstream errors. The logic
+# of the "Auditor" postman remains as the primary, correct way to handle fills.
 # =======================================================================================
 
 # --- Libraries ---
@@ -50,11 +49,11 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 APP_ROOT = '.'
-DB_FILE = os.path.join(APP_ROOT, 'okx_phoenix_v8.db') # Sticking with v8 for persistence
+DB_FILE = os.path.join(APP_ROOT, 'okx_phoenix_v8.db')
 SETTINGS_FILE = os.path.join(APP_ROOT, 'okx_phoenix_settings_v9.json')
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger("OKX_Phoenix_v9.1_Auditor")
+logger = logging.getLogger("OKX_Phoenix_v9.2_NetworkShield")
 
 class BotState:
     def __init__(self):
@@ -309,8 +308,13 @@ async def initiate_trade(signal, bot: "telegram.Bot"):
             msg = f"**⏳ تم بدء صفقة | {symbol} (ID: {trade_id})**\nتم إرسال أمر الشراء المحدد بنجاح.\nيقوم 'ساعي البريد' الآن بمراقبة الأمر لتأمينه فور التنفيذ."
             await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode=ParseMode.MARKDOWN)
         else:
-            await exchange.cancel_order(buy_order['id'], symbol)
-            raise Exception("Failed to log initiated trade. Order cancelled.")
+            # This is a safe-guard, but the order might have executed despite the timeout.
+            # Manual check is still advised if a timeout occurs.
+            try:
+                await exchange.cancel_order(buy_order['id'], symbol)
+            except Exception as cancel_e:
+                logger.warning(f"Could not cancel order {buy_order.get('id')} for {symbol} after DB log failure. It might have been filled. Error: {cancel_e}")
+            raise Exception("Failed to log initiated trade. Order cancellation attempted.")
     except Exception as e:
         logger.critical(f"CRITICAL FAILURE during trade initiation for {symbol}: {e}", exc_info=True)
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"**🔥🔥🔥 فشل حرج عند بدء صفقة {symbol}**\n\n**الخطأ:** `{str(e)}`", parse_mode=ParseMode.MARKDOWN)
@@ -440,7 +444,7 @@ async def handle_filled_buy_order(order_data):
     try:
         # --- THE AUDITOR LOGIC ---
         final_order_details = None
-        for i in range(5): # Try to fetch order details for a few seconds
+        for i in range(5): # Try to fetch order details for 5 seconds
             try:
                 order_details = await bot_state.exchange.fetch_order(order_id, symbol)
                 if order_details and order_details.get('status') in ['closed', 'filled'] and order_details.get('filled', 0) > 0:
@@ -622,7 +626,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
 # --- Telegram UI & Main Startup (No change) ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"]]
-    await update.message.reply_text("أهلاً بك في بوت OKX القناص v9.1 (The Auditor)", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True))
+    await update.message.reply_text("أهلاً بك في بوت OKX القناص v9.2 (Network Shield)", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True))
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📊 الإحصائيات العامة", callback_data="dashboard_stats")],
@@ -754,7 +758,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                     active_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status IN ('active', 'pending_protection')")).fetchone())[0]
                 ws_status = 'متصل ✅' if bot_state.ws_manager and bot_state.ws_manager.is_connected() else 'غير متصل ❌'
                 scanners_text = escape_markdown(', '.join(settings.get('active_scanners',[])))
-                report = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v9.1)**\n",
+                report = [f"**🕵️‍♂️ تقرير التشخيص الشامل (v9.2)**\n",
                           f"--- **📊 حالة السوق الحالية** ---\n- **المزاج العام:** {mood['mood']} ({escape_markdown(mood['reason'])})\n- **مؤشر BTC:** {mood.get('btc_mood', 'N/A')}\n",
                           f"--- **🔬 أداء آخر فحص** ---\n- **وقت البدء:** {scan.get('last_start', 'N/A')}\n",
                           f"--- **🔧 الإعدادات النشطة** ---\n- **النمط الحالي:** {settings.get('active_preset', 'N/A')}\n- **الماسحات المفعلة:** {scanners_text}\n",
@@ -788,7 +792,9 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 current_val = bot_state.settings['liquidity_filters'][param_key]
 
             if isinstance(current_val, bool):
-                 bot_state.settings[param_key] = not bot_state.settings[param_key]; save_settings()
+                 target_dict = settings if param_key not in settings.get('liquidity_filters', {}) else settings['liquidity_filters']
+                 target_dict[param_key] = not target_dict[param_key]
+                 save_settings()
                  await show_parameters_menu(update, context, edit_message_id=query.message.message_id)
             else:
                  msg_to_delete = await query.message.reply_text(f"📝 *تعديل '{PARAM_DISPLAY_NAMES.get(param_key, param_key)}'*\n*القيمة الحالية:* `{current_val}`\n\nأرسل القيمة الجديدة.", parse_mode=ParseMode.MARKDOWN)
@@ -809,7 +815,18 @@ async def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     bot_state.application = app
     await ensure_libraries_loaded()
-    bot_state.exchange = ccxt.okx({'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 'password': OKX_API_PASSPHRASE, 'enableRateLimit': True, 'options': {'defaultType': 'spot', 'hostname': 'aws.okx.com'}})
+    # --- NETWORK SHIELD ACTIVATED ---
+    bot_state.exchange = ccxt.okx({
+        'apiKey': OKX_API_KEY, 
+        'secret': OKX_API_SECRET, 
+        'password': OKX_API_PASSPHRASE, 
+        'enableRateLimit': True,
+        'timeout': 60000,  # 60-second timeout for all requests
+        'options': {
+            'defaultType': 'spot',
+            'hostname': 'aws.okx.com'
+        }
+    })
     ws_manager = WebSocketManager(bot_state.exchange)
     bot_state.ws_manager = ws_manager
     ws_task = asyncio.create_task(ws_manager.run())
@@ -824,7 +841,7 @@ async def main():
     try:
         await bot_state.exchange.fetch_balance()
         logger.info("✅ OKX connection test SUCCEEDED.")
-        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Phoenix v9.1 (The Auditor) بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Phoenix v9.2 (Network Shield) بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
         async with app:
             await app.start()
             await app.updater.start_polling()
@@ -841,5 +858,3 @@ async def main():
 if __name__ == '__main__':
     try: asyncio.run(main())
     except Exception as e: logger.critical(f"Failed to start bot due to an error in initial setup: {e}", exc_info=True)
-
-
