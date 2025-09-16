@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Bot v8.2 (The Phoenix - Complete) 🚀 ---
+# --- 🚀 OKX Bot v8.2 (The Phoenix - Fixed) 🚀 ---
 # =======================================================================================
-# This version restores the missing Telegram UI functions and integrates all fixes.
+# This version fixes the WebSocket connection issue and improves diagnostics.
 # =======================================================================================
 
 # --- Libraries ---
@@ -11,7 +11,7 @@ import os
 import logging
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from collections import defaultdict
 import aiosqlite
@@ -48,7 +48,7 @@ DB_FILE = os.path.join(APP_ROOT, 'okx_phoenix_v8.db')
 SETTINGS_FILE = os.path.join(APP_ROOT, 'okx_phoenix_settings_v8.json')
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger("OKX_Phoenix_v8.2")
+logger = logging.getLogger("OKX_Phoenix_v8.2_Fixed")
 
 class BotState:
     def __init__(self):
@@ -67,7 +67,6 @@ scan_lock = asyncio.Lock()
 # =======================================================================================
 # --- UI Constants ---
 # =======================================================================================
-# ... (DEFAULT_SETTINGS, PRESETS, etc. remain the same) ...
 DEFAULT_SETTINGS = {
     "active_preset": "PRO",
     "real_trade_size_usdt": 15.0,
@@ -122,8 +121,7 @@ async def ensure_libraries_loaded():
     if ta is None: logger.info("تحميل مكتبة pandas-ta لأول مرة..."); import pandas_ta as ta_lib; ta = ta_lib
     if ccxt is None: logger.info("تحميل مكتبة ccxt لأول مرة..."); import ccxt.async_support as ccxt_lib; ccxt = ccxt_lib
 
-# --- (Paste all helper functions here: escape_markdown, load_settings, save_settings, init_database, log_initial_trade_to_db, etc.) ---
-# ...
+# --- Helper Functions ---
 def escape_markdown(text: str) -> str:
     if not isinstance(text, str):
         text = str(text)
@@ -179,6 +177,7 @@ async def init_database():
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
 
+# ... (All other helper functions like get_fear_and_greed_index, get_market_mood, etc., remain the same)
 async def log_initial_trade_to_db(signal, buy_order):
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
@@ -234,8 +233,8 @@ async def get_market_mood():
         return {"mood": "NEGATIVE", "reason": f"مشاعر خوف شديد (مؤشر F&G: {fng})", "btc_mood": btc_mood_text, "fng": fng_text}
         
     return {"mood": "POSITIVE", "reason": "وضع السوق مناسب", "btc_mood": btc_mood_text, "fng": fng_text}
-# ... (Paste all strategy and core bot logic functions here) ...
-# ...
+    
+# ... (All strategy analysis functions remain the same)
 def find_col(df_columns, prefix):
     try: return next(col for col in df_columns if col.startswith(prefix))
     except StopIteration: return None
@@ -299,6 +298,8 @@ async def analyze_whale_radar(df, rvol, exchange, symbol):
     except Exception: return None
     return None
 
+
+# ... (All other core logic like initiate_trade, worker, perform_scan, etc., remains the same)
 async def initiate_trade(signal, bot: "telegram.Bot"):
     await ensure_libraries_loaded()
     symbol, settings, exchange = signal['symbol'], bot_state.settings, bot_state.exchange
@@ -480,6 +481,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                        f"- **⚠️ أخطاء في التحليل:** {bot_state.scan_stats['failures']}")
         await bot.send_message(TELEGRAM_CHAT_ID, scan_summary, parse_mode=ParseMode.MARKDOWN)
 
+# --- Postman (WebSocket) Logic ---
 async def handle_filled_buy_order(order_data):
     symbol = order_data['instId'].replace('-', '/')
     order_id = order_data['ordId']
@@ -551,10 +553,22 @@ async def handle_filled_buy_order(order_data):
                          f"**❗️ تدخل يدوي فوري ضروري لوضع وقف الخسارة!**")
         await bot_state.application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=error_message, parse_mode=ParseMode.MARKDOWN)
 
+# =======================================================================================
+# ---  WebSocket Manager (FIXED) ---
+# =======================================================================================
 class WebSocketManager:
-    def __init__(self, bot_state):
-        self.ws_url = "wss://ws.okx.com:8443/ws/v5/private"
-        self.bot_state = bot_state
+    def __init__(self, exchange):
+        # Dynamically build the URL from the exchange's hostname for consistency
+        hostname = exchange.options.get('hostname', 'ws.okx.com')
+        # Ensure we use the correct WebSocket-specific hostname
+        if 'aws' in hostname:
+            ws_hostname = 'wsaws.okx.com'
+        else:
+            ws_hostname = 'ws.okx.com'
+            
+        self.ws_url = f"wss://{ws_hostname}:8443/ws/v5/private"
+        self.websocket = None
+        logger.info(f"[WS-Manager] Initialized with URL: {self.ws_url}")
 
     def _get_auth_args(self):
         timestamp = str(time.time())
@@ -581,22 +595,41 @@ class WebSocketManager:
                     logger.info("✅ [WS-Private] Connected. Authenticating...")
                     await websocket.send(json.dumps({"op": "login", "args": self._get_auth_args()}))
                     login_response = json.loads(await websocket.recv())
+                    
                     if login_response.get('event') == 'login' and login_response.get('code') == '0':
-                        logger.info("🔐 [WS-Private] Authenticated. Subscribing to orders channel...")
+                        logger.info("🔐 [WS-Private] Authenticated successfully. Subscribing to orders channel...")
                         await websocket.send(json.dumps({"op": "subscribe", "args": [{"channel": "orders", "instType": "SPOT"}]}))
+                        
+                        # Handle subscription confirmation
+                        sub_response = json.loads(await websocket.recv())
+                        if sub_response.get('event') == 'subscribe':
+                             logger.info(f"📈 [WS-Private] Subscribed successfully to: {sub_response.get('arg')}")
+                        else:
+                             logger.warning(f"⚠️ [WS-Private] Unexpected response after subscription: {sub_response}")
+
                     else:
-                        logger.error(f"🔥 [WS-Private] Authentication failed: {login_response}")
+                        logger.error(f"🔥 [WS-Private] Authentication failed! Response: {login_response}")
+                        # Let the outer loop handle reconnection after a delay
+                        await asyncio.sleep(10) # Wait longer after auth failure
                         continue
+
+                    # Listen for messages
                     async for message in websocket:
                         await self._message_handler(message)
+
+            except websockets.exceptions.ConnectionClosed as e:
+                 logger.warning(f"⚠️ [WS-Private] Connection closed: {e}. Reconnecting in 5 seconds...")
             except Exception as e:
-                logger.error(f"🔥 [WS-Private] Unhandled exception: {e}", exc_info=True)
-            logger.warning("⚠️ [WS-Private] Disconnected. Reconnecting in 5 seconds...")
+                logger.error(f"🔥 [WS-Private] Unhandled exception in WebSocket loop: {e}", exc_info=True)
+            
+            # This block runs on any disconnection or error
+            self.websocket = None # Ensure state is updated to disconnected
+            logger.info("Reconnecting in 5 seconds...")
             await asyncio.sleep(5)
+
 
 async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
     # This function is now mainly for the Guardian protocol
-    # Trailing Stop Loss logic would be re-implemented here if needed
     bot = context.bot
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
@@ -605,8 +638,9 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
                 pending_trades = [dict(row) for row in await cursor.fetchall()]
         
         for trade in pending_trades:
-            trade_timestamp = datetime.strptime(trade['timestamp'], '%Y-%m-%d %H:%M:%S')
-            if datetime.now() - trade_timestamp > timedelta(minutes=2):
+            # Using timezone-aware comparison
+            trade_timestamp = datetime.strptime(trade['timestamp'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=EGYPT_TZ)
+            if datetime.now(EGYPT_TZ) - trade_timestamp > timedelta(minutes=2):
                 logger.critical(f"🛡️ GUARDIAN ALERT: Trade #{trade['id']} for {trade['symbol']} is stuck!")
                 alert_msg = (f"**🔥🔥🔥 تنبيه من الحارس**\n\n"
                              f"**صفقة:** `#{trade['id']} {trade['symbol']}`\n"
@@ -617,7 +651,7 @@ async def track_open_trades(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Guardian: DB error: {e}")
 
 # =======================================================================================
-# --- 📱 Telegram UI Functions ---
+# --- 📱 Telegram UI Functions (No Changes Here) ---
 # =======================================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"]]
@@ -774,8 +808,10 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                 async with aiosqlite.connect(DB_FILE) as conn:
                     total_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades")).fetchone())[0]
                     active_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active' OR status = 'pending_protection'")).fetchone())[0]
+                
+                # Correctly check the WebSocket connection status
                 ws_status = 'غير متصل ❌'
-                if bot_state.ws_manager and hasattr(bot_state.ws_manager, 'websocket') and bot_state.ws_manager.websocket and bot_state.ws_manager.websocket.open:
+                if bot_state.ws_manager and bot_state.ws_manager.websocket and bot_state.ws_manager.websocket.open:
                     ws_status = 'متصل ✅'
                 
                 scanners_text = escape_markdown(', '.join(settings.get('active_scanners',[])))
@@ -824,7 +860,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
 
 # =======================================================================================
-# --- 🚀 Main Bot Startup ---
+# --- 🚀 Main Bot Startup (FIXED) ---
 # =======================================================================================
 async def main():
     logger.info("--- Bot process starting ---")
@@ -845,11 +881,15 @@ async def main():
         'password': OKX_API_PASSPHRASE, 'enableRateLimit': True, 
         'options': {
             'defaultType': 'spot',
-            'hostname': 'aws.okx.com'
+            'hostname': 'aws.okx.com' # This is important
         }
     })
     
-    ws_manager = WebSocketManager(bot_state)
+    # --- FIX ---
+    # 1. Pass the configured exchange to the manager.
+    # 2. Assign the created manager back to the bot_state.
+    ws_manager = WebSocketManager(bot_state.exchange)
+    bot_state.ws_manager = ws_manager
     ws_task = asyncio.create_task(ws_manager.run())
     logger.info("🚀 [Postman] Postman scheduled to run in the background.")
 
@@ -865,7 +905,7 @@ async def main():
     try:
         await bot_state.exchange.fetch_balance()
         logger.info("✅ OKX connection test SUCCEEDED.")
-        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Phoenix v8.2 (Complete) بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="*🚀 بوت The Phoenix v8.2 (Fixed) بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
         
         async with app:
             await app.start()
@@ -886,3 +926,4 @@ if __name__ == '__main__':
         asyncio.run(main())
     except Exception as e:
         logger.critical(f"Failed to start bot due to an error in initial setup: {e}", exc_info=True)
+
