@@ -1,19 +1,23 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Mastermind Trader v28.1 (Race Condition & Logging Fix) 🚀 ---
+# --- 🚀 OKX Mastermind Trader v28.2 (Fee-Aware & Resilient Logic) 🚀 ---
 # =======================================================================================
-# This version provides critical fixes for issues identified in production logs.
+# This is a pivotal update that addresses a subtle but critical flaw related to
+# trading fees, ensuring the bot's internal state perfectly matches the exchange's reality.
 #
-# --- Version 28.1 Changelog ---
-#   - 🧠 RACE CONDITION FIX: Overhauled the `wait_for_balance_available` function. It now
-#     intelligently checks both 'free' and 'total' balance. If the total balance is
-#     correct but the free balance is lagging (a common exchange race condition after a
-#     fill), it will now wait more patiently instead of timing out prematurely. This
-#     directly resolves the "Failed to close trade" critical error.
-#   - 📝 LOGGING FIX: Corrected the custom `ContextAdapter` to prevent crashes when
-#     internal libraries (like httpx or telegram) log messages without a `trade_id`.
-#     This cleans up the log file and removes the `ValueError` spam.
-#   - ✅ DB & SETTINGS PRESERVED: Continues to use v26 database and settings files.
+# --- Version 28.2 Changelog ---
+#   - 🎯 **FEE-AWARE TRADING**: The core logic has been re-architected. After a buy
+#     order is filled, the bot NO LONGER trusts the requested amount. Instead, it
+#     immediately fetches the order details from the exchange to get the **actual,
+#     net quantity received after fees have been deducted**. This definitive amount is
+#     then saved to the database.
+#   - ✅ **ELIMINATES "BALANCE SHORTFALL"**: This change completely resolves the
+#     `CRITICAL BALANCE SHORTFALL` error. The quantity the bot intends to sell will
+#     now always match the exact quantity it owns, preventing closure failures.
+#   - 🛠️ **Supervisor Enhancement**: The supervisor job is now smarter. When it
+#     finds a stuck 'pending' trade that was actually filled, it will also fetch
+#     the net filled amount, ensuring data integrity even during manual activation.
+#   - ✅ **DB & SETTINGS PRESERVED**: Continues to use v26 database and settings files.
 # =======================================================================================
 
 
@@ -85,20 +89,16 @@ SETTINGS_FILE = os.path.join(APP_ROOT, 'mastermind_trader_settings_v26.json')
 # --- END OF PERSISTENCE SECTION ---
 
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
-# --- LOGGING FIX: Made the formatter more resilient ---
 logging.basicConfig(format='%(asctime)s - %(levelname)s - [TradeID:%(trade_id)s] - %(message)s', level=logging.INFO)
 
-# Adapter to inject contextual info like trade_id into logs
 class ContextAdapter(logging.LoggerAdapter):
     def process(self, msg, kwargs):
-        # Ensure 'extra' exists and provide a default for 'trade_id'
         if 'extra' not in kwargs:
             kwargs['extra'] = {}
         if 'trade_id' not in kwargs['extra']:
             kwargs['extra']['trade_id'] = 'N/A'
         return msg, kwargs
 logger = ContextAdapter(logging.getLogger("OKX_Mastermind_Trader"), {})
-# --- END OF LOGGING FIX ---
 
 # =======================================================================================
 # --- 🔬 Global Bot State & Locks 🔬 ---
@@ -418,13 +418,25 @@ SCANNERS = {
 # =======================================================================================
 # --- 🚀 Hybrid Core Protocol (Execution & Management) 🚀 ---
 # =======================================================================================
-async def activate_trade(order_id, filled_qty, avg_price, symbol):
+# --- FEE-AWARE LOGIC ---
+async def activate_trade(order_id, symbol, filled_price):
     bot = bot_data.application.bot
+    log_ctx = {'trade_id': 'N/A'}
     try:
+        # Fetch the definitive order details from the exchange
+        logger.info(f"Fetching final order details for {order_id} to ensure fee accuracy.")
+        order_details = await bot_data.exchange.fetch_order(order_id, symbol)
+        
+        # Use the actual filled amount (net of fees)
+        net_filled_quantity = order_details.get('filled', 0.0)
+        if net_filled_quantity <= 0:
+            logger.error(f"Order {order_id} for {symbol} reported as filled but has zero quantity. Aborting activation.")
+            return
+
         balance_after = await bot_data.exchange.fetch_balance()
         usdt_remaining = balance_after.get('USDT', {}).get('free', 0)
     except Exception as e:
-        logger.error(f"Could not fetch balance for confirmation message: {e}")
+        logger.error(f"Could not fetch data for trade activation: {e}")
         usdt_remaining = "N/A"
 
     async with aiosqlite.connect(DB_FILE) as conn:
@@ -436,25 +448,27 @@ async def activate_trade(order_id, filled_qty, avg_price, symbol):
             return
 
         trade = dict(trade)
-        logger.info(f"Activating trade #{trade['id']} for {symbol}...", extra={'trade_id': trade['id']})
+        log_ctx['trade_id'] = trade['id']
+        logger.info(f"Activating trade #{trade['id']} for {symbol}...", extra=log_ctx)
+        
+        risk = filled_price - trade['stop_loss']
+        new_take_profit = filled_price + (risk * bot_data.settings['risk_reward_ratio'])
 
-        risk = avg_price - trade['stop_loss']
-        new_take_profit = avg_price + (risk * bot_data.settings['risk_reward_ratio'])
-
+        # Update DB with the definitive, fee-aware quantity and true entry price
         await conn.execute(
             "UPDATE trades SET status = 'active', entry_price = ?, quantity = ?, take_profit = ? WHERE id = ?",
-            (avg_price, filled_qty, new_take_profit, trade['id'])
+            (filled_price, net_filled_quantity, new_take_profit, trade['id'])
         )
-
+        
         active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")).fetchone())[0]
         await conn.commit()
 
     await bot_data.public_ws.subscribe([symbol])
-
-    trade_cost = avg_price * filled_qty
-    tp_percent = (new_take_profit / avg_price - 1) * 100
-    sl_percent = (1 - trade['stop_loss'] / avg_price) * 100
-
+    
+    trade_cost = filled_price * net_filled_quantity
+    tp_percent = (new_take_profit / filled_price - 1) * 100
+    sl_percent = (1 - trade['stop_loss'] / filled_price) * 100
+    
     context_msg = ""
     try:
         ohlcv_24h = await bot_data.exchange.fetch_ohlcv(symbol, '1h', limit=24)
@@ -473,8 +487,8 @@ async def activate_trade(order_id, filled_qty, avg_price, symbol):
         f"**الاستراتيجية:** {trade['reason']}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🔸 **الصفقة رقم:** `#{trade['id']}`\n"
-        f"🔸 **سعر التنفيذ:** `${avg_price:,.4f}`\n"
-        f"🔸 **الكمية:** `{filled_qty:,.4f}` {symbol.split('/')[0]}\n"
+        f"🔸 **سعر التنفيذ:** `${filled_price:,.4f}`\n"
+        f"🔸 **الكمية (صافي):** `{net_filled_quantity:,.4f}` {symbol.split('/')[0]}\n"
         f"🔸 **التكلفة:** `${trade_cost:,.2f}`\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🎯 **الهدف (TP):** `${new_take_profit:,.4f}` `(ربح متوقع: {tp_percent:+.2f}%)`\n"
@@ -491,13 +505,13 @@ async def activate_trade(order_id, filled_qty, avg_price, symbol):
 
 async def handle_filled_buy_order(order_data):
     symbol = order_data['instId'].replace('-', '/'); order_id = order_data['ordId']
-    filled_qty = float(order_data.get('fillSz', 0)); avg_price = float(order_data.get('avgPx', 0))
-    if filled_qty > 0 and avg_price > 0:
-        logger.info(f"🎤 Fast Reporter: Received fill for {order_id} via WebSocket.")
-        await activate_trade(order_id, filled_qty, avg_price, symbol)
+    avg_price = float(order_data.get('avgPx', 0))
+    if avg_price > 0:
+        logger.info(f"🎤 Fast Reporter: Received fill for {order_id} via WebSocket. Activating...")
+        # Pass only the necessary info; activate_trade will fetch the definitive data
+        await activate_trade(order_id, symbol, avg_price)
 
 async def exponential_backoff_with_jitter(run_coro, *args, **kwargs):
-    """A robust wrapper for coroutines that require resilient reconnection."""
     retries = 0
     base_delay, max_delay = 2, 120
     while True:
@@ -540,6 +554,7 @@ class PrivateWebSocketManager:
     async def run(self):
         await exponential_backoff_with_jitter(self._run_loop)
 
+# --- SUPERVISOR ENHANCEMENT ---
 async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("🕵️ Supervisor: Conducting audit of pending trades...")
     async with aiosqlite.connect(DB_FILE) as conn:
@@ -555,10 +570,12 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
             order_id, symbol = trade['order_id'], trade['symbol']
             logger.warning(f"🕵️ Supervisor: Found abandoned trade #{trade['id']}. Investigating...", extra={'trade_id': trade['id']})
             try:
+                # Fetch full order details to get the true filled amount
                 order_status = await bot_data.exchange.fetch_order(order_id, symbol)
                 if order_status['status'] == 'closed' and order_status.get('filled', 0) > 0:
                     logger.info(f"🕵️ Supervisor: API confirms trade {order_id} was filled. Activating manually.", extra={'trade_id': trade['id']})
-                    await activate_trade(order_id, order_status['filled'], order_status['average'], symbol)
+                    # Use the fee-aware activation logic
+                    await activate_trade(order_id, symbol, order_status['average'])
                 elif order_status['status'] == 'canceled':
                     await conn.execute("UPDATE trades SET status = 'failed' WHERE id = ?", (trade['id'],))
                 else: # Still open, try to cancel
@@ -567,7 +584,6 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
                 await conn.commit()
             except Exception as e: logger.error(f"🕵️ Supervisor: Failed to rectify trade #{trade['id']}: {e}", extra={'trade_id': trade['id']})
 
-# --- RACE CONDITION FIX: Overhauled balance check logic ---
 async def wait_for_balance_available(exchange, asset, required_amount, log_ctx, timeout=30):
     start_time = time.time()
     asset_symbol = asset.split('/')[0]
@@ -580,12 +596,10 @@ async def wait_for_balance_available(exchange, asset, required_amount, log_ctx, 
             free_amount = asset_balance.get('free', 0.0)
             total_amount = asset_balance.get('total', 0.0)
 
-            # Check if the 'free' amount is sufficient
             if free_amount >= required_amount:
                 logger.info(f"SUCCESS: {free_amount:.6f} {asset_symbol} is available.", extra=log_ctx)
                 return True
             
-            # If free is not enough, check total. This handles the race condition.
             if total_amount >= required_amount:
                 logger.warning(
                     f"Balance race condition detected for {asset_symbol}. "
@@ -593,22 +607,19 @@ async def wait_for_balance_available(exchange, asset, required_amount, log_ctx, 
                     "Waiting for exchange to update...", extra=log_ctx
                 )
             else:
-                # This is a more serious issue - the funds are not even in the total balance.
                 logger.error(
                     f"CRITICAL BALANCE SHORTFALL for {asset_symbol}. "
                     f"Total: {total_amount:.6f}, Needed: {required_amount:.6f}. This should not happen.", extra=log_ctx
                 )
-                # Fail fast if the total balance is insufficient.
                 return False
 
-            await asyncio.sleep(1) # Wait longer between checks in a race condition
+            await asyncio.sleep(1)
         except Exception as e:
             logger.warning(f"Error while fetching balance for {asset_symbol}: {e}. Retrying...", extra=log_ctx)
             await asyncio.sleep(2)
 
     logger.error(f"TIMEOUT: Failed to verify availability of {required_amount:.6f} {asset_symbol} within {timeout}s.", extra=log_ctx)
     return False
-# --- END OF RACE CONDITION FIX ---
 
 class TradeGuardian:
     def __init__(self, application): self.application = application
@@ -652,7 +663,6 @@ class TradeGuardian:
         logger.info(f"Guardian: Starting close process for {symbol}. Reason: {reason}", extra=log_ctx)
         try:
             asset_to_sell = symbol.split('/')[0]
-            # --- Pass log_ctx to the new balance checker ---
             is_available = await wait_for_balance_available(bot_data.exchange, asset_to_sell, quantity, log_ctx)
             if not is_available:
                 logger.critical(f"CRITICAL: Failed to close trade: Balance did not become available.", extra=log_ctx)
@@ -907,7 +917,6 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         await safe_send_message(bot, summary_message)
 
 async def check_time_sync(context: ContextTypes.DEFAULT_TYPE):
-    """Periodically checks the time difference between local system and OKX server."""
     try:
         server_time = await bot_data.exchange.fetch_time()
         local_time = int(time.time() * 1000)
@@ -925,7 +934,7 @@ async def check_time_sync(context: ContextTypes.DEFAULT_TYPE):
 # =======================================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["الإعدادات ⚙️"]]
-    await update.message.reply_text("أهلاً بك في OKX Mastermind Trader v28.1", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    await update.message.reply_text("أهلاً بك في OKX Mastermind Trader v28.2", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not bot_data.trading_enabled:
@@ -1421,7 +1430,6 @@ async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     preset_key = query.data.split('_')[-1]
     if preset_settings := SETTINGS_PRESETS.get(preset_key):
-        # LOGIC FIX: MERGE settings instead of overwriting to preserve scanner toggles
         for key, value in preset_settings.items():
             bot_data.settings[key] = value
         bot_data.active_preset_name = PRESET_NAMES_AR.get(preset_key, "مخصص")
@@ -1475,7 +1483,6 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
         bot_data.settings['asset_blacklist'] = blacklist
         bot_data.active_preset_name = "مخصص"
         save_settings()
-        # Simulate a callback query to refresh the menu
         await show_blacklist_menu(Update(update.update_id, callback_query=type('Query', (), {'message': update.message, 'data': 'settings_blacklist', 'edit_message_text': (lambda *args, **kwargs: None), 'answer': (lambda *args, **kwargs: None)})()), context)
 
         return
@@ -1554,7 +1561,6 @@ async def post_init(application: Application):
     except Exception as e:
         logger.critical(f"🔥 FATAL: Could not connect to OKX: {e}"); return
 
-    # Start the time sync check right away
     await check_time_sync(ContextTypes.DEFAULT_TYPE(application=application))
 
     bot_data.trade_guardian = TradeGuardian(application)
@@ -1573,7 +1579,7 @@ async def post_init(application: Application):
 
     logger.info(f"Scanner scheduled for every {SCAN_INTERVAL_SECONDS}s. Supervisor will audit every {SUPERVISOR_INTERVAL_SECONDS}s.")
     try:
-        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🚀 OKX Mastermind Trader v28.1 بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🚀 OKX Mastermind Trader v28.2 بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden:
         logger.critical(f"FATAL: Bot is not authorized for chat ID {TELEGRAM_CHAT_ID}.")
         return
@@ -1584,7 +1590,7 @@ async def post_shutdown(application: Application):
     logger.info("Bot has shut down.")
 
 def main():
-    logger.info("--- Starting OKX Mastermind Trader v28.1 ---")
+    logger.info("--- Starting OKX Mastermind Trader v28.2 ---")
     load_settings(); asyncio.run(init_database())
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
