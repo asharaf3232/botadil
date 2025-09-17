@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Mastermind Trader v25.6 (Hotfix) 🚀 ---
+# --- 🚀 OKX Mastermind Trader v25.7 (Preset Fix) 🚀 ---
 # =======================================================================================
 # This is the master version, representing a complete fusion of the best features:
 #
@@ -14,10 +14,12 @@
 #   - The infallible Hybrid Core for trade confirmation (Fast Reporter + Supervisor).
 #   - The reliable Guardian protocol for real-time management of active trades.
 #
-# --- Version 25.6 Changelog ---
-#   - HOTFIX: Restored full, complete code. The previous version (25.5) was accidentally sent with
-#     placeholder 'pass' statements, making the UI non-functional. This version is complete and runnable.
-#   - All features from 25.5 are now correctly implemented.
+# --- Version 25.7 Changelog ---
+#   - CRITICAL FIX: The logic for loading and displaying the active preset name was flawed.
+#     The bot will now correctly identify the active preset on startup or correctly label it
+#     as "Custom" if any manual changes have been made.
+#   - IMPROVED: Manually changing any setting (numeric or toggle) now instantly and
+#     reliably switches the active preset name to "Custom".
 # =======================================================================================
 
 # --- Core Libraries ---
@@ -32,6 +34,7 @@ from zoneinfo import ZoneInfo
 import hmac
 import base64
 from collections import defaultdict
+import copy
 
 # --- Database & Networking ---
 import aiosqlite
@@ -141,19 +144,19 @@ PRESET_NAMES_AR = {
     "lenient": "متساهل", "very_lenient": "فائق التساهل"
 }
 SETTINGS_PRESETS = {
-    "professional": DEFAULT_SETTINGS.copy(),
+    "professional": copy.deepcopy(DEFAULT_SETTINGS),
     "strict": {
-        **DEFAULT_SETTINGS, "max_concurrent_trades": 3, "risk_reward_ratio": 2.5,
+        **copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 3, "risk_reward_ratio": 2.5,
         "fear_and_greed_threshold": 40, "adx_filter_level": 28,
         "liquidity_filters": {"min_quote_volume_24h_usd": 2000000, "min_rvol": 2.0},
     },
     "lenient": {
-        **DEFAULT_SETTINGS, "max_concurrent_trades": 8, "atr_sl_multiplier": 3.0,
+        **copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 8, "atr_sl_multiplier": 3.0,
         "risk_reward_ratio": 1.8, "fear_and_greed_threshold": 25, "adx_filter_level": 20,
         "liquidity_filters": {"min_quote_volume_24h_usd": 500000, "min_rvol": 1.2},
     },
     "very_lenient": {
-        **DEFAULT_SETTINGS, "max_concurrent_trades": 12, "atr_sl_multiplier": 3.5,
+        **copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 12, "atr_sl_multiplier": 3.5,
         "risk_reward_ratio": 1.5, "fear_and_greed_threshold": 20, "adx_filter_enabled": False,
         "market_mood_filter_enabled": False,
         "liquidity_filters": {"min_quote_volume_24h_usd": 250000, "min_rvol": 1.0},
@@ -167,27 +170,37 @@ SETTINGS_PRESETS = {
 def load_settings():
     try:
         if os.path.exists(SETTINGS_FILE):
-            with open(SETTINGS_FILE, 'r') as f: bot_data.settings = json.load(f)
-        else: bot_data.settings = DEFAULT_SETTINGS.copy()
-    except Exception: bot_data.settings = DEFAULT_SETTINGS.copy()
-    
-    for key, value in DEFAULT_SETTINGS.items():
+            with open(SETTINGS_FILE, 'r') as f:
+                bot_data.settings = json.load(f)
+        else:
+            bot_data.settings = copy.deepcopy(DEFAULT_SETTINGS)
+    except Exception:
+        bot_data.settings = copy.deepcopy(DEFAULT_SETTINGS)
+
+    # Deep merge with defaults to ensure all keys exist after an update
+    default_copy = copy.deepcopy(DEFAULT_SETTINGS)
+    for key, value in default_copy.items():
         if isinstance(value, dict):
-             if key not in bot_data.settings or not isinstance(bot_data.settings[key], dict):
-                 bot_data.settings[key] = {}
-             for sub_key, sub_value in value.items():
-                 bot_data.settings[key].setdefault(sub_key, sub_value)
+            if key not in bot_data.settings or not isinstance(bot_data.settings[key], dict):
+                bot_data.settings[key] = {}
+            for sub_key, sub_value in value.items():
+                bot_data.settings[key].setdefault(sub_key, sub_value)
         else:
             bot_data.settings.setdefault(key, value)
     
+    # CRITICAL FIX: Logic to correctly identify the active preset
+    found_preset = False
     for name, preset_settings in SETTINGS_PRESETS.items():
         if bot_data.settings == preset_settings:
             bot_data.active_preset_name = PRESET_NAMES_AR.get(name, "مخصص")
+            found_preset = True
             break
-    else:
+    if not found_preset:
         bot_data.active_preset_name = "مخصص"
 
-    save_settings(); logger.info("Settings loaded.")
+    save_settings()
+    logger.info(f"Settings loaded. Active preset identified as: {bot_data.active_preset_name}")
+
 def save_settings():
     with open(SETTINGS_FILE, 'w') as f: json.dump(bot_data.settings, f, indent=4)
 async def safe_send_message(bot, text, **kwargs):
@@ -767,7 +780,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
 # =======================================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["الإعدادات ⚙️"]]
-    await update.message.reply_text("أهلاً بك في OKX Mastermind Trader v25.6", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    await update.message.reply_text("أهلاً بك في OKX Mastermind Trader v25.7", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -1044,7 +1057,7 @@ async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     preset_key = query.data.split('_')[-1]
     if preset_settings := SETTINGS_PRESETS.get(preset_key):
-        bot_data.settings = preset_settings.copy()
+        bot_data.settings = copy.deepcopy(preset_settings)
         bot_data.active_preset_name = PRESET_NAMES_AR.get(preset_key, "مخصص")
         save_settings()
         await query.answer(f"تم تطبيق نمط '{PRESET_NAMES_AR.get(preset_key)}' بنجاح!")
@@ -1095,8 +1108,7 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
         bot_data.settings['asset_blacklist'] = blacklist
         bot_data.active_preset_name = "مخصص"
         save_settings()
-        # Fake a callback query to refresh the menu
-        fake_query = type('Query', (), {'message': update.message, 'data': 'settings_blacklist', 'edit_message_text': update.message.reply_text})
+        fake_query = type('Query', (), {'message': update.message, 'data': 'settings_blacklist', 'edit_message_text': update.message.reply_text, 'answer': (lambda *args, **kwargs: None)})
         await show_blacklist_menu(Update(update.update_id, callback_query=fake_query), context)
         return
 
@@ -1115,7 +1127,7 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("❌ قيمة غير صالحة. الرجاء إرسال رقم.")
     finally:
         del context.user_data['setting_to_change']
-        fake_query = type('Query', (), {'message': update.message, 'data': 'settings_params', 'edit_message_text': update.message.reply_text})
+        fake_query = type('Query', (), {'message': update.message, 'data': 'settings_params', 'edit_message_text': update.message.reply_text, 'answer': (lambda *args, **kwargs: None)})
         await show_parameters_menu(Update(update.update_id, callback_query=fake_query), context)
 
 async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1177,7 +1189,7 @@ async def post_init(application: Application):
     
     logger.info(f"Scanner scheduled for every {SCAN_INTERVAL_SECONDS}s. Supervisor will audit every {SUPERVISOR_INTERVAL_SECONDS}s.")
     try:
-        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🚀 OKX Mastermind Trader v25.6 بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🚀 OKX Mastermind Trader v25.7 بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden:
         logger.critical(f"FATAL: Bot is not authorized for chat ID {TELEGRAM_CHAT_ID}.")
         return
@@ -1188,7 +1200,7 @@ async def post_shutdown(application: Application):
     logger.info("Bot has shut down.")
 
 def main():
-    logger.info("--- Starting OKX Mastermind Trader v25.6 ---")
+    logger.info("--- Starting OKX Mastermind Trader v25.7 ---")
     load_settings(); asyncio.run(init_database())
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
@@ -1202,4 +1214,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
