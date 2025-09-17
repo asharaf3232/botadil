@@ -1,18 +1,11 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Mastermind Trader v25.0 🚀 ---
+# --- 🚀 OKX Mastermind Trader v25.1 (Final Fix) 🚀 ---
 # =======================================================================================
-# This is the master version, representing a complete fusion of the best features:
-#
-# - BRAIN (from Mastermind v5.5):
-#   - Five advanced scanning strategies (Sniper, Whale Radar, etc.).
-#   - Comprehensive market mood analysis including news sentiment.
-# - APPEARANCE (from Mastermind v5.5 & your Copy-trader):
-#   - A full, rich Telegram UI with a detailed dashboard and diagnostics.
-#   - A professional trade confirmation message that reports on liquidity.
-# - BODY (from Hybrid Core v24.1):
-#   - The infallible Hybrid Core for trade confirmation (Fast Reporter + Supervisor).
-#   - The reliable Guardian protocol for real-time management of active trades.
+# This version introduces a critical fix to the trade closing mechanism.
+# It explicitly tells the OKX API to use the 'cash' (spot) account for
+# sell orders, resolving the "InsufficientFunds" error on unified accounts.
+# This is the definitive fix for the final piece of the puzzle.
 # =======================================================================================
 
 # --- Core Libraries ---
@@ -294,7 +287,6 @@ SCANNERS = {
 # --- 🚀 Hybrid Core Protocol (Execution & Management) 🚀 ---
 # =======================================================================================
 async def activate_trade(order_id, filled_qty, avg_price, symbol):
-    """The centralized function to activate a trade and send the detailed confirmation message."""
     bot = bot_data.application.bot
     try:
         balance_after = await bot_data.exchange.fetch_balance()
@@ -329,22 +321,17 @@ async def activate_trade(order_id, filled_qty, avg_price, symbol):
     
     trade_cost = avg_price * filled_qty
     
-    # The new, detailed confirmation message
     success_msg = (
-        f"**✅ تم تأكيد الشراء | {symbol}**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"**✅ تم تأكيد الشراء | {symbol}**\n━━━━━━━━━━━━━━━━━━━━\n"
         f"🔸 **الصفقة رقم:** `#{trade['id']}`\n"
-        f"🔸 **الاستراتيجية:** {trade['reason']}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔸 **الاستراتيجية:** {trade['reason']}\n━━━━━━━━━━━━━━━━━━━━\n"
         f"*تحليل الصفقة:*\n"
         f" ▪️ **سعر التنفيذ:** `${avg_price:,.4f}`\n"
         f" ▪️ **الكمية:** `{filled_qty:,.4f}` {symbol.split('/')[0]}\n"
-        f" ▪️ **التكلفة (السيولة المستهلكة):** `${trade_cost:,.2f}`\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f" ▪️ **التكلفة (السيولة المستهلكة):** `${trade_cost:,.2f}`\n━━━━━━━━━━━━━━━━━━━━\n"
         f"*التأثير على المحفظة:*\n"
         f" ▪️ **السيولة المتبقية (USDT):** `${usdt_remaining:,.2f}`\n"
-        f" ▪️ **إجمالي الصفقات النشطة:** `{active_trades_count}`\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f" ▪️ **إجمالي الصفقات النشطة:** `{active_trades_count}`\n━━━━━━━━━━━━━━━━━━━━\n"
         f"الحارس الأمين يراقب الصفقة الآن."
     )
     await safe_send_message(bot, success_msg)
@@ -450,7 +437,10 @@ class TradeGuardian:
         symbol, quantity = trade['symbol'], trade['quantity']
         logger.info(f"Guardian: Closing trade #{trade['id']} for {symbol}. Reason: {reason}")
         try:
-            await bot_data.exchange.create_market_sell_order(symbol, quantity)
+            # --- THE FINAL FIX ---
+            # Explicitly state this is a 'cash' or 'spot' trade
+            params = {'tdMode': 'cash'}
+            await bot_data.exchange.create_market_sell_order(symbol, quantity, params)
             logger.info(f"Market sell order for {quantity} {symbol} sent successfully.")
             
             pnl = (close_price - trade['entry_price']) * quantity
@@ -565,8 +555,11 @@ async def initiate_real_trade(signal):
         settings, exchange = bot_data.settings, bot_data.exchange
         trade_size = settings['real_trade_size_usdt']
         amount = trade_size / signal['entry_price']
-        logger.info(f"--- INITIATING REAL TRADE: {signal['symbol']} ---")
-        buy_order = await exchange.create_market_buy_order(signal['symbol'], amount)
+        
+        # Explicitly tell the API this is a spot/cash trade
+        params = {'tdMode': 'cash'}
+        logger.info(f"--- INITIATING REAL TRADE: {signal['symbol']} with params: {params} ---")
+        buy_order = await exchange.create_market_buy_order(signal['symbol'], amount, params)
         
         if await log_pending_trade_to_db(signal, buy_order):
             await safe_send_message(bot_data.application.bot, f"🚀 تم إرسال أمر شراء لـ `{signal['symbol']}`.")
@@ -575,10 +568,11 @@ async def initiate_real_trade(signal):
             await safe_send_message(bot_data.application.bot, f"⚠️ فشل تسجيل صفقة `{signal['symbol']}`. تم إلغاء الأمر.")
     except ccxt.InsufficientFunds as e:
         logger.error(f"REAL TRADE FAILED for {signal['symbol']}: {e}")
+        raise e # Re-raise to be caught by the scan loop
     except Exception as e:
         logger.error(f"REAL TRADE FAILED for {signal['symbol']}: {e}", exc_info=True)
         await safe_send_message(bot_data.application.bot, f"🔥 فشل فتح صفقة لـ `{signal['symbol']}`.")
-    raise e
+        raise e
 
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
     async with scan_lock:
@@ -629,7 +623,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
 # =======================================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"]]
-    await update.message.reply_text("أهلاً بك في OKX Mastermind Trader v25.0", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    await update.message.reply_text("أهلاً بك في OKX Mastermind Trader v25.1", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -679,7 +673,6 @@ async def check_trade_details(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     await query.edit_message_text(message, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للصفقات", callback_data="dashboard_trades")]]))
 
-
 async def show_mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mood = bot_data.market_mood
     headlines = get_latest_crypto_news()
@@ -710,7 +703,6 @@ async def show_strategy_report_command(update: Update, context: ContextTypes.DEF
         wr = (s['wins'] / total * 100) if total > 0 else 0
         report.append(f"\n--- *{r}* ---\n  - الصفقات: {total} ({s['wins']}✅ / {s['losses']}❌)\n  - النجاح: {wr:.2f}%")
     await update.callback_query.message.reply_text("\n".join(report), parse_mode=ParseMode.MARKDOWN)
-
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -759,7 +751,7 @@ async def post_init(application: Application):
     application.job_queue.run_repeating(the_supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="the_supervisor_job")
     
     logger.info(f"Scanner scheduled for every {SCAN_INTERVAL_SECONDS}s. Supervisor will audit every {SUPERVISOR_INTERVAL_SECONDS}s.")
-    await safe_send_message(application.bot, "*🚀 OKX Mastermind Trader v25.0 بدأ العمل...*")
+    await safe_send_message(application.bot, "*🚀 OKX Mastermind Trader v25.1 (Final Fix) بدأ العمل...*")
     logger.info("--- Bot is now fully operational ---")
 
 async def post_shutdown(application: Application):
@@ -767,7 +759,7 @@ async def post_shutdown(application: Application):
     logger.info("Bot has shut down.")
 
 def main():
-    logger.info("--- Starting OKX Mastermind Trader v25.0 ---")
+    logger.info("--- Starting OKX Mastermind Trader v25.1 (Final Fix) ---")
     load_settings(); asyncio.run(init_database())
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
@@ -781,3 +773,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
