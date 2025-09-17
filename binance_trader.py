@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Mastermind Trader v25.4 🚀 ---
+# --- 🚀 OKX Mastermind Trader v25.6 (Hotfix) 🚀 ---
 # =======================================================================================
 # This is the master version, representing a complete fusion of the best features:
 #
@@ -14,13 +14,10 @@
 #   - The infallible Hybrid Core for trade confirmation (Fast Reporter + Supervisor).
 #   - The reliable Guardian protocol for real-time management of active trades.
 #
-# --- Version 25.4 Changelog ---
-#   - UPGRADED: The "Modify Parameters" menu is now fully interactive. Users can click any parameter to change its value.
-#   - FIXED: The scanner now sends a clear summary message even when it skips (e.g., due to max trades), explaining the reason.
-#   - ADDED: "Very Lenient" preset and expanded the presets system.
-#   - ADDED: More detailed parameters for fine-tuning, including ADX filter controls.
-#   - ENHANCED: The core worker logic now includes an optional ADX trend filter for higher quality signals.
-#   - IMPROVED: User input handling for settings is now more robust.
+# --- Version 25.6 Changelog ---
+#   - HOTFIX: Restored full, complete code. The previous version (25.5) was accidentally sent with
+#     placeholder 'pass' statements, making the UI non-functional. This version is complete and runnable.
+#   - All features from 25.5 are now correctly implemented.
 # =======================================================================================
 
 # --- Core Libraries ---
@@ -93,6 +90,7 @@ logger = logging.getLogger("OKX_Mastermind_Trader")
 class BotState:
     def __init__(self):
         self.settings = {}
+        self.active_preset_name = "مخصص"
         self.last_signal_time = {}
         self.application = None
         self.exchange = None
@@ -124,6 +122,8 @@ DEFAULT_SETTINGS = {
     "fear_and_greed_threshold": 30,
     "adx_filter_enabled": True,
     "adx_filter_level": 25,
+    "btc_trend_filter_enabled": True,
+    "news_filter_enabled": True,
     "asset_blacklist": [
         "USDC", "DAI", "TUSD", "FDUSD", "USDD", "PYUSD", "USDT",
         "BNB", "OKB", "KCS", "BGB", "MX", "GT", "HT",
@@ -136,8 +136,12 @@ STRATEGY_NAMES_AR = {
     "momentum_breakout": "زخم اختراقي", "breakout_squeeze_pro": "اختراق انضغاطي",
     "support_rebound": "ارتداد الدعم", "sniper_pro": "القناص المحترف", "whale_radar": "رادار الحيتان"
 }
+PRESET_NAMES_AR = {
+    "professional": "احترافي", "strict": "متشدد", 
+    "lenient": "متساهل", "very_lenient": "فائق التساهل"
+}
 SETTINGS_PRESETS = {
-    "professional": DEFAULT_SETTINGS.copy(), # Renamed from balanced
+    "professional": DEFAULT_SETTINGS.copy(),
     "strict": {
         **DEFAULT_SETTINGS, "max_concurrent_trades": 3, "risk_reward_ratio": 2.5,
         "fear_and_greed_threshold": 40, "adx_filter_level": 28,
@@ -151,6 +155,7 @@ SETTINGS_PRESETS = {
     "very_lenient": {
         **DEFAULT_SETTINGS, "max_concurrent_trades": 12, "atr_sl_multiplier": 3.5,
         "risk_reward_ratio": 1.5, "fear_and_greed_threshold": 20, "adx_filter_enabled": False,
+        "market_mood_filter_enabled": False,
         "liquidity_filters": {"min_quote_volume_24h_usd": 250000, "min_rvol": 1.0},
     }
 }
@@ -165,6 +170,7 @@ def load_settings():
             with open(SETTINGS_FILE, 'r') as f: bot_data.settings = json.load(f)
         else: bot_data.settings = DEFAULT_SETTINGS.copy()
     except Exception: bot_data.settings = DEFAULT_SETTINGS.copy()
+    
     for key, value in DEFAULT_SETTINGS.items():
         if isinstance(value, dict):
              if key not in bot_data.settings or not isinstance(bot_data.settings[key], dict):
@@ -173,6 +179,14 @@ def load_settings():
                  bot_data.settings[key].setdefault(sub_key, sub_value)
         else:
             bot_data.settings.setdefault(key, value)
+    
+    for name, preset_settings in SETTINGS_PRESETS.items():
+        if bot_data.settings == preset_settings:
+            bot_data.active_preset_name = PRESET_NAMES_AR.get(name, "مخصص")
+            break
+    else:
+        bot_data.active_preset_name = "مخصص"
+
     save_settings(); logger.info("Settings loaded.")
 def save_settings():
     with open(SETTINGS_FILE, 'w') as f: json.dump(bot_data.settings, f, indent=4)
@@ -250,25 +264,29 @@ def analyze_sentiment_of_headlines(headlines):
     return mood, f"{score:.2f}"
 
 async def get_market_mood():
-    try:
-        htf_period = bot_data.settings['trend_filters']['htf_period']
-        ohlcv = await bot_data.exchange.fetch_ohlcv('BTC/USDT', '4h', limit=htf_period + 5)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['sma'] = ta.sma(df['close'], length=htf_period)
-        is_btc_bullish = df['close'].iloc[-1] > df['sma'].iloc[-1]
-        btc_mood_text = "إيجابي ✅" if is_btc_bullish else "سلبي ❌"
-        if not is_btc_bullish:
-            return {"mood": "NEGATIVE", "reason": "اتجاه BTC هابط", "btc_mood": btc_mood_text}
-    except Exception as e:
-        return {"mood": "DANGEROUS", "reason": f"فشل جلب بيانات BTC: {e}", "btc_mood": "UNKNOWN"}
+    s = bot_data.settings
+    if s.get('btc_trend_filter_enabled', True):
+        try:
+            htf_period = s['trend_filters']['htf_period']
+            ohlcv = await bot_data.exchange.fetch_ohlcv('BTC/USDT', '4h', limit=htf_period + 5)
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['sma'] = ta.sma(df['close'], length=htf_period)
+            is_btc_bullish = df['close'].iloc[-1] > df['sma'].iloc[-1]
+            btc_mood_text = "إيجابي ✅" if is_btc_bullish else "سلبي ❌"
+            if not is_btc_bullish:
+                return {"mood": "NEGATIVE", "reason": "اتجاه BTC هابط", "btc_mood": btc_mood_text}
+        except Exception as e:
+            return {"mood": "DANGEROUS", "reason": f"فشل جلب بيانات BTC: {e}", "btc_mood": "UNKNOWN"}
+    else:
+        btc_mood_text = "الفلتر معطل"
+
+    if s.get('market_mood_filter_enabled', True):
+        fng = await get_fear_and_greed_index()
+        if fng is not None and fng < s['fear_and_greed_threshold']:
+            return {"mood": "NEGATIVE", "reason": f"مشاعر خوف شديد (F&G: {fng})", "btc_mood": btc_mood_text}
     
-    fng = await get_fear_and_greed_index()
-    if fng is not None and fng < bot_data.settings['fear_and_greed_threshold']:
-        return {"mood": "NEGATIVE", "reason": f"مشاعر خوف شديد (F&G: {fng})", "btc_mood": btc_mood_text}
-        
     return {"mood": "POSITIVE", "reason": "وضع السوق مناسب", "btc_mood": btc_mood_text}
 
-# --- Individual Strategy Functions (Scanners) ---
 def analyze_momentum_breakout(df, rvol):
     df.ta.vwap(append=True); df.ta.bbands(length=20, append=True); df.ta.macd(append=True); df.ta.rsi(append=True)
     last, prev = df.iloc[-2], df.iloc[-3]
@@ -496,7 +514,7 @@ class TradeGuardian:
                             trade['trailing_sl_active'] = True
                             await conn.execute("UPDATE trades SET trailing_sl_active = 1, stop_loss = ? WHERE id = ?", (trade['entry_price'], trade['id']))
                             trade['stop_loss'] = trade['entry_price']
-                            await safe_send_message(self.application.bot, f"**🚀 تأمين الأرباح! | #{trade['id']} {symbol}**")
+                            await safe_send_message(self.application.bot, f"**🚀 تأمين الأرباح! | #{trade['id']} {symbol}**\nتم رفع وقف الخسارة إلى نقطة الدخول: `${trade['entry_price']}`")
                         if trade['trailing_sl_active']:
                             new_sl = new_highest_price * (1 - settings['trailing_sl_callback_percent'] / 100)
                             if new_sl > trade['stop_loss']:
@@ -615,12 +633,11 @@ async def worker(queue, signals_list, errors_list):
             rvol = df['volume'].iloc[-2] / df['volume_sma'].iloc[-2]
             if rvol < settings['liquidity_filters']['min_rvol']: continue
             
-            # NEW: ADX Filter
             if settings.get('adx_filter_enabled', False):
                 df.ta.adx(append=True)
                 adx_col = find_col(df.columns, "ADX_")
                 if adx_col and not pd.isna(df[adx_col].iloc[-2]) and df[adx_col].iloc[-2] < settings.get('adx_filter_level', 25):
-                    continue # Skip if trend is too weak
+                    continue
 
             confirmed_reasons = []
             for name in settings['active_scanners']:
@@ -680,13 +697,12 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         settings = bot_data.settings
         bot = context.bot
 
-        if settings['market_mood_filter_enabled']:
-            mood_result = await get_market_mood()
-            bot_data.market_mood = mood_result
-            if mood_result['mood'] in ["NEGATIVE", "DANGEROUS"]:
-                logger.warning(f"SCAN SKIPPED: {mood_result['reason']}")
-                await safe_send_message(bot, f"🔬 *ملخص الفحص الأخير*\n\n- **الحالة:** تم التخطي بسبب مزاج السوق السلبي.\n- **السبب:** {mood_result['reason']}")
-                return
+        mood_result = await get_market_mood()
+        bot_data.market_mood = mood_result
+        if mood_result['mood'] in ["NEGATIVE", "DANGEROUS"]:
+            logger.warning(f"SCAN SKIPPED: {mood_result['reason']}")
+            await safe_send_message(bot, f"🔬 *ملخص الفحص الأخير*\n\n- **الحالة:** تم التخطي بسبب مزاج السوق السلبي.\n- **السبب:** {mood_result['reason']}")
+            return
 
         async with aiosqlite.connect(DB_FILE) as conn:
             active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active' OR status = 'pending'")).fetchone())[0]
@@ -751,7 +767,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
 # =======================================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["الإعدادات ⚙️"]]
-    await update.message.reply_text("أهلاً بك في OKX Mastermind Trader v25.4", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    await update.message.reply_text("أهلاً بك في OKX Mastermind Trader v25.6", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -898,11 +914,9 @@ async def show_diagnostics_command(update: Update, context: ContextTypes.DEFAULT
         f"- العملات المفحوصة: {scan_checked}\n"
         f"- فشل في تحليل: {scan_errors} عملات\n\n"
         f"🔧 **الإعدادات النشطة**\n"
+        f"- **النمط الحالي: {bot_data.active_preset_name}**\n"
         f"- الماسحات المفعلة:\n{scanners_list}\n"
-        f"- فلاتر السيولة:\n"
-        f"  - حجم التداول الأدنى: ${s['liquidity_filters']['min_quote_volume_24h_usd']:,}\n"
-        f"  - الحد الأدنى لـ RVOL: {s['liquidity_filters']['min_rvol']}\n"
-        f"- حد مؤشر الخوف: {s['fear_and_greed_threshold']}\n\n"
+        f"----------------------------------\n"
         f"🔩 **حالة العمليات الداخلية**\n"
         f"- فحص العملات: يعمل, التالي بعد: {next_scan_time}\n"
         f"- الاتصال بـ OKX: متصل ✅\n"
@@ -915,14 +929,13 @@ async def show_diagnostics_command(update: Update, context: ContextTypes.DEFAULT
 
     await safe_edit_message(query, report, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 تحديث", callback_data="db_diagnostics")], [InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")]]))
 
-
 # --- Settings UI ---
 async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("🎛️ تعديل المعايير", callback_data="settings_params")],
+        [InlineKeyboardButton("🎛️ تعديل المعايير المتقدمة", callback_data="settings_params")],
         [InlineKeyboardButton("🔭 تفعيل/تعطيل الماسحات", callback_data="settings_scanners")],
         [InlineKeyboardButton("🗂️ أنماط جاهزة", callback_data="settings_presets")],
-        [InlineKeyboardButton("🗑️ إدارة البيانات", callback_data="settings_data")]
+        [InlineKeyboardButton("🚫 القائمة السوداء", callback_data="settings_blacklist"), InlineKeyboardButton("🗑️ إدارة البيانات", callback_data="settings_data")]
     ]
     message_text = "⚙️ *الإعدادات الرئيسية*\n\nاختر فئة الإعدادات التي تريد تعديلها."
     target_message = update.message or update.callback_query.message
@@ -930,6 +943,37 @@ async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await safe_edit_message(update.callback_query, message_text, reply_markup=InlineKeyboardMarkup(keyboard))
     else:
         await target_message.reply_text(message_text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    s = bot_data.settings
+    
+    def bool_format(key, text):
+        val = s.get(key, False)
+        emoji = "✅" if val else "❌"
+        return f"{text}: {emoji} مفعل"
+
+    keyboard = [
+        [InlineKeyboardButton("--- إعدادات عامة ---", callback_data="noop")],
+        [InlineKeyboardButton(f"عدد العملات للفحص: {s['top_n_symbols_by_volume']}", callback_data="param_set_top_n_symbols_by_volume"),
+         InlineKeyboardButton(f"أقصى عدد للصفقات: {s['max_concurrent_trades']}", callback_data="param_set_max_concurrent_trades")],
+        [InlineKeyboardButton(f"عمال الفحص المتزامنين: {s['worker_threads']}", callback_data="param_set_worker_threads")],
+        [InlineKeyboardButton("--- إعدادات المخاطر ---", callback_data="noop")],
+        [InlineKeyboardButton(f"حجم الصفقة ($): {s['real_trade_size_usdt']}", callback_data="param_set_real_trade_size_usdt"),
+         InlineKeyboardButton(f"مضاعف وقف الخسارة (ATR): {s['atr_sl_multiplier']}", callback_data="param_set_atr_sl_multiplier")],
+        [InlineKeyboardButton(f"نسبة المخاطرة/العائد: {s['risk_reward_ratio']}", callback_data="param_set_risk_reward_ratio")],
+        [InlineKeyboardButton(bool_format('trailing_sl_enabled', 'تفعيل الوقف المتحرك'), callback_data="param_toggle_trailing_sl_enabled")],
+        [InlineKeyboardButton(f"تفعيل الوقف المتحرك (%): {s['trailing_sl_activation_percent']}", callback_data="param_set_trailing_sl_activation_percent"),
+         InlineKeyboardButton(f"مسافة الوقف المتحرك (%): {s['trailing_sl_callback_percent']}", callback_data="param_set_trailing_sl_callback_percent")],
+        [InlineKeyboardButton("--- الفلاتر والاتجاه ---", callback_data="noop")],
+        [InlineKeyboardButton(bool_format('btc_trend_filter_enabled', 'فلتر الاتجاه العام (BTC)'), callback_data="param_toggle_btc_trend_filter_enabled")],
+        [InlineKeyboardButton(bool_format('market_mood_filter_enabled', 'فلتر الخوف والطمع'), callback_data="param_toggle_market_mood_filter_enabled"),
+         InlineKeyboardButton(f"حد مؤشر الخوف: {s['fear_and_greed_threshold']}", callback_data="param_set_fear_and_greed_threshold")],
+        [InlineKeyboardButton(bool_format('adx_filter_enabled', 'فلتر ADX'), callback_data="param_toggle_adx_filter_enabled"),
+         InlineKeyboardButton(f"مستوى فلتر ADX: {s['adx_filter_level']}", callback_data="param_set_adx_filter_level")],
+        [InlineKeyboardButton(bool_format('news_filter_enabled', 'فلتر الأخبار والبيانات'), callback_data="param_toggle_news_filter_enabled")],
+        [InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="settings_main")]
+    ]
+    await safe_edit_message(update.callback_query, "🎛️ *المعايير المتقدمة*\n\nاضغط على أي معيار لتغيير قيمته:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def show_scanners_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = []
@@ -950,19 +994,15 @@ async def show_presets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await safe_edit_message(update.callback_query, "اختر نمط إعدادات جاهز:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    s = bot_data.settings
+async def show_blacklist_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    blacklist = bot_data.settings.get('asset_blacklist', [])
+    blacklist_str = ", ".join(f"`{item}`" for item in blacklist) if blacklist else "لا توجد عملات في القائمة."
+    text = f"🚫 *القائمة السوداء*\n\nالعملات التالية لن يتم فحصها أو التداول عليها:\n\n{blacklist_str}"
     keyboard = [
-        [InlineKeyboardButton(f"حجم الصفقة: ${s['real_trade_size_usdt']}", callback_data="param_set_real_trade_size_usdt")],
-        [InlineKeyboardButton(f"أقصى عدد للصفقات: {s['max_concurrent_trades']}", callback_data="param_set_max_concurrent_trades")],
-        [InlineKeyboardButton(f"عدد العملات للفحص: {s['top_n_symbols_by_volume']}", callback_data="param_set_top_n_symbols_by_volume")],
-        [InlineKeyboardButton(f"مضاعف وقف ATR: {s['atr_sl_multiplier']}", callback_data="param_set_atr_sl_multiplier")],
-        [InlineKeyboardButton(f"نسبة المخاطرة/العائد: {s['risk_reward_ratio']}", callback_data="param_set_risk_reward_ratio")],
-        [InlineKeyboardButton(f"حد مؤشر الخوف: {s['fear_and_greed_threshold']}", callback_data="param_set_fear_and_greed_threshold")],
-        [InlineKeyboardButton(f"فلتر ADX: {s.get('adx_filter_level', 25)}", callback_data="param_set_adx_filter_level")],
+        [InlineKeyboardButton("➕ إضافة عملة", callback_data="blacklist_add"), InlineKeyboardButton("➖ إزالة عملة", callback_data="blacklist_remove")],
         [InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="settings_main")]
     ]
-    await safe_edit_message(update.callback_query, "🎛️ *تعديل المعايير*\n\nاضغط على أي معيار لتغيير قيمته:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await safe_edit_message(update.callback_query, text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def show_data_management_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("‼️ مسح كل الصفقات ‼️", callback_data="data_clear_confirm")], [InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="settings_main")]]
@@ -995,6 +1035,7 @@ async def handle_scanner_toggle(update: Update, context: ContextTypes.DEFAULT_TY
         if len(active_scanners) > 1: active_scanners.remove(scanner_key)
         else: await query.answer("يجب تفعيل ماسح واحد على الأقل.", show_alert=True); return
     else: active_scanners.append(scanner_key)
+    bot_data.active_preset_name = "مخصص"
     save_settings()
     await query.answer(f"{STRATEGY_NAMES_AR[scanner_key]} {'تم تفعيله' if scanner_key in active_scanners else 'تم تعطيله'}")
     await show_scanners_menu(update, context)
@@ -1004,8 +1045,9 @@ async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
     preset_key = query.data.split('_')[-1]
     if preset_settings := SETTINGS_PRESETS.get(preset_key):
         bot_data.settings = preset_settings.copy()
+        bot_data.active_preset_name = PRESET_NAMES_AR.get(preset_key, "مخصص")
         save_settings()
-        await query.answer(f"تم تطبيق نمط '{preset_key}' بنجاح!")
+        await query.answer(f"تم تطبيق نمط '{PRESET_NAMES_AR.get(preset_key)}' بنجاح!")
         await show_settings_menu(update, context)
     else: await query.answer("لم يتم العثور على النمط.")
 
@@ -1014,56 +1056,95 @@ async def handle_parameter_selection(update: Update, context: ContextTypes.DEFAU
     param_key = query.data.replace("param_set_", "")
     context.user_data['setting_to_change'] = param_key
     await query.message.reply_text(f"أرسل القيمة الرقمية الجديدة لـ `{param_key}`:", parse_mode=ParseMode.MARKDOWN)
-    await query.answer()
+
+async def handle_toggle_parameter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    param_key = query.data.replace("param_toggle_", "")
+    bot_data.settings[param_key] = not bot_data.settings.get(param_key, False)
+    bot_data.active_preset_name = "مخصص"
+    save_settings()
+    await show_parameters_menu(update, context)
+
+async def handle_blacklist_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    action = query.data.replace("blacklist_", "")
+    context.user_data['blacklist_action'] = action
+    await query.message.reply_text(f"أرسل رمز العملة التي تريد **{ 'إضافتها' if action == 'add' else 'إزالتها'}** (مثال: `BTC` أو `DOGE`)")
 
 async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_input = update.message.text.strip().upper()
+    
+    if 'blacklist_action' in context.user_data:
+        action = context.user_data.pop('blacklist_action')
+        blacklist = bot_data.settings.get('asset_blacklist', [])
+        symbol = user_input.replace("/USDT", "")
+        
+        if action == 'add':
+            if symbol not in blacklist:
+                blacklist.append(symbol)
+                await update.message.reply_text(f"✅ تم إضافة `{symbol}` إلى القائمة السوداء.")
+            else:
+                await update.message.reply_text(f"⚠️ العملة `{symbol}` موجودة بالفعل.")
+        elif action == 'remove':
+            if symbol in blacklist:
+                blacklist.remove(symbol)
+                await update.message.reply_text(f"✅ تم إزالة `{symbol}` من القائمة السوداء.")
+            else:
+                await update.message.reply_text(f"⚠️ العملة `{symbol}` غير موجودة في القائمة.")
+
+        bot_data.settings['asset_blacklist'] = blacklist
+        bot_data.active_preset_name = "مخصص"
+        save_settings()
+        # Fake a callback query to refresh the menu
+        fake_query = type('Query', (), {'message': update.message, 'data': 'settings_blacklist', 'edit_message_text': update.message.reply_text})
+        await show_blacklist_menu(Update(update.update_id, callback_query=fake_query), context)
+        return
+
     if not (setting_key := context.user_data.get('setting_to_change')): return
-    new_value_str = update.message.text
+    
     try:
-        # This simple structure assumes top-level keys. A more complex handler
-        # would be needed for nested keys like 'liquidity_filters'.
         original_value = bot_data.settings[setting_key]
-        if isinstance(original_value, bool): new_value = new_value_str.lower() in ['true', '1', 'on']
-        elif isinstance(original_value, int): new_value = int(new_value_str)
-        elif isinstance(original_value, float): new_value = float(new_value_str)
-        else: new_value = new_value_str
+        if isinstance(original_value, int): new_value = int(user_input)
+        else: new_value = float(user_input)
         
         bot_data.settings[setting_key] = new_value
+        bot_data.active_preset_name = "مخصص"
         save_settings()
         await update.message.reply_text(f"✅ تم تحديث `{setting_key}` إلى `{new_value}`.")
     except (ValueError, KeyError):
         await update.message.reply_text("❌ قيمة غير صالحة. الرجاء إرسال رقم.")
     finally:
         del context.user_data['setting_to_change']
-        # We need a way to show the settings menu again.
-        # For simplicity, we'll just tell the user to go back.
-        await update.message.reply_text("يمكنك الآن الضغط على /start والعودة إلى قائمة الإعدادات لرؤية التغييرات.")
-
-async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query; await query.answer(); data = query.data
-    
-    route_map = {
-        "db_trades": show_trades_command, "db_mood": show_mood_command,
-        "db_strategies": show_strategy_report_command, "db_stats": show_stats_command,
-        "db_diagnostics": show_diagnostics_command, "back_to_dashboard": show_dashboard_command,
-        "settings_main": show_settings_menu, "settings_scanners": show_scanners_menu,
-        "settings_params": show_parameters_menu, "settings_presets": show_presets_menu,
-        "settings_data": show_data_management_menu, "data_clear_confirm": handle_clear_data_confirmation,
-        "data_clear_execute": handle_clear_data_execute
-    }
-    if data in route_map: await route_map[data](update, context)
-    elif data.startswith("check_"): await check_trade_details(update, context)
-    elif data.startswith("scanner_toggle_"): await handle_scanner_toggle(update, context)
-    elif data.startswith("preset_set_"): await handle_preset_set(update, context)
-    elif data.startswith("param_set_"): await handle_parameter_selection(update, context)
+        fake_query = type('Query', (), {'message': update.message, 'data': 'settings_params', 'edit_message_text': update.message.reply_text})
+        await show_parameters_menu(Update(update.update_id, callback_query=fake_query), context)
 
 async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if 'setting_to_change' in context.user_data:
+    if 'setting_to_change' in context.user_data or 'blacklist_action' in context.user_data:
         await handle_setting_value(update, context)
         return
     text = update.message.text
     if text == "Dashboard 🖥️": await show_dashboard_command(update, context)
     elif text == "الإعدادات ⚙️": await show_settings_menu(update, context)
+
+async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query; await query.answer(); data = query.data
+    
+    route_map = {
+        "db_stats": show_stats_command, "db_trades": show_trades_command, "db_strategies": show_strategy_report_command,
+        "db_mood": show_mood_command, "db_diagnostics": show_diagnostics_command, "back_to_dashboard": show_dashboard_command,
+        "settings_main": show_settings_menu, "settings_params": show_parameters_menu, "settings_scanners": show_scanners_menu,
+        "settings_presets": show_presets_menu, "settings_blacklist": show_blacklist_menu, "settings_data": show_data_management_menu,
+        "blacklist_add": handle_blacklist_action, "blacklist_remove": handle_blacklist_action,
+        "data_clear_confirm": handle_clear_data_confirmation, "data_clear_execute": handle_clear_data_execute,
+        "noop": (lambda u,c: None)
+    }
+    
+    if data in route_map: await route_map[data](update, context)
+    elif data.startswith("check_"): await check_trade_details(update, context)
+    elif data.startswith("scanner_toggle_"): await handle_scanner_toggle(update, context)
+    elif data.startswith("preset_set_"): await handle_preset_set(update, context)
+    elif data.startswith("param_set_"): await handle_parameter_selection(update, context)
+    elif data.startswith("param_toggle_"): await handle_toggle_parameter(update, context)
 
 async def post_init(application: Application):
     bot_data.application = application
@@ -1096,9 +1177,9 @@ async def post_init(application: Application):
     
     logger.info(f"Scanner scheduled for every {SCAN_INTERVAL_SECONDS}s. Supervisor will audit every {SUPERVISOR_INTERVAL_SECONDS}s.")
     try:
-        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🚀 OKX Mastermind Trader v25.4 بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🚀 OKX Mastermind Trader v25.6 بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden:
-        logger.critical(f"FATAL: Bot is not authorized for chat ID {TELEGRAM_CHAT_ID}. Please add the bot to the chat and grant admin permissions.")
+        logger.critical(f"FATAL: Bot is not authorized for chat ID {TELEGRAM_CHAT_ID}.")
         return
     logger.info("--- Bot is now fully operational ---")
 
@@ -1107,7 +1188,7 @@ async def post_shutdown(application: Application):
     logger.info("Bot has shut down.")
 
 def main():
-    logger.info("--- Starting OKX Mastermind Trader v25.4 ---")
+    logger.info("--- Starting OKX Mastermind Trader v25.6 ---")
     load_settings(); asyncio.run(init_database())
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
