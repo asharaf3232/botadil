@@ -239,11 +239,13 @@ def load_settings():
 
 def determine_active_preset():
     found_preset = False
+    current_settings_for_compare = {k: v for k, v in bot_data.settings.items()}
     
-    # --- FIX 3: Use deep comparison to correctly identify presets ---
+    # Use a deep copy to avoid modifying the original settings
     current_settings_for_compare = copy.deepcopy(bot_data.settings)
     
     for name, preset_settings in SETTINGS_PRESETS.items():
+        # Check for deep equality
         if current_settings_for_compare == preset_settings:
             bot_data.active_preset_name = PRESET_NAMES_AR.get(name, "مخصص")
             found_preset = True
@@ -1013,11 +1015,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["الإعدادات ⚙️"]]
     await update.message.reply_text("أهلاً بك في OKX Mastermind Trader v28.5", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
-# --- FIX 2: Correctly handle text commands and button callbacks for manual scan ---
 async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not bot_data.trading_enabled:
-        message_target = update.message or update.callback_query.message
-        await message_target.reply_text("🔬 الفحص اليدوي محظور. مفتاح الإيقاف مفعل.")
+        await (update.message or update.callback_query.message).reply_text("🔬 الفحص اليدوي محظور. مفتاح الإيقاف مفعل.")
         return
     message_target = update.message or update.callback_query.message
     await message_target.reply_text("🔬 تم إعطاء أمر الفحص اليدوي... قد يستغرق هذا بعض الوقت.")
@@ -1556,14 +1556,14 @@ async def handle_toggle_parameter(update: Update, context: ContextTypes.DEFAULT_
     determine_active_preset()
     await show_parameters_menu(update, context)
 
-# --- FIX 1: Refactored handle_setting_value to correctly handle nested and simple keys ---
-def _set_nested_value(d, keys, value):
-    for key in keys[:-1]:
-        d = d.setdefault(key, {})
-    d[keys[-1]] = value
+async def handle_blacklist_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    action = query.data.replace("blacklist_", "")
+    context.user_data['blacklist_action'] = action
+    await query.message.reply_text(f"أرسل رمز العملة التي تريد **{ 'إضافتها' if action == 'add' else 'إزالتها'}** (مثال: `BTC` أو `DOGE`)")
 
 async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_input = update.message.text.strip()
+    user_input = update.message.text.strip() # Don't automatically convert to upper case here
     
     if 'blacklist_action' in context.user_data:
         action = context.user_data.pop('blacklist_action')
@@ -1586,35 +1586,33 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
         bot_data.settings['asset_blacklist'] = blacklist
         save_settings()
         determine_active_preset()
-        # Create a mock callback query to return to the correct menu
-        mock_query = type('Query', (object,), {'message': update.message, 'data': 'settings_blacklist', 'edit_message_text': (lambda *args, **kwargs: None), 'answer': (lambda *args, **kwargs: None)})()
-        await show_blacklist_menu(Update(update.update_id, callback_query=mock_query), context)
+        await show_blacklist_menu(Update(update.update_id, callback_query=type('Query', (), {'message': update.message, 'data': 'settings_blacklist', 'edit_message_text': (lambda *args, **kwargs: None), 'answer': (lambda *args, **kwargs: None)})()), context)
+
         return
 
-    if not (setting_key := context.user_data.get('setting_to_change')):
-        return
+    if not (setting_key := context.user_data.get('setting_to_change')): return
 
     try:
-        keys = setting_key.split('_')
-        value_to_update = bot_data.settings
-        
-        # Traverse down the nested dicts to find the correct value type
-        for key in keys:
-            if isinstance(value_to_update, dict) and key in value_to_update:
-                value_to_update = value_to_update[key]
-            else:
-                # This handles simple keys correctly
-                value_to_update = bot_data.settings[setting_key]
-                keys = [setting_key]
-                break
+        if '_' in setting_key:
+            keys = setting_key.split('_')
+            current_dict = bot_data.settings
+            
+            for key in keys[:-1]:
+                current_dict = current_dict.get(key, {})
+                
+            last_key = keys[-1]
+            original_value = current_dict[last_key]
+            
+            if isinstance(original_value, int): new_value = int(user_input)
+            else: new_value = float(user_input)
+            
+            current_dict[last_key] = new_value
 
-        # Determine the type and convert the input
-        if isinstance(value_to_update, int):
-            new_value = int(user_input)
         else:
-            new_value = float(user_input)
-
-        _set_nested_value(bot_data.settings, keys, new_value)
+            original_value = bot_data.settings[setting_key]
+            if isinstance(original_value, int): new_value = int(user_input)
+            else: new_value = float(user_input)
+            bot_data.settings[setting_key] = new_value
         
         save_settings()
         determine_active_preset()
@@ -1623,9 +1621,7 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("❌ قيمة غير صالحة. الرجاء إرسال رقم.")
     finally:
         del context.user_data['setting_to_change']
-        # Create a mock callback query to return to the correct menu
-        mock_query = type('Query', (object,), {'message': update.message, 'data': 'settings_params', 'edit_message_text': (lambda *args, **kwargs: None), 'answer': (lambda *args, **kwargs: None)})()
-        await show_parameters_menu(Update(update.update_id, callback_query=mock_query), context)
+        await show_parameters_menu(Update(update.update_id, callback_query=type('Query', (), {'message': update.message, 'data': 'settings_params', 'edit_message_text': (lambda *args, **kwargs: None), 'answer': (lambda *args, **kwargs: None)})()), context)
 
 
 async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1647,7 +1643,6 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         "db_stats": show_stats_command, "db_trades": show_trades_command, "db_history": show_trade_history_command,
         "db_mood": show_mood_command, "db_diagnostics": show_diagnostics_command, "back_to_dashboard": show_dashboard_command,
         "db_portfolio": show_portfolio_command,
-        # FIX 2: Lambda function now correctly passes the update object
         "db_manual_scan": lambda u,c: manual_scan_command(u, c),
         "kill_switch_toggle": toggle_kill_switch,
         "settings_main": show_settings_menu, "settings_params": show_parameters_menu, "settings_scanners": show_scanners_menu,
