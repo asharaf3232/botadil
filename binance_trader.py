@@ -671,7 +671,7 @@ class TradeGuardian:
         bot = self.application.bot
         log_ctx = {'trade_id': trade_id}
         logger.info(f"Guardian: Starting close process for {symbol}. Reason: {reason}", extra=log_ctx)
-        try: جا
+        try:
             # --- FLEXIBLE SELL LOGIC ---
             asset_to_sell = symbol.split('/')[0]
             balance = await bot_data.exchange.fetch_balance()
