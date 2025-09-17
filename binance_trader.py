@@ -689,7 +689,7 @@ class TradeGuardian:
             logger.info(f"Found {available_quantity} {asset_to_sell} available. Selling this amount.", extra=log_ctx)
             formatted_quantity = bot_data.exchange.amount_to_precision(symbol, available_quantity)
 
-            params = {'tdMode': 'cash', 'clOrdId': f"close_{trade_id}_{int(time.time() * 1000)}"}
+            params = {'tdMode': 'cash', 'clOrdId': f"close{trade_id}{int(time.time() * 1000)}"}
             order = await bot_data.exchange.create_market_sell_order(symbol, formatted_quantity, params)
             logger.info(f"Successfully created sell order. Order ID: {order.get('id')}", extra=log_ctx)
 
