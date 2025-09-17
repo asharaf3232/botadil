@@ -1,34 +1,24 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Mastermind Trader v26.0 (Major Upgrade) 🚀 ---
+# --- 🚀 OKX Mastermind Trader v26.5 (Pro Features Update) 🚀 ---
 # =======================================================================================
-# This version represents a major overhaul based on user feedback and the initial
-# diagnostic report, achieving 100% compliance with all recommendations and adding
-# significant new features for professional-grade analysis and control.
+# This version incorporates professional-grade features based on direct user feedback,
+# enhancing data visibility, control, and user experience.
 #
-# --- Version 26.0 Changelog ---
-#   - ✅ 100% REPORT COMPLIANCE: Implemented amount precision formatting for all orders
-#     (`amount_to_precision`), eliminating the final gap identified in the diagnostic report.
+# --- Version 26.5 Changelog ---
+#   - ✨ NEW FEATURE: DETAILED PORTFOLIO: The portfolio overview now displays a full
+#     breakdown of all owned assets, their quantities, and their current USDT value,
+#     not just the cash balance.
 #
-#   -  enriquecida 📊 DETAILED PURCHASE CONFIRMATION: The trade activation message is now a
-#     comprehensive report, including TP/SL percentages and a market context analysis
-#     (e.g., how the TP relates to the 24h high).
+#   - ✨ NEW FEATURE: ARABIC NEWS TRANSLATION: Market mood news headlines are now
+#     automatically translated from English to Arabic for better readability.
 #
-#   - enriquecida 📈 LIVE PRICES IN ACTIVE TRADES: The active trades list now displays the
-#     current market price for each asset, providing an instant view of the action.
+#   - ✨ NEW FEATURE: MANUAL SCAN TRIGGER: Added a `/scan` command and a "Instant Scan"
+#     dashboard button to initiate a market scan immediately, on-demand.
 #
-#   - ✨ NEW FEATURE: PORTFOLIO OVERVIEW: A new dashboard panel shows a summary of your
-#     total equity, available cash, value locked in trades, and overall PnL.
-#
-#   - ✨ NEW FEATURE: DETAILED TRADE HISTORY: View a log of your last closed trades
-#     with their corresponding PnL.
-#
-#   - 🧠 ENHANCED MARKET MOOD: The Market Mood report is now a dynamic analysis hub,
-#     featuring key indicators, top market movers (gainers/losers), the latest crypto
-#     news, and a conclusive, actionable summary.
-#
-#   - 🛠️ DATABASE UPGRADE: The database now stores the close price and PnL for each trade,
-#     enabling highly accurate performance statistics and portfolio tracking.
+#   - 🛠️ IMPROVEMENT: The logic for fetching account balance is now more robust,
+#     ensuring all asset details are correctly retrieved and displayed.
+#   - 🛠️ DATABASE & UI: Minor tweaks for better performance and clarity.
 # =======================================================================================
 
 
@@ -85,6 +75,7 @@ OKX_API_SECRET = os.getenv('OKX_API_SECRET')
 OKX_API_PASSPHRASE = os.getenv('OKX_API_PASSPHRASE')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY') # For translation
 
 TIMEFRAME = '15m'
 SCAN_INTERVAL_SECONDS = 900
@@ -265,6 +256,26 @@ async def log_pending_trade_to_db(signal, buy_order):
 # =======================================================================================
 # --- 🧠 Mastermind Brain (Analysis & Mood) 🧠 ---
 # =======================================================================================
+async def translate_text_gemini(text_list):
+    if not GEMINI_API_KEY or not text_list:
+        return text_list
+    
+    prompt = "Translate the following English headlines to Arabic. Return only the translated text, with each headline on a new line:\n\n" + "\n".join(text_list)
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(url, json=payload, headers={"Content-Type": "application/json"})
+            response.raise_for_status()
+            result = response.json()
+            translated_text = result['candidates'][0]['content']['parts'][0]['text']
+            return translated_text.strip().split('\n')
+    except Exception as e:
+        logger.error(f"Gemini translation failed: {e}")
+        return text_list # Return original on failure
+
 def find_col(df_columns, prefix):
     try: return next(col for col in df_columns if col.startswith(prefix))
     except StopIteration: return None
@@ -289,6 +300,7 @@ def get_latest_crypto_news(limit=5):
 def analyze_sentiment_of_headlines(headlines):
     if not headlines or not NLTK_AVAILABLE: return "N/A", "N/A"
     sia = SentimentIntensityAnalyzer()
+    # NLTK's VADER is primarily for English, so we analyze the original headlines
     score = sum(sia.polarity_scores(h)['compound'] for h in headlines) / len(headlines)
     if score > 0.1: mood = "إيجابية"
     elif score < -0.1: mood = "سلبية"
@@ -837,13 +849,18 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
 # =======================================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["الإعدادات ⚙️"]]
-    await update.message.reply_text("أهلاً بك في OKX Mastermind Trader v26.0", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    await update.message.reply_text("أهلاً بك في OKX Mastermind Trader v26.5", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+
+async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔬 تم بدء الفحص اليدوي... قد يستغرق هذا بعض الوقت.")
+    await perform_scan(context)
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("💼 نظرة عامة على المحفظة", callback_data="db_portfolio"), InlineKeyboardButton("📈 الصفقات النشطة", callback_data="db_trades")],
         [InlineKeyboardButton("📜 سجل الصفقات المغلقة", callback_data="db_history"), InlineKeyboardButton("📊 الإحصائيات والأداء", callback_data="db_stats")],
-        [InlineKeyboardButton("🌡️ تحليل مزاج السوق", callback_data="db_mood"), InlineKeyboardButton("🕵️‍♂️ تقرير التشخيص", callback_data="db_diagnostics")]
+        [InlineKeyboardButton("🌡️ تحليل مزاج السوق", callback_data="db_mood"), InlineKeyboardButton("🔬 فحص فوري", callback_data="db_manual_scan")],
+        [InlineKeyboardButton("🕵️‍♂️ تقرير التشخيص", callback_data="db_diagnostics")]
     ]
     message_text = "🖥️ *لوحة التحكم الرئيسية*\n\nاختر التقرير أو البيانات التي تريد عرضها:"
     target_message = update.message or update.callback_query.message
@@ -917,19 +934,20 @@ async def show_mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer("جاري تحليل مزاج السوق...")
     
-    # --- Fetch all data points in parallel ---
     fng_task = asyncio.create_task(get_fear_and_greed_index())
-    news_task = asyncio.create_task(asyncio.to_thread(get_latest_crypto_news))
+    headlines_task = asyncio.create_task(asyncio.to_thread(get_latest_crypto_news))
     mood_task = asyncio.create_task(get_market_mood())
     markets_task = asyncio.create_task(get_okx_markets())
     
     fng_index = await fng_task
-    headlines = await news_task
+    original_headlines = await headlines_task
     mood = await mood_task
     all_markets = await markets_task
     
-    # --- Analyze and format data ---
-    news_sentiment, _ = analyze_sentiment_of_headlines(headlines)
+    translated_headlines_task = asyncio.create_task(translate_text_gemini(original_headlines))
+    
+    news_sentiment, _ = analyze_sentiment_of_headlines(original_headlines)
+    translated_headlines = await translated_headlines_task
     
     top_gainers, top_losers = [], []
     if all_markets:
@@ -937,7 +955,6 @@ async def show_mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         top_gainers = sorted_by_change[:3]
         top_losers = sorted_by_change[-3:]
 
-    # --- Build Verdict ---
     verdict = "الحالة العامة للسوق تتطلب الحذر."
     if mood['mood'] == 'POSITIVE':
         verdict = "المؤشرات الفنية إيجابية، مما قد يدعم فرص الشراء."
@@ -946,10 +963,9 @@ async def show_mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif fng_index and fng_index < 30:
         verdict = "يسود الخوف على السوق، قد تكون هناك فرص للمدى الطويل ولكن المخاطرة عالية حالياً."
     
-    # --- Format Message ---
     gainers_str = "\n".join([f"  `{g['symbol']}` `({g.get('percentage', 0):+.2f}%)`" for g in top_gainers]) or "  لا توجد بيانات."
     losers_str = "\n".join([f"  `{l['symbol']}` `({l.get('percentage', 0):+.2f}%)`" for l in reversed(top_losers)]) or "  لا توجد بيانات."
-    news_str = "\n".join([f"  - _{h}_" for h in headlines]) or "  لا توجد أخبار."
+    news_str = "\n".join([f"  - _{h}_" for h in translated_headlines]) or "  لا توجد أخبار."
 
     message = (
         f"**🌡️ تحليل مزاج السوق الشامل**\n"
@@ -964,7 +980,7 @@ async def show_mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"**🚀 أبرز الرابحين:**\n{gainers_str}\n\n"
         f"**📉 أبرز الخاسرين:**\n{losers_str}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"**📰 آخر الأخبار:**\n{news_str}\n"
+        f"**📰 آخر الأخبار (مترجمة آلياً):**\n{news_str}\n"
     )
     
     keyboard = [[InlineKeyboardButton("🔄 تحديث", callback_data="db_mood")], [InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")]]
@@ -1033,39 +1049,71 @@ async def show_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await safe_edit_message(update.callback_query, message, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")]]))
 
 async def show_portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("جاري جلب بيانات المحفظة...")
     try:
-        balance = await bot_data.exchange.fetch_balance()
-        usdt_balance = balance.get('USDT', {})
-        total_usdt = usdt_balance.get('total', 0)
-        free_usdt = usdt_balance.get('free', 0)
-    except Exception as e:
-        await safe_edit_message(update.callback_query, f"حدث خطأ أثناء جلب رصيد المحفظة: {e}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة", callback_data="back_to_dashboard")]]))
-        return
-
-    async with aiosqlite.connect(DB_FILE) as conn:
-        conn.row_factory = aiosqlite.Row
-        cursor = await conn.execute("SELECT entry_price, quantity FROM trades WHERE status = 'active'")
-        active_trades = await cursor.fetchall()
+        balance = await bot_data.exchange.fetch_balance({'type': 'trading'})
         
-        cursor_pnl = await conn.execute("SELECT SUM(pnl_usdt) FROM trades WHERE status LIKE 'ناجحة%' OR status LIKE 'فاشلة%'")
-        total_realized_pnl = (await cursor_pnl.fetchone())[0] or 0.0
+        owned_assets = {
+            asset: data['total']
+            for asset, data in balance.items()
+            if isinstance(data, dict) and data.get('total', 0) > 0
+        }
 
-    value_in_trades = sum(trade['entry_price'] * trade['quantity'] for trade in active_trades)
-    
-    message = (
-        f"**💼 نظرة عامة على المحفظة**\n"
-        f"🗓️ {datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"**💰 إجمالي الرصيد (USDT):** `${total_usdt:,.2f}`\n"
-        f"  - **السيولة المتاحة:** `${free_usdt:,.2f}`\n"
-        f"  - **المستخدم في صفقات:** `${value_in_trades:,.2f}`\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"**📈 أداء التداول:**\n"
-        f"  - **الربح/الخسارة المحقق:** `${total_realized_pnl:,.2f}`\n"
-        f"  - **عدد الصفقات النشطة:** {len(active_trades)}\n"
-    )
-    keyboard = [[InlineKeyboardButton("🔄 تحديث", callback_data="db_portfolio")], [InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")]]
-    await safe_edit_message(update.callback_query, message, reply_markup=InlineKeyboardMarkup(keyboard))
+        usdt_balance = balance.get('USDT', {})
+        total_usdt_equity = usdt_balance.get('total', 0)
+        free_usdt = usdt_balance.get('free', 0)
+
+        assets_to_fetch = [f"{asset}/USDT" for asset in owned_assets if asset != 'USDT']
+        tickers = {}
+        if assets_to_fetch:
+            tickers = await bot_data.exchange.fetch_tickers(assets_to_fetch)
+
+        asset_details = []
+        total_assets_value_usdt = 0
+        for asset, total in owned_assets.items():
+            if asset == 'USDT': continue
+            symbol = f"{asset}/USDT"
+            value_usdt = 0
+            if symbol in tickers:
+                value_usdt = tickers[symbol].get('last', 0) * total
+            total_assets_value_usdt += value_usdt
+            asset_details.append(f"  - `{asset}`: `{total:,.6f}` `(≈ ${value_usdt:,.2f})`")
+        
+        # This is the total value of the account (cash + value of other cryptos)
+        total_equity = total_usdt_equity + total_assets_value_usdt
+
+        async with aiosqlite.connect(DB_FILE) as conn:
+            cursor_pnl = await conn.execute("SELECT SUM(pnl_usdt) FROM trades WHERE status LIKE 'ناجحة%' OR status LIKE 'فاشلة%'")
+            total_realized_pnl = (await cursor_pnl.fetchone())[0] or 0.0
+            
+            cursor_trades = await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")
+            active_trades_count = (await cursor_trades.fetchone())[0]
+
+        assets_str = "\n".join(asset_details) if asset_details else "  لا توجد أصول أخرى."
+
+        message = (
+            f"**💼 نظرة عامة على المحفظة**\n"
+            f"🗓️ {datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"**💰 إجمالي قيمة المحفظة:** `≈ ${total_equity:,.2f}`\n"
+            f"  - **السيولة المتاحة (USDT):** `${free_usdt:,.2f}`\n"
+            f"  - **قيمة الأصول الأخرى:** `≈ ${total_assets_value_usdt:,.2f}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"**📊 تفاصيل الأصول المملوكة:**\n"
+            f"{assets_str}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"**📈 أداء التداول:**\n"
+            f"  - **الربح/الخسارة المحقق:** `${total_realized_pnl:,.2f}`\n"
+            f"  - **عدد الصفقات النشطة:** {active_trades_count}\n"
+        )
+        keyboard = [[InlineKeyboardButton("🔄 تحديث", callback_data="db_portfolio")], [InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")]]
+        await safe_edit_message(query, message, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    except Exception as e:
+        logger.error(f"Portfolio fetch error: {e}", exc_info=True)
+        await safe_edit_message(query, f"حدث خطأ أثناء جلب رصيد المحفظة: {e}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة", callback_data="back_to_dashboard")]]))
+
 
 async def show_trade_history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with aiosqlite.connect(DB_FILE) as conn:
@@ -1342,6 +1390,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         "db_stats": show_stats_command, "db_trades": show_trades_command, "db_strategies": show_strategy_report_command,
         "db_mood": show_mood_command, "db_diagnostics": show_diagnostics_command, "back_to_dashboard": show_dashboard_command,
         "db_portfolio": show_portfolio_command, "db_history": show_trade_history_command,
+        "db_manual_scan": lambda u,c: manual_scan_command(u.callback_query, c),
         "settings_main": show_settings_menu, "settings_params": show_parameters_menu, "settings_scanners": show_scanners_menu,
         "settings_presets": show_presets_menu, "settings_blacklist": show_blacklist_menu, "settings_data": show_data_management_menu,
         "blacklist_add": handle_blacklist_action, "blacklist_remove": handle_blacklist_action,
@@ -1388,7 +1437,7 @@ async def post_init(application: Application):
     
     logger.info(f"Scanner scheduled for every {SCAN_INTERVAL_SECONDS}s. Supervisor will audit every {SUPERVISOR_INTERVAL_SECONDS}s.")
     try:
-        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🚀 OKX Mastermind Trader v26.0 بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🚀 OKX Mastermind Trader v26.5 بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden:
         logger.critical(f"FATAL: Bot is not authorized for chat ID {TELEGRAM_CHAT_ID}.")
         return
@@ -1399,13 +1448,14 @@ async def post_shutdown(application: Application):
     logger.info("Bot has shut down.")
 
 def main():
-    logger.info("--- Starting OKX Mastermind Trader v26.0 ---")
+    logger.info("--- Starting OKX Mastermind Trader v26.5 ---")
     load_settings(); asyncio.run(init_database())
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
     application = app_builder.build()
     
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("scan", manual_scan_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, universal_text_handler))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     
