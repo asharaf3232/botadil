@@ -1563,7 +1563,8 @@ async def handle_blacklist_action(update: Update, context: ContextTypes.DEFAULT_
     await query.message.reply_text(f"أرسل رمز العملة التي تريد **{ 'إضافتها' if action == 'add' else 'إزالتها'}** (مثال: `BTC` أو `DOGE`)")
 
 async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_input = update.message.text.strip() # Don't automatically convert to upper case here
+async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_input = update.message.text.strip()
     
     if 'blacklist_action' in context.user_data:
         action = context.user_data.pop('blacklist_action')
@@ -1586,42 +1587,70 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
         bot_data.settings['asset_blacklist'] = blacklist
         save_settings()
         determine_active_preset()
-        await show_blacklist_menu(Update(update.update_id, callback_query=type('Query', (), {'message': update.message, 'data': 'settings_blacklist', 'edit_message_text': (lambda *args, **kwargs: None), 'answer': (lambda *args, **kwargs: None)})()), context)
-
+        # A mock update object to call the menu function again
+        mock_query = type('Query', (), {
+            'message': update.message,
+            'data': 'settings_blacklist',
+            'edit_message_text': (lambda *args, **kwargs: None),
+            'answer': (lambda *args, **kwargs: None)
+        })
+        await show_blacklist_menu(Update(update.update_id, callback_query=mock_query), context)
         return
 
-    if not (setting_key := context.user_data.get('setting_to_change')): return
+    if not (setting_key := context.user_data.get('setting_to_change')):
+        return
 
     try:
-        if '_' in setting_key:
-            keys = setting_key.split('_')
-            current_dict = bot_data.settings
-            
-            for key in keys[:-1]:
-                current_dict = current_dict.get(key, {})
-                
-            last_key = keys[-1]
-            original_value = current_dict[last_key]
-            
-            if isinstance(original_value, int): new_value = int(user_input)
-            else: new_value = float(user_input)
-            
-            current_dict[last_key] = new_value
-
-        else:
-            original_value = bot_data.settings[setting_key]
-            if isinstance(original_value, int): new_value = int(user_input)
-            else: new_value = float(user_input)
-            bot_data.settings[setting_key] = new_value
+        new_value = None # Initialize new_value
         
+        # --- START: LOGIC CORRECTION ---
+        # First, check if the key exists as a top-level setting directly.
+        if setting_key in bot_data.settings:
+            # This handles simple keys like 'max_concurrent_trades'
+            original_value = bot_data.settings[setting_key]
+            if isinstance(original_value, int):
+                new_value = int(user_input)
+            else:
+                new_value = float(user_input)
+            bot_data.settings[setting_key] = new_value
+        else:
+            # If not a top-level key, assume it's a nested key and find its parent.
+            # This logic correctly handles keys like 'trend_filters_ema_period'
+            updated = False
+            for parent_key, parent_dict in bot_data.settings.items():
+                if isinstance(parent_dict, dict):
+                    # Construct the potential child key from the end of the setting_key
+                    child_key_candidate = setting_key.replace(f"{parent_key}_", "")
+                    if child_key_candidate in parent_dict:
+                        original_value = parent_dict[child_key_candidate]
+                        if isinstance(original_value, int):
+                            new_value = int(user_input)
+                        else:
+                            new_value = float(user_input)
+                        parent_dict[child_key_candidate] = new_value
+                        updated = True
+                        break
+            if not updated:
+                raise KeyError(f"Could not find a place to update setting: {setting_key}")
+        # --- END: LOGIC CORRECTION ---
+
         save_settings()
         determine_active_preset()
         await update.message.reply_text(f"✅ تم تحديث `{setting_key}` إلى `{new_value}`.")
     except (ValueError, KeyError):
         await update.message.reply_text("❌ قيمة غير صالحة. الرجاء إرسال رقم.")
     finally:
-        del context.user_data['setting_to_change']
-        await show_parameters_menu(Update(update.update_id, callback_query=type('Query', (), {'message': update.message, 'data': 'settings_params', 'edit_message_text': (lambda *args, **kwargs: None), 'answer': (lambda *args, **kwargs: None)})()), context)
+        if 'setting_to_change' in context.user_data:
+            del context.user_data['setting_to_change']
+        
+        # A mock update object to call the menu function again
+        mock_query = type('Query', (), {
+            'message': update.message,
+            'data': 'settings_params',
+            'edit_message_text': (lambda *args, **kwargs: None),
+            'answer': (lambda *args, **kwargs: None)
+        })
+        await show_parameters_menu(Update(update.update_id, callback_query=mock_query), context)
 
 
 async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
