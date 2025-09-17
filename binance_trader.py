@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Mastermind Trader v25.1 🚀 ---
+# --- 🚀 OKX Mastermind Trader v25.2 🚀 ---
 # =======================================================================================
 # This is the master version, representing a complete fusion of the best features:
 #
@@ -14,12 +14,13 @@
 #   - The infallible Hybrid Core for trade confirmation (Fast Reporter + Supervisor).
 #   - The reliable Guardian protocol for real-time management of active trades.
 #
-# --- Version 25.1 Changelog ---
-#   - Implemented advanced trade closing logic to eliminate "Insufficient Funds" errors.
-#   - Added a pre-emptive balance availability check (`wait_for_balance_available`).
-#   - Explicitly set `tdMode: 'cash'` for sell orders to resolve API ambiguity.
-#   - Integrated a robust, multi-layered error handling system for closing trades.
-#   - Activated a fully interactive settings menu in the Telegram UI.
+# --- Version 25.2 Changelog ---
+#   - Complete UI Overhaul for the settings menu to match user-provided design.
+#   - Added categorized settings: Parameters, Scanner Toggles, and Presets.
+#   - Implemented interactive buttons for enabling/disabling individual scanners.
+#   - Created pre-configured trading style presets (Balanced, Strict, Lenient).
+#   - Redesigned the main dashboard for better clarity and aesthetics.
+#   - Implemented robust error handling for the new interactive UI.
 # =======================================================================================
 
 # --- Core Libraries ---
@@ -61,7 +62,7 @@ except ImportError:
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
-from telegram.error import BadRequest, TimedOut
+from telegram.error import BadRequest, TimedOut, Forbidden
 from dotenv import load_dotenv
 
 # =======================================================================================
@@ -131,6 +132,25 @@ STRATEGY_NAMES_AR = {
     "momentum_breakout": "زخم اختراقي", "breakout_squeeze_pro": "اختراق انضغاطي",
     "support_rebound": "ارتداد الدعم", "sniper_pro": "القناص المحترف", "whale_radar": "رادار الحيتان"
 }
+SETTINGS_PRESETS = {
+    "balanced": DEFAULT_SETTINGS.copy(),
+    "strict": {
+        **DEFAULT_SETTINGS,
+        "max_concurrent_trades": 3,
+        "risk_reward_ratio": 2.5,
+        "fear_and_greed_threshold": 40,
+        "liquidity_filters": {"min_quote_volume_24h_usd": 2000000, "min_rvol": 2.0},
+    },
+    "lenient": {
+        **DEFAULT_SETTINGS,
+        "max_concurrent_trades": 8,
+        "atr_sl_multiplier": 3.0,
+        "risk_reward_ratio": 1.8,
+        "fear_and_greed_threshold": 20,
+        "liquidity_filters": {"min_quote_volume_24h_usd": 500000, "min_rvol": 1.2},
+    }
+}
+
 
 # =======================================================================================
 # --- Helper, Settings & DB Management ---
@@ -148,6 +168,11 @@ def save_settings():
 async def safe_send_message(bot, text, **kwargs):
     try: await bot.send_message(TELEGRAM_CHAT_ID, text, parse_mode=ParseMode.MARKDOWN, **kwargs)
     except Exception as e: logger.error(f"Telegram Send Error: {e}")
+async def safe_edit_message(query, text, **kwargs):
+    try: await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, **kwargs)
+    except BadRequest as e:
+        if "Message is not modified" not in str(e): logger.warning(f"Edit Message Error: {e}")
+    except Exception as e: logger.error(f"Edit Message Error: {e}")
 
 async def init_database():
     try:
@@ -337,7 +362,6 @@ async def activate_trade(order_id, filled_qty, avg_price, symbol):
     
     trade_cost = avg_price * filled_qty
     
-    # The new, detailed confirmation message
     success_msg = (
         f"**✅ تم تأكيد الشراء | {symbol}**\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -420,32 +444,22 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
                 await conn.commit()
             except Exception as e: logger.error(f"🕵️ Supervisor: Failed to rectify trade #{trade['id']}: {e}")
 
-# NEW: Helper function to wait for balance
 async def wait_for_balance_available(exchange, asset, required_amount, timeout=30):
-    """
-    Waits until a specific amount of an asset becomes available in the balance.
-    """
     start_time = time.time()
     logger.info(f"Checking for available balance of {required_amount} {asset}...")
-    
     asset_symbol = asset.split('/')[0]
-
     while time.time() - start_time < timeout:
         try:
             balance = await exchange.fetch_balance()
-            # In ccxt, 'free' represents the available balance
             available_amount = balance.get(asset_symbol, {}).get('free', 0.0)
-            
             if available_amount >= required_amount:
                 logger.info(f"SUCCESS: {available_amount} {asset_symbol} is now available.")
                 return True
-                
             logger.debug(f"Balance not yet available. Have: {available_amount}, Need: {required_amount}. Retrying...")
-            await asyncio.sleep(0.5)  # Wait for 500ms before re-checking
+            await asyncio.sleep(0.5)
         except Exception as e:
             logger.warning(f"Error while fetching balance: {e}. Retrying...")
-            await asyncio.sleep(1) # Wait longer on error
-            
+            await asyncio.sleep(1)
     logger.error(f"TIMEOUT: Failed to verify availability of {required_amount} {asset_symbol} within {timeout}s.")
     return False
 
@@ -483,42 +497,21 @@ class TradeGuardian:
                 elif current_price <= trade['stop_loss']: await self._close_trade(trade, "فاشلة (SL)", current_price)
             except Exception as e: logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
 
-    # REBUILT: The new, robust trade closing function
     async def _close_trade(self, trade, reason, close_price):
-        """
-        Upgraded version of the close trade function that handles balance and timing issues.
-        """
-        symbol = trade['symbol']
-        quantity = trade['quantity']
-        trade_id = trade['id']
+        symbol, quantity, trade_id = trade['symbol'], trade['quantity'], trade['id']
         bot = self.application.bot
-
         logger.info(f"Guardian: Starting close process for trade #{trade_id} on {symbol}. Reason: {reason}")
-
         try:
-            # --- STEP 1: Wait for Balance Settlement ---
-            # Ensure the asset we want to sell is fully available before sending the order.
             asset_to_sell = symbol.split('/')[0]
             is_available = await wait_for_balance_available(bot_data.exchange, asset_to_sell, quantity)
-
             if not is_available:
-                logger.critical(f"CRITICAL: Failed to close trade #{trade_id}: Balance did not become available in time.")
-                await safe_send_message(bot, f"🚨 **فشل حرج** 🚨\nفشل إغلاق الصفقة `#{trade_id}` لأن الرصيد لم يتوفر. الرجاء التدخل اليدوي!")
+                logger.critical(f"CRITICAL: Failed to close trade #{trade_id}: Balance did not become available.")
+                await safe_send_message(bot, f"🚨 **فشل حرج** 🚨\nفشل إغلاق الصفقة `#{trade_id}`. الرجاء التدخل اليدوي!")
                 return
 
-            # --- STEP 2: Explicitly Define Order Intent ---
-            # Send explicit instructions to the exchange that this is a spot trade, not margin.
-            params = {'tdMode': 'cash'}
-
-            # --- STEP 3: Execute Order Safely ---
-            # Use a unique client order ID to ensure idempotency on retries.
-            client_order_id = f"close_{trade_id}_{int(time.time() * 1000)}"
-            params['clOrdId'] = client_order_id
-            
+            params = {'tdMode': 'cash', 'clOrdId': f"close_{trade_id}_{int(time.time() * 1000)}"}
             logger.info(f"Sending market sell order for trade #{trade_id} with params: {params}")
-            
             order = await bot_data.exchange.create_market_sell_order(symbol, quantity, params)
-            
             logger.info(f"Successfully created sell order for trade #{trade_id}. Order ID: {order.get('id')}")
             
             pnl = (close_price - trade['entry_price']) * quantity
@@ -528,27 +521,18 @@ class TradeGuardian:
             async with aiosqlite.connect(DB_FILE) as conn:
                 await conn.execute("UPDATE trades SET status = ? WHERE id = ?", (reason, trade['id']))
                 await conn.commit()
-
             await bot_data.public_ws.unsubscribe([symbol])
             
             msg = (f"**{emoji} تم إغلاق الصفقة | {symbol}**\n**السبب:** {reason}\n**الربح/الخسارة:** `${pnl:,.2f}` ({pnl_percent:+.2f}%)")
             await safe_send_message(bot, msg)
-
         except ccxt.InsufficientFunds as e:
-            # This error should no longer occur thanks to wait_for_balance_available,
-            # but we keep it as a final safeguard.
             logger.critical(f"CRITICAL: Final InsufficientFunds error when closing trade #{trade_id}: {e}")
-            await safe_send_message(bot, f"🚨 **فشل حرج** 🚨\nحدث خطأ رصيد غير كافٍ نهائي عند إغلاق الصفقة `#{trade_id}`. الرجاء التدخل اليدوي فوراً!")
-            
+            await safe_send_message(bot, f"🚨 **فشل حرج** 🚨\nحدث خطأ رصيد غير كافٍ نهائي عند إغلاق `#{trade_id}`. تدخل يدوي!")
         except (ccxt.NetworkError, ccxt.RequestTimeout, ccxt.ExchangeNotAvailable) as e:
-            # Handle temporary network or exchange-related errors
             logger.warning(f"Temporary error closing trade #{trade_id}: {e}. Will be retried by Guardian.")
-            # The Guardian's loop will naturally retry this on the next price tick.
-            
         except Exception as e:
-            # Handle any other unexpected errors
             logger.critical(f"Unexpected CRITICAL error while closing trade #{trade_id}: {e}", exc_info=True)
-            await safe_send_message(bot, f"🚨 **فشل حرج** 🚨\nحدث خطأ غير متوقع عند إغلاق الصفقة `#{trade_id}`. الرجاء مراجعة السجلات.")
+            await safe_send_message(bot, f"🚨 **فشل حرج** 🚨\nخطأ غير متوقع عند إغلاق `#{trade_id}`. راجع السجلات.")
 
     async def sync_subscriptions(self):
         try:
@@ -713,32 +697,35 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
 # --- 🤖 Telegram UI & Bot Startup 🤖 ---
 # =======================================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"]]
-    await update.message.reply_text("أهلاً بك في OKX Mastermind Trader v25.1", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    keyboard = [["Dashboard 🖥️"], ["الإعدادات ⚙️"]]
+    await update.message.reply_text("أهلاً بك في OKX Mastermind Trader v25.2", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("📈 الصفقات الحالية", callback_data="dashboard_trades")],
-        [InlineKeyboardButton("🌡️ حالة مزاج السوق", callback_data="dashboard_mood")],
-        [InlineKeyboardButton("📜 تقرير أداء الاستراتيجيات", callback_data="dashboard_strategies")]
+        [InlineKeyboardButton("📊 الإحصائيات العامة", callback_data="db_stats"), InlineKeyboardButton("📈 الصفقات النشطة", callback_data="db_trades")],
+        [InlineKeyboardButton("📜 تقرير أداء الاستراتيجيات", callback_data="db_strategies")],
+        [InlineKeyboardButton("🌡️ حالة مزاج السوق", callback_data="db_mood")]
     ]
-    await (update.message or update.callback_query.message).reply_text("🖥️ *لوحة التحكم الرئيسية*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+    await (update.message or update.callback_query.message).reply_text("🖥️ *لوحة التحكم الرئيسية*\n\nاختر التقرير أو البيانات التي تريد عرضها:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
 
 async def show_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    target_message = update.callback_query.message if update.callback_query else update.message
     async with aiosqlite.connect(DB_FILE) as conn:
         conn.row_factory = aiosqlite.Row
         cursor = await conn.execute("SELECT id, symbol, status FROM trades WHERE status = 'active' OR status = 'pending' ORDER BY id DESC")
         trades = await cursor.fetchall()
     if not trades:
-        await target_message.reply_text("لا توجد صفقات حالية.")
+        text = "لا توجد صفقات حالية."
+        keyboard = [[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")]]
+        await safe_edit_message(update.callback_query, text, reply_markup=InlineKeyboardMarkup(keyboard))
         return
+
     keyboard = []
     for trade in trades:
         status_emoji = "✅" if trade['status'] == 'active' else "⏳"
         button_text = f"#{trade['id']} {status_emoji} | {trade['symbol']}"
         keyboard.append([InlineKeyboardButton(button_text, callback_data=f"check_{trade['id']}")])
-    await target_message.reply_text("اختر صفقة لعرض تفاصيلها:", reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard.append([InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")])
+    await safe_edit_message(update.callback_query, "اختر صفقة لعرض تفاصيلها:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def check_trade_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -762,8 +749,7 @@ async def check_trade_details(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception: pnl_text = "💰 تعذر جلب الربح/الخسارة الحالية."
         message = (f"**✅ حالة الصفقة #{trade_id}**\n\n- **العملة:** `{trade['symbol']}`\n- **سعر الدخول:** `${trade['entry_price']}`\n- **الهدف:** `${trade['take_profit']}`\n- **الوقف:** `${trade['stop_loss']}`\n{pnl_text}")
     
-    await query.edit_message_text(message, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للصفقات", callback_data="dashboard_trades")]]))
-
+    await safe_edit_message(query, message, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للصفقات", callback_data="db_trades")]]))
 
 async def show_mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mood = bot_data.market_mood
@@ -773,14 +759,14 @@ async def show_mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                f"- **السبب:** {mood.get('reason', 'N/A')}\n"
                f"- **مؤشر BTC:** {mood.get('btc_mood', 'N/A')}\n"
                f"- **مشاعر الأخبار:** {news_sentiment}")
-    await update.callback_query.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+    await safe_edit_message(update.callback_query, message, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")]]))
 
 async def show_strategy_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with aiosqlite.connect(DB_FILE) as conn:
         cursor = await conn.execute("SELECT reason, status FROM trades WHERE status LIKE 'ناجحة%' OR status LIKE 'فاشلة%'")
         trades = await cursor.fetchall()
     if not trades:
-        await update.callback_query.message.reply_text("لا توجد صفقات مغلقة لتحليلها.")
+        await safe_edit_message(update.callback_query, "لا توجد صفقات مغلقة لتحليلها.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")]]))
         return
     stats = defaultdict(lambda: {'wins': 0, 'losses': 0})
     for reason, status in trades:
@@ -794,81 +780,139 @@ async def show_strategy_report_command(update: Update, context: ContextTypes.DEF
         total = s['wins'] + s['losses']
         wr = (s['wins'] / total * 100) if total > 0 else 0
         report.append(f"\n--- *{r}* ---\n  - الصفقات: {total} ({s['wins']}✅ / {s['losses']}❌)\n  - النجاح: {wr:.2f}%")
-    await update.callback_query.message.reply_text("\n".join(report), parse_mode=ParseMode.MARKDOWN)
+    await safe_edit_message(update.callback_query, "\n".join(report), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")]]))
 
-
-async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Displays the main settings menu."""
-    keyboard = [
-        [InlineKeyboardButton(f"حجم الصفقة: ${bot_data.settings['real_trade_size_usdt']}", callback_data="setting_real_trade_size_usdt")],
-        [InlineKeyboardButton(f"أقصى عدد للصفقات: {bot_data.settings['max_concurrent_trades']}", callback_data="setting_max_concurrent_trades")],
-        [InlineKeyboardButton(f"مضاعف وقف الخسارة (ATR): {bot_data.settings['atr_sl_multiplier']}", callback_data="setting_atr_sl_multiplier")],
-        [InlineKeyboardButton("إغلاق القائمة", callback_data="setting_close")]
-    ]
-    await update.message.reply_text("⚙️ *إعدادات البوت* ⚙️\nاختر الإعداد الذي تريد تعديله:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
-
-async def handle_setting_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles when a user clicks a setting button."""
-    query = update.callback_query
-    setting_key = query.data.split('_', 1)[1]
-    
-    if setting_key == 'close':
-        await query.message.delete()
+async def show_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.execute("SELECT status FROM trades WHERE status LIKE 'ناجحة%' OR status LIKE 'فاشلة%'")
+        trades = await cursor.fetchall()
+    if not trades:
+        await safe_edit_message(update.callback_query, "لا توجد صفقات مغلقة لعرض الإحصائيات.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")]]))
         return
+    
+    wins = sum(1 for t in trades if t[0].startswith('ناجحة'))
+    losses = len(trades) - wins
+    win_rate = (wins / len(trades) * 100) if trades else 0
+    
+    message = (f"**📊 الإحصائيات العامة**\n\n"
+               f"- **إجمالي الصفقات المغلقة:** {len(trades)}\n"
+               f"- **الصفقات الرابحة:** {wins} ✅\n"
+               f"- **الصفقات الخاسرة:** {losses} ❌\n"
+               f"- **معدل النجاح:** {win_rate:.2f}%")
+    await safe_edit_message(update.callback_query, message, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")]]))
 
-    context.user_data['setting_to_change'] = setting_key
-    await query.message.reply_text(f"أرسل القيمة الجديدة لـ `{setting_key}`:", parse_mode=ParseMode.MARKDOWN)
-    await query.answer()
+# --- Settings UI ---
+async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("🎛️ تعديل المعايير", callback_data="settings_params")],
+        [InlineKeyboardButton("🔭 تفعيل/تعطيل الماسحات", callback_data="settings_scanners")],
+        [InlineKeyboardButton("🗂️ أنماط جاهزة", callback_data="settings_presets")]
+    ]
+    message_text = "⚙️ *الإعدادات الرئيسية*\n\nاختر فئة الإعدادات التي تريد تعديلها."
+    
+    target_message = update.message or update.callback_query.message
+    if update.callback_query:
+        await safe_edit_message(update.callback_query, message_text, reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await target_message.reply_text(message_text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the new value sent by the user."""
-    setting_key = context.user_data.get('setting_to_change')
-    if not setting_key:
-        return # Not in the process of changing a setting
+async def show_scanners_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = []
+    active_scanners = bot_data.settings['active_scanners']
+    for key, name in STRATEGY_NAMES_AR.items():
+        status_emoji = "✅" if key in active_scanners else "❌"
+        keyboard.append([InlineKeyboardButton(f"{status_emoji} {name}", callback_data=f"scanner_toggle_{key}")])
+    keyboard.append([InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="settings_main")])
+    await safe_edit_message(update.callback_query, "اختر الماسحات لتفعيلها أو تعطيلها:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    new_value_str = update.message.text
-    try:
-        # Determine the type of the original value and cast the new value
-        original_value = bot_data.settings[setting_key]
-        if isinstance(original_value, bool):
-            new_value = new_value_str.lower() in ['true', '1', 'yes', 'on']
-        elif isinstance(original_value, int):
-            new_value = int(new_value_str)
-        elif isinstance(original_value, float):
-            new_value = float(new_value_str)
-        else: # Assumes string or list (list needs special handling not implemented here)
-            new_value = new_value_str
+async def show_presets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("🚦 احترافية (متوازنة)", callback_data="preset_set_balanced")],
+        [InlineKeyboardButton("🎯 متشددة", callback_data="preset_set_strict")],
+        [InlineKeyboardButton("🌙 متساهلة", callback_data="preset_set_lenient")],
+        [InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="settings_main")]
+    ]
+    await safe_edit_message(update.callback_query, "اختر نمط إعدادات جاهز:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-        bot_data.settings[setting_key] = new_value
+async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    s = bot_data.settings
+    text = (
+        f"*🎛️ تعديل المعايير*\n\n"
+        f"--- *إعدادات عامة* ---\n"
+        f"**حجم الصفقة:** ${s['real_trade_size_usdt']}\n"
+        f"**أقصى عدد للصفقات:** {s['max_concurrent_trades']}\n"
+        f"**عدد العملات للفحص:** {s['top_n_symbols_by_volume']}\n\n"
+        f"--- *إعدادات المخاطر* ---\n"
+        f"**مضاعف وقف الخسارة (ATR):** {s['atr_sl_multiplier']}\n"
+        f"**نسبة المخاطرة/العائد:** {s['risk_reward_ratio']}\n\n"
+        f"--- *الفلاتر والاتجاه* ---\n"
+        f"**فلتر مزاج السوق:** {'مفعّل' if s['market_mood_filter_enabled'] else 'معطّل'}\n"
+        f"**حد مؤشر الخوف:** {s['fear_and_greed_threshold']}\n"
+    )
+    # This is a display-only menu for now, as per the screenshot.
+    # To make it editable, we would add buttons for each parameter.
+    keyboard = [[InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="settings_main")]]
+    await safe_edit_message(update.callback_query, text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def handle_scanner_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    scanner_key = query.data.split('_')[-1]
+    active_scanners = bot_data.settings['active_scanners']
+    if scanner_key in active_scanners:
+        active_scanners.remove(scanner_key)
+    else:
+        active_scanners.append(scanner_key)
+    save_settings()
+    await query.answer(f"{STRATEGY_NAMES_AR[scanner_key]} {'تم تفعيله' if scanner_key in active_scanners else 'تم تعطيله'}")
+    await show_scanners_menu(update, context) # Refresh the menu
+
+async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    preset_key = query.data.split('_')[-1]
+    
+    preset_settings = SETTINGS_PRESETS.get(preset_key)
+    if preset_settings:
+        # We need to preserve some settings like active_scanners
+        current_scanners = bot_data.settings['active_scanners']
+        bot_data.settings = preset_settings.copy()
+        bot_data.settings['active_scanners'] = current_scanners
         save_settings()
-        await update.message.reply_text(f"✅ تم تحديث `{setting_key}` إلى `{new_value}` بنجاح.")
-    except (ValueError, KeyError) as e:
-        await update.message.reply_text(f"❌ قيمة غير صالحة. لم يتم التغيير. الخطأ: {e}")
-    finally:
-        del context.user_data['setting_to_change']
+        await query.answer(f"تم تطبيق نمط '{preset_key}' بنجاح!")
+        await show_settings_menu(update, context)
+    else:
+        await query.answer("لم يتم العثور على النمط.")
+
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
 
-    if data.startswith("setting_"):
-        await handle_setting_selection(update, context)
-    elif data == "dashboard_trades": await show_trades_command(update, context)
-    elif data == "dashboard_mood": await show_mood_command(update, context)
-    elif data == "dashboard_strategies": await show_strategy_report_command(update, context)
-    elif data.startswith("check_"): await check_trade_details(update, context)
+    if data.startswith("db_"):
+        if data == "db_trades": await show_trades_command(update, context)
+        elif data == "db_mood": await show_mood_command(update, context)
+        elif data == "db_strategies": await show_strategy_report_command(update, context)
+        elif data == "db_stats": await show_stats_command(update, context)
+    elif data == "back_to_dashboard":
+        await show_dashboard_command(update, context)
+    elif data.startswith("check_"):
+        await check_trade_details(update, context)
+    elif data.startswith("settings_"):
+        if data == "settings_main": await show_settings_menu(update, context)
+        elif data == "settings_scanners": await show_scanners_menu(update, context)
+        elif data == "settings_params": await show_parameters_menu(update, context)
+        elif data == "settings_presets": await show_presets_menu(update, context)
+    elif data.startswith("scanner_toggle_"):
+        await handle_scanner_toggle(update, context)
+    elif data.startswith("preset_set_"):
+        await handle_preset_set(update, context)
+
 
 async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Check if we are expecting a setting value
-    if 'setting_to_change' in context.user_data:
-        await handle_setting_value(update, context)
-        return
-
     text = update.message.text
     if text == "Dashboard 🖥️":
         await show_dashboard_command(update, context)
-    elif text == "⚙️ الإعدادات":
+    elif text == "الإعدادات ⚙️":
         await show_settings_menu(update, context)
 
 async def post_init(application: Application):
@@ -901,7 +945,11 @@ async def post_init(application: Application):
     application.job_queue.run_repeating(the_supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="the_supervisor_job")
     
     logger.info(f"Scanner scheduled for every {SCAN_INTERVAL_SECONDS}s. Supervisor will audit every {SUPERVISOR_INTERVAL_SECONDS}s.")
-    await safe_send_message(application.bot, "*🚀 OKX Mastermind Trader v25.1 بدأ العمل...*")
+    try:
+        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🚀 OKX Mastermind Trader v25.2 بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+    except Forbidden:
+        logger.critical(f"FATAL: Bot is not authorized for chat ID {TELEGRAM_CHAT_ID}. Please add the bot to the chat and grant admin permissions.")
+        return
     logger.info("--- Bot is now fully operational ---")
 
 async def post_shutdown(application: Application):
@@ -909,7 +957,7 @@ async def post_shutdown(application: Application):
     logger.info("Bot has shut down.")
 
 def main():
-    logger.info("--- Starting OKX Mastermind Trader v25.1 ---")
+    logger.info("--- Starting OKX Mastermind Trader v25.2 ---")
     load_settings(); asyncio.run(init_database())
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
@@ -923,3 +971,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
