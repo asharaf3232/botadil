@@ -168,11 +168,9 @@ DEFAULT_SETTINGS = {
         "BTC", "ETH"
     ],
     "liquidity_filters": {"min_quote_volume_24h_usd": 1000000, "min_rvol": 1.5},
-    # --- Start of advanced filters addition ---
     "volatility_filters": {"atr_period_for_filter": 14, "min_atr_percent": 0.8},
     "trend_filters": {"ema_period": 200, "htf_period": 50},
     "spread_filter": {"max_spread_percent": 0.5},
-    # --- End of advanced filters addition ---
 }
 STRATEGY_NAMES_AR = {
     "momentum_breakout": "زخم اختراقي", "breakout_squeeze_pro": "اختراق انضغاطي",
@@ -235,6 +233,7 @@ def determine_active_preset():
     current_settings_for_compare = {k: v for k, v in bot_data.settings.items()}
     
     for name, preset_settings in SETTINGS_PRESETS.items():
+        # Check for deep equality
         if current_settings_for_compare == preset_settings:
             bot_data.active_preset_name = PRESET_NAMES_AR.get(name, "مخصص")
             found_preset = True
@@ -1006,7 +1005,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not bot_data.trading_enabled:
-        await update.message.reply_text("🔬 الفحص اليدوي محظور. مفتاح الإيقاف مفعل.")
+        await (update.message or update.callback_query.message).reply_text("🔬 الفحص اليدوي محظور. مفتاح الإيقاف مفعل.")
         return
     message_target = update.message or update.callback_query.message
     await message_target.reply_text("🔬 تم إعطاء أمر الفحص اليدوي... قد يستغرق هذا بعض الوقت.")
@@ -1415,11 +1414,9 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
          InlineKeyboardButton(f"مسافة الوقف المتحرك (%): {s['trailing_sl_callback_percent']}", callback_data="param_set_trailing_sl_callback_percent")],
         [InlineKeyboardButton("--- الفلاتر والاتجاه ---", callback_data="noop")],
         [InlineKeyboardButton(bool_format('btc_trend_filter_enabled', 'فلتر الاتجاه العام (BTC)'), callback_data="param_toggle_btc_trend_filter_enabled")],
-        # --- Start of advanced filters UI buttons ---
         [InlineKeyboardButton(f"فترة EMA للاتجاه: {get_nested_value(s, ['trend_filters', 'ema_period'])}", callback_data="param_set_trend_filters_ema_period")],
         [InlineKeyboardButton(f"أقصى سبريد مسموح (%): {get_nested_value(s, ['spread_filter', 'max_spread_percent'])}", callback_data="param_set_spread_filter_max_spread_percent")],
         [InlineKeyboardButton(f"أدنى ATR مسموح (%): {get_nested_value(s, ['volatility_filters', 'min_atr_percent'])}", callback_data="param_set_volatility_filters_min_atr_percent")],
-        # --- End of advanced filters UI buttons ---
         [InlineKeyboardButton(bool_format('market_mood_filter_enabled', 'فلتر الخوف والطمع'), callback_data="param_toggle_market_mood_filter_enabled"),
          InlineKeyboardButton(f"حد مؤشر الخوف: {s['fear_and_greed_threshold']}", callback_data="param_set_fear_and_greed_threshold")],
         [InlineKeyboardButton(bool_format('adx_filter_enabled', 'فلتر ADX'), callback_data="param_toggle_adx_filter_enabled"),
@@ -1532,9 +1529,9 @@ async def handle_parameter_selection(update: Update, context: ContextTypes.DEFAU
     param_key = query.data.replace("param_set_", "")
     context.user_data['setting_to_change'] = param_key
     
-    # Check if the key is nested and provide a hint
+    # Check if the key is nested to provide a hint
     if '_' in param_key:
-        await query.message.reply_text(f"أرسل القيمة الرقمية الجديدة لـ `{param_key}`:\n\n*ملاحظة: هذا إعداد متقدم (متشعب)، سيتم تحديثه مباشرة.*", parse_mode=ParseMode.MARKDOWN)
+        await query.message.reply_text(f"أرسل القيمة الرقمية الجديدة لـ `{param_key}`:", parse_mode=ParseMode.MARKDOWN)
     else:
         await query.message.reply_text(f"أرسل القيمة الرقمية الجديدة لـ `{param_key}`:", parse_mode=ParseMode.MARKDOWN)
 
@@ -1583,37 +1580,28 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
     if not (setting_key := context.user_data.get('setting_to_change')): return
 
     try:
-        # Check for nested key
+        # Check if the key is nested
         if '_' in setting_key:
             keys = setting_key.split('_')
-            parent_key = keys[0]
-            child_keys = keys[1:]
+            current_dict = bot_data.settings
             
-            if parent_key not in bot_data.settings or not isinstance(bot_data.settings[parent_key], dict):
-                await update.message.reply_text(f"❌ خطأ في الإعداد: `{parent_key}` ليس قاموساً.")
-                return
-
-            current_dict = bot_data.settings[parent_key]
-            for i, key in enumerate(child_keys):
-                if i == len(child_keys) - 1:
-                    original_value = current_dict[key]
-                    if isinstance(original_value, int):
-                        new_value = int(user_input)
-                    else:
-                        new_value = float(user_input)
-                    current_dict[key] = new_value
-                else:
-                    current_dict = current_dict.get(key, {})
-                    if not isinstance(current_dict, dict):
-                        await update.message.reply_text(f"❌ خطأ في الإعداد: `{key}` ليس قاموساً.")
-                        return
+            # Navigate to the correct nested dictionary
+            for key in keys[:-1]:
+                current_dict = current_dict.get(key, {})
+                
+            last_key = keys[-1]
+            original_value = current_dict[last_key]
+            
+            if isinstance(original_value, int): new_value = int(user_input)
+            else: new_value = float(user_input)
+            
+            current_dict[last_key] = new_value
 
         else:
+            # Handle non-nested keys
             original_value = bot_data.settings[setting_key]
-            if isinstance(original_value, int):
-                new_value = int(user_input)
-            else:
-                new_value = float(user_input)
+            if isinstance(original_value, int): new_value = int(user_input)
+            else: new_value = float(user_input)
             bot_data.settings[setting_key] = new_value
         
         save_settings()
@@ -1726,4 +1714,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
