@@ -1,22 +1,18 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Hybrid Core Trader v24.0 🚀 ---
+# --- 🚀 OKX Mastermind Trader v25.0 🚀 ---
 # =======================================================================================
-# This is the definitive version, built on the "Hybrid Core" philosophy.
-# It combines the instantaneous speed of WebSocket confirmations with the
-# infallible reliability of a scheduled auditor.
+# This is the master version, representing a complete fusion of the best features:
 #
-# ARCHITECTURE:
-# 1. BRAIN: A powerful, OKX-focused scanner with a sophisticated asset filter.
-# 2. EXECUTION: A robust module for placing market buy orders.
-# 3. HYBRID CORE CONFIRMATION & MANAGEMENT:
-#    - FAST REPORTER (Private WebSocket): The primary, lightning-fast mechanism
-#      for trade confirmation. In 99% of cases, this confirms the trade.
-#    - SUPERVISOR (Scheduled Job): The infallible safety net. It periodically
-#      audits any 'pending' trades and verifies their status directly via REST
-#      API, ensuring no trade is ever abandoned.
-#    - GUARDIAN (Public WebSocket): Once a trade is confirmed by either layer,
-#      the Guardian takes over, providing real-time price monitoring for TP/SL.
+# - BRAIN (from Mastermind v5.5):
+#   - Five advanced scanning strategies (Sniper, Whale Radar, etc.).
+#   - Comprehensive market mood analysis including news sentiment.
+# - APPEARANCE (from Mastermind v5.5 & your Copy-trader):
+#   - A full, rich Telegram UI with a detailed dashboard and diagnostics.
+#   - A professional trade confirmation message that reports on liquidity.
+# - BODY (from Hybrid Core v24.1):
+#   - The infallible Hybrid Core for trade confirmation (Fast Reporter + Supervisor).
+#   - The reliable Guardian protocol for real-time management of active trades.
 # =======================================================================================
 
 # --- Core Libraries ---
@@ -35,11 +31,23 @@ import base64
 import aiosqlite
 import websockets
 import websockets.exceptions
+import httpx
+import feedparser
 
 # --- Data Analysis & CCXT ---
 import pandas as pd
 import pandas_ta as ta
 import ccxt.async_support as ccxt
+
+# --- Optional NLP Library ---
+try:
+    import nltk
+    from nltk.sentiment.vader import SentimentIntensityAnalyzer
+    NLTK_AVAILABLE = True
+except ImportError:
+    NLTK_AVAILABLE = False
+    logging.warning("NLTK not found. News sentiment analysis will be disabled.")
+
 
 # --- Telegram & Environment ---
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
@@ -61,14 +69,14 @@ TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 TIMEFRAME = '15m'
 SCAN_INTERVAL_SECONDS = 900
-SUPERVISOR_INTERVAL_SECONDS = 120 # The Supervisor checks every 2 minutes
+SUPERVISOR_INTERVAL_SECONDS = 120
 
 APP_ROOT = '.'
-DB_FILE = os.path.join(APP_ROOT, 'hybrid_core_v24.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'hybrid_core_settings_v24.json')
+DB_FILE = os.path.join(APP_ROOT, 'mastermind_trader_v25.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'mastermind_trader_settings_v25.json')
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger("OKX_Hybrid_Core_Trader")
+logger = logging.getLogger("OKX_Mastermind_Trader")
 
 # =======================================================================================
 # --- 🔬 Global Bot State & Locks 🔬 ---
@@ -79,17 +87,17 @@ class BotState:
         self.last_signal_time = {}
         self.application = None
         self.exchange = None
-        # --- The Hybrid Core Components ---
-        self.private_ws = None # Fast Reporter
-        self.public_ws = None  # Guardian's Eyes
-        self.trade_guardian = None # Guardian's Brain
+        self.market_mood = {"mood": "UNKNOWN", "reason": "تحليل لم يتم بعد"}
+        self.private_ws = None
+        self.public_ws = None
+        self.trade_guardian = None
 
 bot_data = BotState()
 scan_lock = asyncio.Lock()
 trade_management_lock = asyncio.Lock()
 
 # =======================================================================================
-# --- 💡 Default Settings & Filters 💡 ---
+# --- 💡 Default Settings, Filters & UI Constants 💡 ---
 # =======================================================================================
 DEFAULT_SETTINGS = {
     "real_trade_size_usdt": 15.0,
@@ -100,27 +108,24 @@ DEFAULT_SETTINGS = {
     "trailing_sl_enabled": True,
     "trailing_sl_activation_percent": 1.5,
     "trailing_sl_callback_percent": 1.0,
-    "active_scanners": ["momentum_breakout", "breakout_squeeze_pro", "supertrend_pullback"],
-    "min_signal_strength": 1,
+    "active_scanners": ["momentum_breakout", "breakout_squeeze_pro", "support_rebound", "sniper_pro", "whale_radar"],
+    "market_mood_filter_enabled": True,
+    "fear_and_greed_threshold": 30,
     "asset_blacklist": [
-        "USDC", "DAI", "TUSD", "FDUSD", "USDD", "PYUSD", "USDT", # Stablecoins
-        "BNB", "OKB", "KCS", "BGB", "MX", "GT", "HT",    # Exchange Tokens
-        "BTC", "ETH"                                    # Giants
+        "USDC", "DAI", "TUSD", "FDUSD", "USDD", "PYUSD", "USDT",
+        "BNB", "OKB", "KCS", "BGB", "MX", "GT", "HT",
+        "BTC", "ETH"
     ],
-    "liquidity_filters": {"min_quote_volume_24h_usd": 1000000},
-    "strategy_params": {
-        "momentum_breakout": {"rsi_max_level": 68},
-        "breakout_squeeze_pro": {"bbands_period": 20, "keltner_period": 20, "keltner_atr_multiplier": 1.5},
-        "supertrend_pullback": {"atr_period": 10, "atr_multiplier": 3.0}
-    }
+    "liquidity_filters": {"min_quote_volume_24h_usd": 1000000, "min_rvol": 1.5},
+    "trend_filters": {"ema_period": 200, "htf_period": 50},
 }
 STRATEGY_NAMES_AR = {
     "momentum_breakout": "زخم اختراقي", "breakout_squeeze_pro": "اختراق انضغاطي",
-    "supertrend_pullback": "انعكاس سوبرترند"
+    "support_rebound": "ارتداد الدعم", "sniper_pro": "القناص المحترف", "whale_radar": "رادار الحيتان"
 }
 
 # =======================================================================================
-# --- Helper & Settings Management ---
+# --- Helper, Settings & DB Management ---
 # =======================================================================================
 def load_settings():
     try:
@@ -136,9 +141,6 @@ async def safe_send_message(bot, text, **kwargs):
     try: await bot.send_message(TELEGRAM_CHAT_ID, text, parse_mode=ParseMode.MARKDOWN, **kwargs)
     except Exception as e: logger.error(f"Telegram Send Error: {e}")
 
-# =======================================================================================
-# --- 💽 Database Management 💽 ---
-# =======================================================================================
 async def init_database():
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
@@ -152,7 +154,7 @@ async def init_database():
                 )
             ''')
             await conn.commit()
-        logger.info("Hybrid Core database initialized successfully.")
+        logger.info("Mastermind database initialized successfully.")
     except Exception as e: logger.critical(f"Database initialization failed: {e}")
 
 async def log_pending_trade_to_db(signal, buy_order):
@@ -171,61 +173,142 @@ async def log_pending_trade_to_db(signal, buy_order):
         return False
 
 # =======================================================================================
-# --- 🧠 Advanced Scanners (The Brain) 🧠 ---
+# --- 🧠 Mastermind Brain (Analysis & Mood) 🧠 ---
 # =======================================================================================
 def find_col(df_columns, prefix):
     try: return next(col for col in df_columns if col.startswith(prefix))
     except StopIteration: return None
 
-def analyze_momentum_breakout(df, params):
+async def get_fear_and_greed_index():
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get("https://api.alternative.me/fng/?limit=1", timeout=10)
+            return int(r.json()['data'][0]['value'])
+    except Exception: return None
+
+def get_latest_crypto_news():
+    headlines = []
+    urls = ["https://cointelegraph.com/rss", "https://www.coindesk.com/arc/outboundfeeds/rss/"]
+    for url in urls:
+        try:
+            feed = feedparser.parse(url)
+            headlines.extend(entry.title for entry in feed.entries[:5])
+        except Exception: pass
+    return list(set(headlines))[:10]
+
+def analyze_sentiment_of_headlines(headlines):
+    if not headlines or not NLTK_AVAILABLE: return "N/A"
+    sia = SentimentIntensityAnalyzer()
+    score = sum(sia.polarity_scores(h)['compound'] for h in headlines) / len(headlines)
+    if score > 0.1: mood = "إيجابية"
+    elif score < -0.1: mood = "سلبية"
+    else: mood = "محايدة"
+    return f"{mood} (الدرجة: {score:.2f})"
+
+async def get_market_mood():
+    try:
+        htf_period = bot_data.settings['trend_filters']['htf_period']
+        ohlcv = await bot_data.exchange.fetch_ohlcv('BTC/USDT', '4h', limit=htf_period + 5)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['sma'] = ta.sma(df['close'], length=htf_period)
+        is_btc_bullish = df['close'].iloc[-1] > df['sma'].iloc[-1]
+        btc_mood_text = "إيجابي ✅" if is_btc_bullish else "سلبي ❌"
+        if not is_btc_bullish:
+            return {"mood": "NEGATIVE", "reason": "اتجاه BTC هابط", "btc_mood": btc_mood_text}
+    except Exception as e:
+        return {"mood": "DANGEROUS", "reason": f"فشل جلب بيانات BTC: {e}", "btc_mood": "UNKNOWN"}
+    
+    fng = await get_fear_and_greed_index()
+    if fng is not None and fng < bot_data.settings['fear_and_greed_threshold']:
+        return {"mood": "NEGATIVE", "reason": f"مشاعر خوف شديد (F&G: {fng})", "btc_mood": btc_mood_text}
+        
+    return {"mood": "POSITIVE", "reason": "وضع السوق مناسب", "btc_mood": btc_mood_text}
+
+def analyze_momentum_breakout(df, rvol):
     df.ta.vwap(append=True); df.ta.bbands(length=20, append=True); df.ta.macd(append=True); df.ta.rsi(append=True)
     last, prev = df.iloc[-2], df.iloc[-3]
     macd_col, macds_col, bbu_col, rsi_col = find_col(df.columns, "MACD_"), find_col(df.columns, "MACDs_"), find_col(df.columns, "BBU_"), find_col(df.columns, "RSI_")
-    if not all([macd_col, macds_col, bbu_col, rsi_col, "VWAP_D"]): return None
-    if (prev[macd_col] <= prev[macds_col] and last[macd_col] > last[macds_col] and last['close'] > last[bbu_col] and last['close'] > last["VWAP_D"] and last[rsi_col] < params.get('rsi_max_level', 68)):
-        return {"reason": "momentum_breakout"}
+    if not all([macd_col, macds_col, bbu_col, rsi_col]): return None
+    if (prev[macd_col] <= prev[macds_col] and last[macd_col] > last[macds_col] and last['close'] > last[bbu_col] and last['close'] > last["VWAP_D"] and last[rsi_col] < 68):
+        return {"reason": STRATEGY_NAMES_AR['momentum_breakout']}
     return None
 
-def analyze_breakout_squeeze_pro(df, params):
-    p = params
-    df.ta.bbands(length=p['bbands_period'], append=True); df.ta.kc(length=p['keltner_period'], scalar=p['keltner_atr_multiplier'], append=True); df.ta.obv(append=True)
-    bbu_col, bbl_col, kcu_col, kcl_col = find_col(df.columns, f"BBU_"), find_col(df.columns, f"BBL_"), find_col(df.columns, f"KCUe_"), find_col(df.columns, f"KCLEe_")
+def analyze_breakout_squeeze_pro(df, rvol):
+    df.ta.bbands(length=20, append=True); df.ta.kc(length=20, scalar=1.5, append=True); df.ta.obv(append=True)
+    bbu_col, bbl_col, kcu_col, kcl_col = find_col(df.columns, "BBU_"), find_col(df.columns, "BBL_"), find_col(df.columns, "KCUe_"), find_col(df.columns, "KCLEe_")
     if not all([bbu_col, bbl_col, kcu_col, kcl_col]): return None
     last, prev = df.iloc[-2], df.iloc[-3]
     is_in_squeeze = prev[bbl_col] > prev[kcl_col] and prev[bbu_col] < prev[kcu_col]
-    if is_in_squeeze and (last['close'] > last[bbu_col]) and (df['OBV'].iloc[-2] > df['OBV'].iloc[-3]):
-        return {"reason": "breakout_squeeze_pro"}
+    if is_in_squeeze and (last['close'] > last[bbu_col]) and (last['volume'] > df['volume'].rolling(20).mean().iloc[-2] * 1.5) and (df['OBV'].iloc[-2] > df['OBV'].iloc[-3]):
+        return {"reason": STRATEGY_NAMES_AR['breakout_squeeze_pro']}
     return None
 
-def analyze_supertrend_pullback(df, params):
-    p = params
-    df.ta.supertrend(length=p['atr_period'], multiplier=p['atr_multiplier'], append=True)
-    st_dir_col = find_col(df.columns, f"SUPERTd_")
-    if not st_dir_col: return None
-    last, prev = df.iloc[-2], df.iloc[-3]
-    if prev[st_dir_col] == -1 and last[st_dir_col] == 1:
-        return {"reason": "supertrend_pullback"}
+async def analyze_support_rebound(df, rvol, exchange, symbol):
+    try:
+        ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', limit=100)
+        if len(ohlcv_1h) < 50: return None
+        df_1h = pd.DataFrame(ohlcv_1h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        current_price = df_1h['close'].iloc[-1]
+        recent_lows = df_1h['low'].rolling(window=10, center=True).min()
+        supports = recent_lows[recent_lows.notna()]
+        closest_support = max([s for s in supports if s < current_price], default=None)
+        if not closest_support or ((current_price - closest_support) / closest_support * 100 > 1.0): return None
+        
+        last_candle_15m = df.iloc[-2]
+        if last_candle_15m['close'] > last_candle_15m['open'] and last_candle_15m['volume'] > df['volume'].rolling(window=20).mean().iloc[-2] * 1.5:
+            return {"reason": STRATEGY_NAMES_AR['support_rebound']}
+    except Exception: return None
+    return None
+
+def analyze_sniper_pro(df, rvol):
+    try:
+        compression_candles = 24
+        if len(df) < compression_candles + 2: return None
+        compression_df = df.iloc[-compression_candles-1:-1]
+        highest_high, lowest_low = compression_df['high'].max(), compression_df['low'].min()
+        if lowest_low <= 0: return None
+        volatility = (highest_high - lowest_low) / lowest_low * 100
+        if volatility < 12.0:
+            last_candle = df.iloc[-2]
+            if last_candle['close'] > highest_high and last_candle['volume'] > compression_df['volume'].mean() * 2:
+                return {"reason": STRATEGY_NAMES_AR['sniper_pro']}
+    except Exception: return None
+    return None
+
+async def analyze_whale_radar(df, rvol, exchange, symbol):
+    try:
+        ob = await exchange.fetch_order_book(symbol, limit=20)
+        if not ob or not ob.get('bids'): return None
+        if sum(float(price) * float(qty) for price, qty in ob['bids'][:10]) > 30000:
+            return {"reason": STRATEGY_NAMES_AR['whale_radar']}
+    except Exception: return None
     return None
 
 SCANNERS = {
-    "momentum_breakout": analyze_momentum_breakout,
-    "breakout_squeeze_pro": analyze_breakout_squeeze_pro,
-    "supertrend_pullback": analyze_supertrend_pullback
+    "momentum_breakout": analyze_momentum_breakout, "breakout_squeeze_pro": analyze_breakout_squeeze_pro,
+    "support_rebound": analyze_support_rebound, "sniper_pro": analyze_sniper_pro,
+    "whale_radar": analyze_whale_radar
 }
 
 # =======================================================================================
 # --- 🚀 Hybrid Core Protocol (Execution & Management) 🚀 ---
 # =======================================================================================
-
-# --- Layer 1: The Fast Reporter (WebSocket) ---
 async def activate_trade(order_id, filled_qty, avg_price, symbol):
-    """A centralized function to activate a trade, callable by any confirmation source."""
+    """The centralized function to activate a trade and send the detailed confirmation message."""
+    bot = bot_data.application.bot
+    try:
+        balance_after = await bot_data.exchange.fetch_balance()
+        usdt_remaining = balance_after.get('USDT', {}).get('free', 0)
+    except Exception as e:
+        logger.error(f"Could not fetch balance for confirmation message: {e}")
+        usdt_remaining = "N/A"
+
     async with aiosqlite.connect(DB_FILE) as conn:
         conn.row_factory = aiosqlite.Row
         cursor = await conn.execute("SELECT * FROM trades WHERE order_id = ? AND status = 'pending'", (order_id,))
         trade = await cursor.fetchone()
         if not trade:
-            logger.info(f"Activation ignored for {order_id}: Trade is not pending (already activated or unknown).")
+            logger.info(f"Activation ignored for {order_id}: Trade not pending.")
             return
 
         trade = dict(trade)
@@ -238,21 +321,37 @@ async def activate_trade(order_id, filled_qty, avg_price, symbol):
             "UPDATE trades SET status = 'active', entry_price = ?, quantity = ?, take_profit = ? WHERE id = ?",
             (avg_price, filled_qty, new_take_profit, trade['id'])
         )
+        
+        active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")).fetchone())[0]
         await conn.commit()
 
     await bot_data.public_ws.subscribe([symbol])
     
-    success_msg = (f"**✅ تم تأكيد الشراء | {symbol}**\n\n"
-                   f"الصفقة #{trade['id']} الآن نشطة والحارس الأمين يراقبها لحظة بلحظة.")
-    await safe_send_message(bot_data.application.bot, success_msg)
+    trade_cost = avg_price * filled_qty
+    
+    # The new, detailed confirmation message
+    success_msg = (
+        f"**✅ تم تأكيد الشراء | {symbol}**\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔸 **الصفقة رقم:** `#{trade['id']}`\n"
+        f"🔸 **الاستراتيجية:** {trade['reason']}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"*تحليل الصفقة:*\n"
+        f" ▪️ **سعر التنفيذ:** `${avg_price:,.4f}`\n"
+        f" ▪️ **الكمية:** `{filled_qty:,.4f}` {symbol.split('/')[0]}\n"
+        f" ▪️ **التكلفة (السيولة المستهلكة):** `${trade_cost:,.2f}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"*التأثير على المحفظة:*\n"
+        f" ▪️ **السيولة المتبقية (USDT):** `${usdt_remaining:,.2f}`\n"
+        f" ▪️ **إجمالي الصفقات النشطة:** `{active_trades_count}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"الحارس الأمين يراقب الصفقة الآن."
+    )
+    await safe_send_message(bot, success_msg)
 
 async def handle_filled_buy_order(order_data):
-    """Called by the Private WS upon receiving a fill event."""
-    symbol = order_data['instId'].replace('-', '/')
-    order_id = order_data['ordId']
-    filled_qty = float(order_data.get('fillSz', 0))
-    avg_price = float(order_data.get('avgPx', 0))
-
+    symbol = order_data['instId'].replace('-', '/'); order_id = order_data['ordId']
+    filled_qty = float(order_data.get('fillSz', 0)); avg_price = float(order_data.get('avgPx', 0))
     if filled_qty > 0 and avg_price > 0:
         logger.info(f"🎤 Fast Reporter: Received fill for {order_id} via WebSocket.")
         await activate_trade(order_id, filled_qty, avg_price, symbol)
@@ -286,41 +385,33 @@ class PrivateWebSocketManager:
             except Exception as e: logger.error(f"🔥 [Fast Reporter] Connection Error: {e}")
             await asyncio.sleep(5)
 
-# --- Layer 2: The Supervisor (Scheduled Job) ---
 async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
-    """The safety net. Audits abandoned pending trades and rectifies their status."""
     logger.info("🕵️ Supervisor: Conducting audit of pending trades...")
     async with aiosqlite.connect(DB_FILE) as conn:
         conn.row_factory = aiosqlite.Row
         two_mins_ago = (datetime.now(EGYPT_TZ) - timedelta(minutes=2)).isoformat()
         cursor = await conn.execute("SELECT * FROM trades WHERE status = 'pending' AND timestamp <= ?", (two_mins_ago,))
         stuck_trades = await cursor.fetchall()
-        
         if not stuck_trades:
             logger.info("🕵️ Supervisor: Audit complete. No abandoned trades found.")
             return
-
         for trade in stuck_trades:
             trade = dict(trade)
             order_id, symbol = trade['order_id'], trade['symbol']
-            logger.warning(f"🕵️ Supervisor: Found abandoned trade #{trade['id']} for {symbol}. Investigating status via API...")
+            logger.warning(f"🕵️ Supervisor: Found abandoned trade #{trade['id']}. Investigating...")
             try:
                 order_status = await bot_data.exchange.fetch_order(order_id, symbol)
                 if order_status['status'] == 'closed' and order_status.get('filled', 0) > 0:
                     logger.info(f"🕵️ Supervisor: API confirms trade {order_id} was filled. Activating manually.")
                     await activate_trade(order_id, order_status['filled'], order_status['average'], symbol)
                 elif order_status['status'] == 'canceled':
-                    logger.info(f"🕵️ Supervisor: API confirms trade {order_id} was canceled. Marking as failed.")
                     await conn.execute("UPDATE trades SET status = 'failed' WHERE id = ?", (trade['id'],))
-                else: # Still open or other states
-                    logger.info(f"🕵️ Supervisor: Trade {order_id} is still open on the exchange. Canceling it now.")
+                else:
                     await bot_data.exchange.cancel_order(order_id, symbol)
                     await conn.execute("UPDATE trades SET status = 'failed' WHERE id = ?", (trade['id'],))
                 await conn.commit()
-            except Exception as e:
-                logger.error(f"🕵️ Supervisor: Failed to investigate/rectify trade #{trade['id']}: {e}")
+            except Exception as e: logger.error(f"🕵️ Supervisor: Failed to rectify trade #{trade['id']}: {e}")
 
-# --- Active Management: The Guardian Protocol ---
 class TradeGuardian:
     def __init__(self, application): self.application = application
     async def handle_ticker_update(self, ticker_data):
@@ -368,7 +459,7 @@ class TradeGuardian:
                 await conn.commit()
 
             await bot_data.public_ws.unsubscribe([symbol])
-            pnl_percent = (close_price / trade['entry_price'] - 1) * 100
+            pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
             emoji = "✅" if pnl > 0 else "🛑"
             msg = (f"**{emoji} تم إغلاق الصفقة | {symbol}**\n**السبب:** {reason}\n**الربح/الخسارة:** `${pnl:,.2f}` ({pnl_percent:+.2f}%)")
             await safe_send_message(self.application.bot, msg)
@@ -429,7 +520,7 @@ async def get_okx_markets():
         return valid_markets[:settings['top_n_symbols_by_volume']]
     except Exception as e: logger.error(f"Failed to fetch and filter OKX markets: {e}"); return []
 
-async def worker(queue, results_list):
+async def worker(queue, signals_list):
     settings, exchange = bot_data.settings, bot_data.exchange
     while not queue.empty():
         market = await queue.get(); symbol = market['symbol']
@@ -439,19 +530,33 @@ async def worker(queue, results_list):
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms'); df.set_index('timestamp', inplace=True)
 
-            confirmed_reasons = {SCANNERS[name](df.copy(), params)['reason']
-                                 for name in settings['active_scanners']
-                                 if (params := settings.get('strategy_params', {}).get(name)) and SCANNERS[name](df.copy(), params)}
+            df['volume_sma'] = ta.sma(df['volume'], length=20)
+            if pd.isna(df['volume_sma'].iloc[-2]) or df['volume_sma'].iloc[-2] == 0: continue
+            rvol = df['volume'].iloc[-2] / df['volume_sma'].iloc[-2]
+            if rvol < settings['liquidity_filters']['min_rvol']: continue
             
-            if len(confirmed_reasons) >= settings.get("min_signal_strength", 1):
-                reason_str = ' + '.join(confirmed_reasons)
+            confirmed_reasons = []
+            for name in settings['active_scanners']:
+                strategy_func = SCANNERS.get(name)
+                if not strategy_func: continue
+
+                if asyncio.iscoroutinefunction(strategy_func):
+                    result = await strategy_func(df.copy(), rvol, exchange, symbol)
+                else:
+                    result = strategy_func(df.copy(), rvol)
+                
+                if result:
+                    confirmed_reasons.append(result['reason'])
+
+            if confirmed_reasons:
+                reason_str = ' + '.join(set(confirmed_reasons))
                 entry_price = df.iloc[-2]['close']
                 df.ta.atr(length=14, append=True)
                 atr = df.iloc[-2].get(find_col(df.columns, "ATRr_14"), 0)
                 risk = atr * settings['atr_sl_multiplier']
                 stop_loss = entry_price - risk
                 take_profit = entry_price + (risk * settings['risk_reward_ratio'])
-                results_list.append({"symbol": symbol, "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "reason": reason_str})
+                signals_list.append({"symbol": symbol, "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "reason": reason_str})
         except Exception as e: logger.debug(f"Worker error for {symbol}: {e}")
         finally: queue.task_done()
 
@@ -468,22 +573,28 @@ async def initiate_real_trade(signal):
         else:
             await exchange.cancel_order(buy_order['id'], signal['symbol'])
             await safe_send_message(bot_data.application.bot, f"⚠️ فشل تسجيل صفقة `{signal['symbol']}`. تم إلغاء الأمر.")
-            
     except ccxt.InsufficientFunds as e:
         logger.error(f"REAL TRADE FAILED for {signal['symbol']}: {e}")
-        # No need to message user, the scan loop will stop.
     except Exception as e:
         logger.error(f"REAL TRADE FAILED for {signal['symbol']}: {e}", exc_info=True)
         await safe_send_message(bot_data.application.bot, f"🔥 فشل فتح صفقة لـ `{signal['symbol']}`.")
-    raise e # Re-raise to be caught by the scan loop
+    raise e
 
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
     async with scan_lock:
         logger.info("--- Starting new OKX-focused market scan... ---")
+        settings = bot_data.settings
+
+        if settings['market_mood_filter_enabled']:
+            mood_result = await get_market_mood()
+            bot_data.market_mood = mood_result
+            if mood_result['mood'] in ["NEGATIVE", "DANGEROUS"]:
+                logger.warning(f"SCAN SKIPPED: {mood_result['reason']}")
+                return
+
         async with aiosqlite.connect(DB_FILE) as conn:
             active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active' OR status = 'pending'")).fetchone())[0]
 
-        settings = bot_data.settings
         if active_trades_count >= settings['max_concurrent_trades']:
             logger.info(f"Scan skipped: Max trades ({active_trades_count}) reached.")
             return
@@ -506,23 +617,125 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                     bot_data.last_signal_time[signal['symbol']] = time.time()
                     await initiate_real_trade(signal)
                     active_trades_count += 1
-                    await asyncio.sleep(3) # Small delay between initiating trades
+                    await asyncio.sleep(3)
             except ccxt.InsufficientFunds:
-                 await safe_send_message(context.bot, f"⚠️ **رصيد غير كافٍ!**\nتم إيقاف فتح صفقات جديدة لهذا الفحص.")
-                 break # Stop trying to open trades if we run out of money
+                 await safe_send_message(context.bot, f"⚠️ **رصيد غير كافٍ!**\nتم إيقاف فتح صفقات جديدة.")
+                 break
             except Exception:
-                 continue # Continue to the next signal if one fails for other reasons
+                 continue
 
 # =======================================================================================
 # --- 🤖 Telegram UI & Bot Startup 🤖 ---
 # =======================================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("أهلاً بك في OKX Hybrid Core Trader v24.0")
+    keyboard = [["Dashboard 🖥️"], ["⚙️ الإعدادات"]]
+    await update.message.reply_text("أهلاً بك في OKX Mastermind Trader v25.0", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+
+async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("📈 الصفقات الحالية", callback_data="dashboard_trades")],
+        [InlineKeyboardButton("🌡️ حالة مزاج السوق", callback_data="dashboard_mood")],
+        [InlineKeyboardButton("📜 تقرير أداء الاستراتيجيات", callback_data="dashboard_strategies")]
+    ]
+    await (update.message or update.callback_query.message).reply_text("🖥️ *لوحة التحكم الرئيسية*", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+
+async def show_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_message = update.callback_query.message if update.callback_query else update.message
+    async with aiosqlite.connect(DB_FILE) as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute("SELECT id, symbol, status FROM trades WHERE status = 'active' OR status = 'pending' ORDER BY id DESC")
+        trades = await cursor.fetchall()
+    if not trades:
+        await target_message.reply_text("لا توجد صفقات حالية.")
+        return
+    keyboard = []
+    for trade in trades:
+        status_emoji = "✅" if trade['status'] == 'active' else "⏳"
+        button_text = f"#{trade['id']} {status_emoji} | {trade['symbol']}"
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"check_{trade['id']}")])
+    await target_message.reply_text("اختر صفقة لعرض تفاصيلها:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def check_trade_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    trade_id = int(query.data.split('_')[1])
+    async with aiosqlite.connect(DB_FILE) as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute("SELECT * FROM trades WHERE id = ?", (trade_id,))
+        trade = await cursor.fetchone()
+    if not trade:
+        await query.answer("لم يتم العثور على الصفقة."); return
+    trade = dict(trade)
+    if trade['status'] == 'pending':
+        message = f"**⏳ حالة الصفقة #{trade_id}**\n- **العملة:** `{trade['symbol']}`\n- **الحالة:** في انتظار تأكيد التنفيذ..."
+    else:
+        try:
+            ticker = await bot_data.exchange.fetch_ticker(trade['symbol'])
+            current_price = ticker['last']
+            pnl = (current_price - trade['entry_price']) * trade['quantity']
+            pnl_percent = (current_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
+            pnl_text = f"💰 **الربح/الخسارة الحالية:** `${pnl:+.2f}` ({pnl_percent:+.2f}%)"
+        except Exception: pnl_text = "💰 تعذر جلب الربح/الخسارة الحالية."
+        message = (f"**✅ حالة الصفقة #{trade_id}**\n\n- **العملة:** `{trade['symbol']}`\n- **سعر الدخول:** `${trade['entry_price']}`\n- **الهدف:** `${trade['take_profit']}`\n- **الوقف:** `${trade['stop_loss']}`\n{pnl_text}")
+    
+    await query.edit_message_text(message, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للصفقات", callback_data="dashboard_trades")]]))
+
+
+async def show_mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    mood = bot_data.market_mood
+    headlines = get_latest_crypto_news()
+    news_sentiment = analyze_sentiment_of_headlines(headlines)
+    message = (f"*🌡️ حالة مزاج السوق*\n\n- **النتيجة:** {mood.get('mood', 'N/A')}\n"
+               f"- **السبب:** {mood.get('reason', 'N/A')}\n"
+               f"- **مؤشر BTC:** {mood.get('btc_mood', 'N/A')}\n"
+               f"- **مشاعر الأخبار:** {news_sentiment}")
+    await update.callback_query.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+
+async def show_strategy_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async with aiosqlite.connect(DB_FILE) as conn:
+        cursor = await conn.execute("SELECT reason, status FROM trades WHERE status LIKE 'ناجحة%' OR status LIKE 'فاشلة%'")
+        trades = await cursor.fetchall()
+    if not trades:
+        await update.callback_query.message.reply_text("لا توجد صفقات مغلقة لتحليلها.")
+        return
+    stats = defaultdict(lambda: {'wins': 0, 'losses': 0})
+    for reason, status in trades:
+        if not reason: continue
+        reasons = reason.split(' + ')
+        for r in reasons:
+            if status.startswith('ناجحة'): stats[r]['wins'] += 1
+            else: stats[r]['losses'] += 1
+    report = ["**📜 تقرير أداء الاستراتيجيات**"]
+    for r, s in sorted(stats.items()):
+        total = s['wins'] + s['losses']
+        wr = (s['wins'] / total * 100) if total > 0 else 0
+        report.append(f"\n--- *{r}* ---\n  - الصفقات: {total} ({s['wins']}✅ / {s['losses']}❌)\n  - النجاح: {wr:.2f}%")
+    await update.callback_query.message.reply_text("\n".join(report), parse_mode=ParseMode.MARKDOWN)
+
+
+async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "dashboard_trades": await show_trades_command(update, context)
+    elif data == "dashboard_mood": await show_mood_command(update, context)
+    elif data == "dashboard_strategies": await show_strategy_report_command(update, context)
+    elif data.startswith("check_"): await check_trade_details(update, context)
+
+async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if text == "Dashboard 🖥️":
+        await show_dashboard_command(update, context)
+    elif text == "⚙️ الإعدادات":
+        await update.message.reply_text("سيتم تفعيل قائمة الإعدادات في الإصدارات القادمة.")
 
 async def post_init(application: Application):
     bot_data.application = application
     if not all([OKX_API_KEY, OKX_API_SECRET, OKX_API_PASSPHRASE, TELEGRAM_BOT_TOKEN]):
         logger.critical("FATAL: Missing critical API or Bot keys."); return
+    if NLTK_AVAILABLE:
+        try: nltk.data.find('sentiment/vader_lexicon.zip')
+        except LookupError: logger.info("Downloading NLTK data..."); nltk.download('vader_lexicon', quiet=True)
 
     try:
         config = {'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 'password': OKX_API_PASSPHRASE, 'enableRateLimit': True}
@@ -532,7 +745,6 @@ async def post_init(application: Application):
     except Exception as e:
         logger.critical(f"🔥 FATAL: Could not connect to OKX: {e}"); return
 
-    # --- Initialize and start the Hybrid Core components ---
     bot_data.trade_guardian = TradeGuardian(application)
     bot_data.public_ws = PublicWebSocketManager(bot_data.trade_guardian.handle_ticker_update)
     bot_data.private_ws = PrivateWebSocketManager()
@@ -547,7 +759,7 @@ async def post_init(application: Application):
     application.job_queue.run_repeating(the_supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="the_supervisor_job")
     
     logger.info(f"Scanner scheduled for every {SCAN_INTERVAL_SECONDS}s. Supervisor will audit every {SUPERVISOR_INTERVAL_SECONDS}s.")
-    await safe_send_message(application.bot, "*🚀 OKX Hybrid Core Trader v24.0 بدأ العمل...*")
+    await safe_send_message(application.bot, "*🚀 OKX Mastermind Trader v25.0 بدأ العمل...*")
     logger.info("--- Bot is now fully operational ---")
 
 async def post_shutdown(application: Application):
@@ -555,13 +767,15 @@ async def post_shutdown(application: Application):
     logger.info("Bot has shut down.")
 
 def main():
-    logger.info("--- Starting OKX Hybrid Core Trader v24.0 ---")
+    logger.info("--- Starting OKX Mastermind Trader v25.0 ---")
     load_settings(); asyncio.run(init_database())
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
     application = app_builder.build()
     
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, universal_text_handler))
+    application.add_handler(CallbackQueryHandler(button_callback_handler))
     
     application.run_polling()
 
