@@ -19,6 +19,11 @@
 #     final, unbreakable failsafe against any possible state mismatch, ensuring trades
 #     always close and liquidity is always freed.
 #   - ✅ **DB & SETTINGS PRESERVED**: Continues to use v26 database and settings files.
+#
+# --- 🆕 New Advanced Filters from Al-Kasiha Bot (الكاسحة) ---
+#   - 💹 **Spread Filter**: To avoid trading coins with high bid/ask spread.
+#   - 📊 **ATR Filter**: To filter out low-volatility, "dead" coins.
+#   - 📈 **EMA Trend Filter**: To ensure the asset is in an overall uptrend.
 # =======================================================================================
 
 
@@ -163,7 +168,11 @@ DEFAULT_SETTINGS = {
         "BTC", "ETH"
     ],
     "liquidity_filters": {"min_quote_volume_24h_usd": 1000000, "min_rvol": 1.5},
+    # --- Start of advanced filters addition ---
+    "volatility_filters": {"atr_period_for_filter": 14, "min_atr_percent": 0.8},
     "trend_filters": {"ema_period": 200, "htf_period": 50},
+    "spread_filter": {"max_spread_percent": 0.5},
+    # --- End of advanced filters addition ---
 }
 STRATEGY_NAMES_AR = {
     "momentum_breakout": "زخم اختراقي", "breakout_squeeze_pro": "اختراق انضغاطي",
@@ -597,7 +606,7 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
         for trade_data in stuck_trades:
             trade = dict(trade_data)
             order_id, symbol = trade['order_id'], trade['symbol']
-            logger.warning(f"🕵️ Supervisor: Found abandoned trade #{trade['id']}. Investigating...", extra={'trade_id': trade['id']})
+            logger.warning(f"🕵️ Supervisor: Found abandoned trade #{trade['id']}. Investigating.", extra={'trade_id': trade['id']})
             try:
                 order_status = await bot_data.exchange.fetch_order(order_id, symbol)
                 if order_status['status'] == 'closed' and order_status.get('filled', 0) > 0:
@@ -754,16 +763,71 @@ async def get_okx_markets():
     return valid_markets[:settings['top_n_symbols_by_volume']]
 
 
+# --- START: The updated worker function including new filters ---
 async def worker(queue, signals_list, errors_list):
     settings, exchange = bot_data.settings, bot_data.exchange
     while not queue.empty():
         market = await queue.get(); symbol = market['symbol']
         try:
-            ohlcv = await exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=220)
-            if len(ohlcv) < 200: continue
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms'); df.set_index('timestamp', inplace=True)
+            # --- START: الفلاتر المتقدمة المدمجة من الكاسحة ---
 
+            # 1. فلتر السيولة الدقيقة (Spread Filter)
+            # يتطلب هذا الفلتر استدعاء دفتر الأوامر، مما يضيف استدعاء API إضافي لكل عملة
+            # ولكنه ضروري لضمان سيولة حقيقية.
+            try:
+                orderbook = await exchange.fetch_order_book(symbol, limit=1)
+                best_bid = orderbook['bids'][0][0]
+                best_ask = orderbook['asks'][0][0]
+                if best_bid <= 0: continue # تخطي إذا كان السعر غير صالح
+                
+                spread_percent = ((best_ask - best_bid) / best_bid) * 100
+                if spread_percent > settings.get('spread_filter', {}).get('max_spread_percent', 0.5):
+                    continue # تخطي العملة إذا كان الفارق السعري مرتفعاً جداً
+            except Exception:
+                continue # تخطي العملة إذا فشل جلب دفتر الأوامر
+
+            # --- نهاية فلتر السيولة ---
+
+            ohlcv = await exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=220)
+            
+            # --- فلتر الاتجاه العام للعملة (EMA Filter) ---
+            ema_period = settings.get('trend_filters', {}).get('ema_period', 200)
+            if len(ohlcv) < ema_period + 1: 
+                continue # تخطي إذا لم تكن هناك بيانات كافية لحساب EMA
+            
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df.ta.ema(length=ema_period, append=True)
+            ema_col_name = find_col(df.columns, f"EMA_{ema_period}")
+            if not ema_col_name or pd.isna(df[ema_col_name].iloc[-2]):
+                continue # تخطي إذا فشل حساب EMA
+
+            last_close = df['close'].iloc[-2]
+            if last_close < df[ema_col_name].iloc[-2]:
+                continue # تخطي إذا كان السعر تحت المتوسط المتحرك الطويل المدى
+            
+            # --- نهاية فلتر الاتجاه ---
+
+            # --- فلتر التقلب (ATR Filter) ---
+            vol_filters = settings.get('volatility_filters', {})
+            atr_period = vol_filters.get('atr_period_for_filter', 14)
+            min_atr_percent = vol_filters.get('min_atr_percent', 0.8)
+            
+            df.ta.atr(length=atr_period, append=True)
+            atr_col_name = find_col(df.columns, f"ATRr_{atr_period}")
+            if not atr_col_name or pd.isna(df[atr_col_name].iloc[-2]):
+                continue # تخطي إذا فشل حساب ATR
+
+            atr_percent = (df[atr_col_name].iloc[-2] / last_close) * 100
+            if atr_percent < min_atr_percent:
+                continue # تخطي العملات ذات التقلب المنخفض جداً
+
+            # --- نهاية فلتر التقلب ---
+
+            # --- END: نهاية الفلاتر المتقدمة ---
+
+
+            # --- بقية الفلاتر الأصلية لبوت OKX ---
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms'); df.set_index('timestamp', inplace=True)
             df['volume_sma'] = ta.sma(df['volume'], length=20)
             if pd.isna(df['volume_sma'].iloc[-2]) or df['volume_sma'].iloc[-2] == 0: continue
             rvol = df['volume'].iloc[-2] / df['volume_sma'].iloc[-2]
@@ -775,6 +839,9 @@ async def worker(queue, signals_list, errors_list):
                 if adx_col and not pd.isna(df[adx_col].iloc[-2]) and df[adx_col].iloc[-2] < settings.get('adx_filter_level', 25):
                     continue
 
+            # --- نهاية الفلاتر الأصلية ---
+
+            # --- بدء تطبيق الاستراتيجيات (لم يتغير) ---
             confirmed_reasons = []
             for name in settings['active_scanners']:
                 strategy_func = SCANNERS.get(name)
@@ -802,6 +869,7 @@ async def worker(queue, signals_list, errors_list):
             errors_list.append(symbol)
         finally:
             queue.task_done()
+# --- END: The updated worker function ---
 
 async def initiate_real_trade(signal):
     if not bot_data.trading_enabled:
@@ -1286,7 +1354,7 @@ async def show_diagnostics_command(update: Update, context: ContextTypes.DEFAULT
         f"- وقت البدء: {scan_time}\n"
         f"- المدة: {scan_duration}\n"
         f"- العملات المفحوصة: {scan_checked}\n"
-        f"- فشل في تحليل: {scan_errors} عملات\n\n"
+        f"- فشل في التحليل: {scan_errors} عملات\n\n"
         f"🔧 **الإعدادات النشطة**\n"
         f"- **النمط الحالي: {bot_data.active_preset_name}**\n"
         f"- الماسحات المفعلة:\n{scanners_list}\n"
@@ -1324,6 +1392,14 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         val = s.get(key, False)
         emoji = "✅" if val else "❌"
         return f"{text}: {emoji} مفعل"
+        
+    def get_nested_value(d, keys):
+        for key in keys:
+            if isinstance(d, dict) and key in d:
+                d = d[key]
+            else:
+                return None
+        return d
 
     keyboard = [
         [InlineKeyboardButton("--- إعدادات عامة ---", callback_data="noop")],
@@ -1339,6 +1415,11 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
          InlineKeyboardButton(f"مسافة الوقف المتحرك (%): {s['trailing_sl_callback_percent']}", callback_data="param_set_trailing_sl_callback_percent")],
         [InlineKeyboardButton("--- الفلاتر والاتجاه ---", callback_data="noop")],
         [InlineKeyboardButton(bool_format('btc_trend_filter_enabled', 'فلتر الاتجاه العام (BTC)'), callback_data="param_toggle_btc_trend_filter_enabled")],
+        # --- Start of advanced filters UI buttons ---
+        [InlineKeyboardButton(f"فترة EMA للاتجاه: {get_nested_value(s, ['trend_filters', 'ema_period'])}", callback_data="param_set_trend_filters_ema_period")],
+        [InlineKeyboardButton(f"أقصى سبريد مسموح (%): {get_nested_value(s, ['spread_filter', 'max_spread_percent'])}", callback_data="param_set_spread_filter_max_spread_percent")],
+        [InlineKeyboardButton(f"أدنى ATR مسموح (%): {get_nested_value(s, ['volatility_filters', 'min_atr_percent'])}", callback_data="param_set_volatility_filters_min_atr_percent")],
+        # --- End of advanced filters UI buttons ---
         [InlineKeyboardButton(bool_format('market_mood_filter_enabled', 'فلتر الخوف والطمع'), callback_data="param_toggle_market_mood_filter_enabled"),
          InlineKeyboardButton(f"حد مؤشر الخوف: {s['fear_and_greed_threshold']}", callback_data="param_set_fear_and_greed_threshold")],
         [InlineKeyboardButton(bool_format('adx_filter_enabled', 'فلتر ADX'), callback_data="param_toggle_adx_filter_enabled"),
@@ -1450,7 +1531,12 @@ async def handle_parameter_selection(update: Update, context: ContextTypes.DEFAU
     query = update.callback_query
     param_key = query.data.replace("param_set_", "")
     context.user_data['setting_to_change'] = param_key
-    await query.message.reply_text(f"أرسل القيمة الرقمية الجديدة لـ `{param_key}`:", parse_mode=ParseMode.MARKDOWN)
+    
+    # Check if the key is nested and provide a hint
+    if '_' in param_key:
+        await query.message.reply_text(f"أرسل القيمة الرقمية الجديدة لـ `{param_key}`:\n\n*ملاحظة: هذا إعداد متقدم (متشعب)، سيتم تحديثه مباشرة.*", parse_mode=ParseMode.MARKDOWN)
+    else:
+        await query.message.reply_text(f"أرسل القيمة الرقمية الجديدة لـ `{param_key}`:", parse_mode=ParseMode.MARKDOWN)
 
 async def handle_toggle_parameter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1497,11 +1583,39 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
     if not (setting_key := context.user_data.get('setting_to_change')): return
 
     try:
-        original_value = bot_data.settings[setting_key]
-        if isinstance(original_value, int): new_value = int(user_input)
-        else: new_value = float(user_input)
+        # Check for nested key
+        if '_' in setting_key:
+            keys = setting_key.split('_')
+            parent_key = keys[0]
+            child_keys = keys[1:]
+            
+            if parent_key not in bot_data.settings or not isinstance(bot_data.settings[parent_key], dict):
+                await update.message.reply_text(f"❌ خطأ في الإعداد: `{parent_key}` ليس قاموساً.")
+                return
 
-        bot_data.settings[setting_key] = new_value
+            current_dict = bot_data.settings[parent_key]
+            for i, key in enumerate(child_keys):
+                if i == len(child_keys) - 1:
+                    original_value = current_dict[key]
+                    if isinstance(original_value, int):
+                        new_value = int(user_input)
+                    else:
+                        new_value = float(user_input)
+                    current_dict[key] = new_value
+                else:
+                    current_dict = current_dict.get(key, {})
+                    if not isinstance(current_dict, dict):
+                        await update.message.reply_text(f"❌ خطأ في الإعداد: `{key}` ليس قاموساً.")
+                        return
+
+        else:
+            original_value = bot_data.settings[setting_key]
+            if isinstance(original_value, int):
+                new_value = int(user_input)
+            else:
+                new_value = float(user_input)
+            bot_data.settings[setting_key] = new_value
+        
         save_settings()
         determine_active_preset()
         await update.message.reply_text(f"✅ تم تحديث `{setting_key}` إلى `{new_value}`.")
@@ -1612,3 +1726,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
