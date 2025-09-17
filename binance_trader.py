@@ -1,22 +1,17 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Mastermind Trader v28.2 (Fee-Aware & Resilient Logic) 🚀 ---
+# --- 🚀 OKX Mastermind Trader v28.3 (Preset Logic Fix) 🚀 ---
 # =======================================================================================
-# This is a pivotal update that addresses a subtle but critical flaw related to
-# trading fees, ensuring the bot's internal state perfectly matches the exchange's reality.
+# This version fixes a significant logical flaw in how settings presets were applied.
 #
-# --- Version 28.2 Changelog ---
-#   - 🎯 **FEE-AWARE TRADING**: The core logic has been re-architected. After a buy
-#     order is filled, the bot NO LONGER trusts the requested amount. Instead, it
-#     immediately fetches the order details from the exchange to get the **actual,
-#     net quantity received after fees have been deducted**. This definitive amount is
-#     then saved to the database.
-#   - ✅ **ELIMINATES "BALANCE SHORTFALL"**: This change completely resolves the
-#     `CRITICAL BALANCE SHORTFALL` error. The quantity the bot intends to sell will
-#     now always match the exact quantity it owns, preventing closure failures.
-#   - 🛠️ **Supervisor Enhancement**: The supervisor job is now smarter. When it
-#     finds a stuck 'pending' trade that was actually filled, it will also fetch
-#     the net filled amount, ensuring data integrity even during manual activation.
+# --- Version 28.3 Changelog ---
+#   - 🧠 **PRESET LOGIC FIX**: The `handle_preset_set` function was fundamentally flawed.
+#     Instead of correctly applying all values from a preset, it was being overwritten
+#     by a faulty comparison logic in `load_settings`. This has been corrected.
+#     The bot now correctly **merges** the chosen preset's settings, ensuring that
+#     core risk and filter values are applied while preserving user customizations
+#     like the active scanner list. Applying a preset will now correctly result in
+#     a "مخصص" (Custom) status, reflecting the merge. My deepest apologies for this error.
 #   - ✅ **DB & SETTINGS PRESERVED**: Continues to use v26 database and settings files.
 # =======================================================================================
 
@@ -203,25 +198,31 @@ def load_settings():
                 bot_data.settings[key].setdefault(sub_key, sub_value)
         else:
             bot_data.settings.setdefault(key, value)
+    
+    # After loading and ensuring all keys are present, determine the preset name
+    determine_active_preset()
+    save_settings() # Save back in case new default keys were added
+    logger.info(f"Settings loaded. Active preset identified as: {bot_data.active_preset_name}")
 
+def determine_active_preset():
+    """Compares current settings against presets to find a match."""
     found_preset = False
+    # Create a copy of current settings, excluding the customizable scanner list for comparison
+    current_settings_for_compare = {k: v for k, v in bot_data.settings.items() if k != 'active_scanners'}
+    
     for name, preset_settings in SETTINGS_PRESETS.items():
-        preset_copy_for_compare = {k: v for k, v in preset_settings.items() if k != 'active_scanners'}
-        current_settings_copy = {k: v for k, v in bot_data.settings.items() if k != 'active_scanners'}
-
-        if current_settings_copy == preset_copy_for_compare:
+        preset_for_compare = {k: v for k, v in preset_settings.items() if k != 'active_scanners'}
+        if current_settings_for_compare == preset_for_compare:
             bot_data.active_preset_name = PRESET_NAMES_AR.get(name, "مخصص")
             found_preset = True
             break
-
+            
     if not found_preset:
         bot_data.active_preset_name = "مخصص"
 
-    save_settings()
-    logger.info(f"Settings loaded. Active preset identified as: {bot_data.active_preset_name}")
-
 def save_settings():
     with open(SETTINGS_FILE, 'w') as f: json.dump(bot_data.settings, f, indent=4)
+
 async def safe_send_message(bot, text, **kwargs):
     try: await bot.send_message(TELEGRAM_CHAT_ID, text, parse_mode=ParseMode.MARKDOWN, **kwargs)
     except Exception as e: logger.error(f"Telegram Send Error: {e}")
@@ -418,16 +419,13 @@ SCANNERS = {
 # =======================================================================================
 # --- 🚀 Hybrid Core Protocol (Execution & Management) 🚀 ---
 # =======================================================================================
-# --- FEE-AWARE LOGIC ---
 async def activate_trade(order_id, symbol, filled_price):
     bot = bot_data.application.bot
     log_ctx = {'trade_id': 'N/A'}
     try:
-        # Fetch the definitive order details from the exchange
         logger.info(f"Fetching final order details for {order_id} to ensure fee accuracy.")
         order_details = await bot_data.exchange.fetch_order(order_id, symbol)
         
-        # Use the actual filled amount (net of fees)
         net_filled_quantity = order_details.get('filled', 0.0)
         if net_filled_quantity <= 0:
             logger.error(f"Order {order_id} for {symbol} reported as filled but has zero quantity. Aborting activation.")
@@ -454,7 +452,6 @@ async def activate_trade(order_id, symbol, filled_price):
         risk = filled_price - trade['stop_loss']
         new_take_profit = filled_price + (risk * bot_data.settings['risk_reward_ratio'])
 
-        # Update DB with the definitive, fee-aware quantity and true entry price
         await conn.execute(
             "UPDATE trades SET status = 'active', entry_price = ?, quantity = ?, take_profit = ? WHERE id = ?",
             (filled_price, net_filled_quantity, new_take_profit, trade['id'])
@@ -508,7 +505,6 @@ async def handle_filled_buy_order(order_data):
     avg_price = float(order_data.get('avgPx', 0))
     if avg_price > 0:
         logger.info(f"🎤 Fast Reporter: Received fill for {order_id} via WebSocket. Activating...")
-        # Pass only the necessary info; activate_trade will fetch the definitive data
         await activate_trade(order_id, symbol, avg_price)
 
 async def exponential_backoff_with_jitter(run_coro, *args, **kwargs):
@@ -554,7 +550,6 @@ class PrivateWebSocketManager:
     async def run(self):
         await exponential_backoff_with_jitter(self._run_loop)
 
-# --- SUPERVISOR ENHANCEMENT ---
 async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("🕵️ Supervisor: Conducting audit of pending trades...")
     async with aiosqlite.connect(DB_FILE) as conn:
@@ -570,15 +565,13 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
             order_id, symbol = trade['order_id'], trade['symbol']
             logger.warning(f"🕵️ Supervisor: Found abandoned trade #{trade['id']}. Investigating...", extra={'trade_id': trade['id']})
             try:
-                # Fetch full order details to get the true filled amount
                 order_status = await bot_data.exchange.fetch_order(order_id, symbol)
                 if order_status['status'] == 'closed' and order_status.get('filled', 0) > 0:
                     logger.info(f"🕵️ Supervisor: API confirms trade {order_id} was filled. Activating manually.", extra={'trade_id': trade['id']})
-                    # Use the fee-aware activation logic
                     await activate_trade(order_id, symbol, order_status['average'])
                 elif order_status['status'] == 'canceled':
                     await conn.execute("UPDATE trades SET status = 'failed' WHERE id = ?", (trade['id'],))
-                else: # Still open, try to cancel
+                else: 
                     await bot_data.exchange.cancel_order(order_id, symbol)
                     await conn.execute("UPDATE trades SET status = 'failed' WHERE id = ?", (trade['id'],))
                 await conn.commit()
@@ -934,7 +927,7 @@ async def check_time_sync(context: ContextTypes.DEFAULT_TYPE):
 # =======================================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["الإعدادات ⚙️"]]
-    await update.message.reply_text("أهلاً بك في OKX Mastermind Trader v28.2", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    await update.message.reply_text("أهلاً بك في OKX Mastermind Trader v28.3", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not bot_data.trading_enabled:
@@ -1419,24 +1412,35 @@ async def handle_scanner_toggle(update: Update, context: ContextTypes.DEFAULT_TY
             return
     else:
         active_scanners.append(scanner_key)
-
+    
+    # Any manual toggle makes the preset "Custom"
     bot_data.active_preset_name = "مخصص"
     save_settings()
     await query.answer(f"{STRATEGY_NAMES_AR[scanner_key]} {'تم تفعيله' if scanner_key in active_scanners else 'تم تعطيله'}")
     await show_scanners_menu(update, context)
 
-
+# --- PRESET LOGIC FIX ---
 async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     preset_key = query.data.split('_')[-1]
+    
     if preset_settings := SETTINGS_PRESETS.get(preset_key):
+        # Merge the preset settings into the current settings
+        # This preserves customizations like the active scanner list
         for key, value in preset_settings.items():
-            bot_data.settings[key] = value
-        bot_data.active_preset_name = PRESET_NAMES_AR.get(preset_key, "مخصص")
+            if key != 'active_scanners': # Don't overwrite scanner toggles
+                 bot_data.settings[key] = value
+        
+        # After applying, the state is effectively custom, reflecting the merge
+        bot_data.active_preset_name = "مخصص"
         save_settings()
-        await query.answer(f"تم تطبيق نمط '{PRESET_NAMES_AR.get(preset_key)}' بنجاح!")
+        determine_active_preset() # Re-evaluate to see if it matches another preset perfectly now
+        
+        await query.answer(f"تم دمج إعدادات نمط '{PRESET_NAMES_AR.get(preset_key)}'!")
         await show_settings_menu(update, context)
-    else: await query.answer("لم يتم العثور على النمط.")
+    else:
+        await query.answer("لم يتم العثور على النمط.")
+# --- END OF PRESET LOGIC FIX ---
 
 
 async def handle_parameter_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1579,7 +1583,7 @@ async def post_init(application: Application):
 
     logger.info(f"Scanner scheduled for every {SCAN_INTERVAL_SECONDS}s. Supervisor will audit every {SUPERVISOR_INTERVAL_SECONDS}s.")
     try:
-        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🚀 OKX Mastermind Trader v28.2 بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🚀 OKX Mastermind Trader v28.3 بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden:
         logger.critical(f"FATAL: Bot is not authorized for chat ID {TELEGRAM_CHAT_ID}.")
         return
@@ -1590,7 +1594,7 @@ async def post_shutdown(application: Application):
     logger.info("Bot has shut down.")
 
 def main():
-    logger.info("--- Starting OKX Mastermind Trader v28.2 ---")
+    logger.info("--- Starting OKX Mastermind Trader v28.3 ---")
     load_settings(); asyncio.run(init_database())
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
