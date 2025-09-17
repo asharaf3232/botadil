@@ -671,7 +671,7 @@ class TradeGuardian:
         bot = self.application.bot
         log_ctx = {'trade_id': trade_id}
         logger.info(f"Guardian: Starting close process for {symbol}. Reason: {reason}", extra=log_ctx)
-        try:
+        try: جا
             # --- FLEXIBLE SELL LOGIC ---
             asset_to_sell = symbol.split('/')[0]
             balance = await bot_data.exchange.fetch_balance()
@@ -684,7 +684,7 @@ class TradeGuardian:
                     await conn.execute("UPDATE trades SET status = 'closure_failed', reason = 'Zero available balance' WHERE id = ?", (trade_id,))
                     await conn.commit()
                 await safe_send_message(bot, f"🚨 **فشل إغلاق** 🚨\nلا يوجد رصيد متاح من `{asset_to_sell}` لإغلاق الصفقة `#{trade_id}`. الرجاء المراجعة.")
-                return
+                return٨
 
             logger.info(f"Found {available_quantity} {asset_to_sell} available. Selling this amount.", extra=log_ctx)
             formatted_quantity = bot_data.exchange.amount_to_precision(symbol, available_quantity)
@@ -1396,6 +1396,7 @@ async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         await target_message.reply_text(message_text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
 
+# --- START: CORRECTED FUNCTION ---
 async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     s = bot_data.settings
 
@@ -1437,7 +1438,17 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton(bool_format('news_filter_enabled', 'فلتر الأخبار والبيانات'), callback_data="param_toggle_news_filter_enabled")],
         [InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="settings_main")]
     ]
-    await safe_edit_message(update.callback_query, "🎛️ *المعايير المتقدمة*\n\nاضغط على أي معيار لتغيير قيمته:", reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    message_text = "🎛️ *المعايير المتقدمة*\n\nاضغط على أي معيار لتغيير قيمته:"
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # This function can now handle being called from a button (edit) or a text message (reply)
+    if update.callback_query:
+        await safe_edit_message(update.callback_query, message_text, reply_markup=reply_markup)
+    elif update.message:
+        await update.message.reply_text(message_text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+# --- END: CORRECTED FUNCTION ---
+
 
 async def show_scanners_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = []
@@ -1562,9 +1573,11 @@ async def handle_blacklist_action(update: Update, context: ContextTypes.DEFAULT_
     context.user_data['blacklist_action'] = action
     await query.message.reply_text(f"أرسل رمز العملة التي تريد **{ 'إضافتها' if action == 'add' else 'إزالتها'}** (مثال: `BTC` أو `DOGE`)")
 
+# --- START: CORRECTED FUNCTION ---
 async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_input = update.message.text.strip() # Don't automatically convert to upper case here
+    user_input = update.message.text.strip()
     
+    # --- Handle Blacklist Actions ---
     if 'blacklist_action' in context.user_data:
         action = context.user_data.pop('blacklist_action')
         blacklist = bot_data.settings.get('asset_blacklist', [])
@@ -1586,42 +1599,59 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
         bot_data.settings['asset_blacklist'] = blacklist
         save_settings()
         determine_active_preset()
-        await show_blacklist_menu(Update(update.update_id, callback_query=type('Query', (), {'message': update.message, 'data': 'settings_blacklist', 'edit_message_text': (lambda *args, **kwargs: None), 'answer': (lambda *args, **kwargs: None)})()), context)
-
+        # Create a mock update object to redisplay the menu correctly
+        mock_query = type('Query', (), {'message': update.message, 'data': 'settings_blacklist'})
+        await show_blacklist_menu(Update(update.update_id, callback_query=mock_query), context)
         return
 
-    if not (setting_key := context.user_data.get('setting_to_change')): return
+    # --- Handle General Parameter Settings ---
+    if not (setting_key := context.user_data.get('setting_to_change')):
+        return
 
     try:
-        if '_' in setting_key:
-            keys = setting_key.split('_')
-            current_dict = bot_data.settings
-            
-            for key in keys[:-1]:
-                current_dict = current_dict.get(key, {})
-                
-            last_key = keys[-1]
-            original_value = current_dict[last_key]
-            
-            if isinstance(original_value, int): new_value = int(user_input)
-            else: new_value = float(user_input)
-            
-            current_dict[last_key] = new_value
-
-        else:
-            original_value = bot_data.settings[setting_key]
-            if isinstance(original_value, int): new_value = int(user_input)
-            else: new_value = float(user_input)
-            bot_data.settings[setting_key] = new_value
+        new_value = None
         
+        # LOGIC CORRECTION: First, check if the key exists as a top-level setting.
+        # This correctly handles keys like 'max_concurrent_trades'.
+        if setting_key in bot_data.settings:
+            original_value = bot_data.settings[setting_key]
+            if isinstance(original_value, int):
+                new_value = int(user_input)
+            else:
+                new_value = float(user_input)
+            bot_data.settings[setting_key] = new_value
+        else:
+            # If not a top-level key, assume it's nested (e.g., 'trend_filters_ema_period').
+            # We iterate through the settings to find its correct parent dictionary.
+            updated = False
+            for parent_key, parent_dict in bot_data.settings.items():
+                if isinstance(parent_dict, dict):
+                    # Construct the child key from the end part of the setting_key string
+                    child_key_candidate = setting_key.replace(f"{parent_key}_", "", 1)
+                    if child_key_candidate in parent_dict:
+                        original_value = parent_dict[child_key_candidate]
+                        if isinstance(original_value, int):
+                            new_value = int(user_input)
+                        else:
+                            new_value = float(user_input)
+                        parent_dict[child_key_candidate] = new_value
+                        updated = True
+                        break # Exit the loop once the key is found and updated
+            if not updated:
+                raise KeyError(f"Setting key '{setting_key}' was not found.")
+
         save_settings()
         determine_active_preset()
         await update.message.reply_text(f"✅ تم تحديث `{setting_key}` إلى `{new_value}`.")
     except (ValueError, KeyError):
         await update.message.reply_text("❌ قيمة غير صالحة. الرجاء إرسال رقم.")
     finally:
-        del context.user_data['setting_to_change']
-        await show_parameters_menu(Update(update.update_id, callback_query=type('Query', (), {'message': update.message, 'data': 'settings_params', 'edit_message_text': (lambda *args, **kwargs: None), 'answer': (lambda *args, **kwargs: None)})()), context)
+        if 'setting_to_change' in context.user_data:
+            del context.user_data['setting_to_change']
+        # Call the parameters menu again, using the current update object
+        # The menu function is now smart enough to handle this.
+        await show_parameters_menu(update, context)
+# --- END: CORRECTED FUNCTION ---
 
 
 async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
