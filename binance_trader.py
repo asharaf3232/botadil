@@ -1,17 +1,19 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Mastermind Trader v28.3 (Preset Logic Fix) 🚀 ---
+# --- 🚀 OKX Mastermind Trader v28.4 (Robust Presets & Logging) 🚀 ---
 # =======================================================================================
-# This version fixes a significant logical flaw in how settings presets were applied.
+# This version implements critical fixes for preset application logic and logging stability.
 #
-# --- Version 28.3 Changelog ---
-#   - 🧠 **PRESET LOGIC FIX**: The `handle_preset_set` function was fundamentally flawed.
-#     Instead of correctly applying all values from a preset, it was being overwritten
-#     by a faulty comparison logic in `load_settings`. This has been corrected.
-#     The bot now correctly **merges** the chosen preset's settings, ensuring that
-#     core risk and filter values are applied while preserving user customizations
-#     like the active scanner list. Applying a preset will now correctly result in
-#     a "مخصص" (Custom) status, reflecting the merge. My deepest apologies for this error.
+# --- Version 28.4 Changelog ---
+#   - 🧠 **ROBUST PRESET LOGIC**: The `handle_preset_set` function has been rewritten.
+#     It now performs a clean overwrite of all settings from the selected preset, while
+#     intelligently preserving only the user's `active_scanners` customization. This
+#     prevents misidentification of presets (e.g., "very_lenient" showing as "lenient").
+#     The diagnostic report will now accurately reflect the base preset applied.
+#   - 📝 **SAFE LOGGING FORMATTER**: Implemented a custom `SafeFormatter` for the logging
+#     module. This formatter prevents the bot from crashing with a `ValueError` when
+#     an external library (like apscheduler) logs a message that doesn't contain our
+#     custom `trade_id` field. It safely defaults to 'N/A', ensuring log integrity.
 #   - ✅ **DB & SETTINGS PRESERVED**: Continues to use v26 database and settings files.
 # =======================================================================================
 
@@ -84,7 +86,23 @@ SETTINGS_FILE = os.path.join(APP_ROOT, 'mastermind_trader_settings_v26.json')
 # --- END OF PERSISTENCE SECTION ---
 
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
-logging.basicConfig(format='%(asctime)s - %(levelname)s - [TradeID:%(trade_id)s] - %(message)s', level=logging.INFO)
+
+# --- LOGGING FIX: Implement a SafeFormatter to prevent crashes ---
+class SafeFormatter(logging.Formatter):
+    """A custom formatter that ensures 'trade_id' exists in the log record."""
+    def format(self, record):
+        if not hasattr(record, 'trade_id'):
+            record.trade_id = 'N/A'
+        return super().format(record)
+
+# Setup root logger with the safe formatter
+log_formatter = SafeFormatter('%(asctime)s - %(levelname)s - [TradeID:%(trade_id)s] - %(message)s')
+log_handler = logging.StreamHandler()
+log_handler.setFormatter(log_formatter)
+root_logger = logging.getLogger()
+root_logger.handlers = [log_handler]
+root_logger.setLevel(logging.INFO)
+# --- END OF LOGGING FIX ---
 
 class ContextAdapter(logging.LoggerAdapter):
     def process(self, msg, kwargs):
@@ -199,20 +217,16 @@ def load_settings():
         else:
             bot_data.settings.setdefault(key, value)
     
-    # After loading and ensuring all keys are present, determine the preset name
     determine_active_preset()
-    save_settings() # Save back in case new default keys were added
+    save_settings()
     logger.info(f"Settings loaded. Active preset identified as: {bot_data.active_preset_name}")
 
 def determine_active_preset():
-    """Compares current settings against presets to find a match."""
     found_preset = False
-    # Create a copy of current settings, excluding the customizable scanner list for comparison
-    current_settings_for_compare = {k: v for k, v in bot_data.settings.items() if k != 'active_scanners'}
+    current_settings_for_compare = {k: v for k, v in bot_data.settings.items()}
     
     for name, preset_settings in SETTINGS_PRESETS.items():
-        preset_for_compare = {k: v for k, v in preset_settings.items() if k != 'active_scanners'}
-        if current_settings_for_compare == preset_for_compare:
+        if current_settings_for_compare == preset_settings:
             bot_data.active_preset_name = PRESET_NAMES_AR.get(name, "مخصص")
             found_preset = True
             break
@@ -274,6 +288,7 @@ async def log_pending_trade_to_db(signal, buy_order):
 # =======================================================================================
 # --- 🧠 Mastermind Brain (Analysis & Mood) 🧠 ---
 # =======================================================================================
+# ... (rest of the analysis functions remain unchanged)
 async def translate_text_gemini(text_list):
     if not GEMINI_API_KEY:
         logger.warning("GEMINI_API_KEY not found in .env file. Skipping translation.")
@@ -418,6 +433,7 @@ SCANNERS = {
 
 # =======================================================================================
 # --- 🚀 Hybrid Core Protocol (Execution & Management) 🚀 ---
+# ... (All protocol and management functions remain unchanged from v28.2)
 # =======================================================================================
 async def activate_trade(order_id, symbol, filled_price):
     bot = bot_data.application.bot
@@ -927,7 +943,7 @@ async def check_time_sync(context: ContextTypes.DEFAULT_TYPE):
 # =======================================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["الإعدادات ⚙️"]]
-    await update.message.reply_text("أهلاً بك في OKX Mastermind Trader v28.3", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    await update.message.reply_text("أهلاً بك في OKX Mastermind Trader v28.4", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not bot_data.trading_enabled:
@@ -1250,6 +1266,9 @@ async def show_diagnostics_command(update: Update, context: ContextTypes.DEFAULT
     s = bot_data.settings
     scan_info = bot_data.last_scan_info
 
+    # Make sure the preset name is up-to-date before showing it
+    determine_active_preset()
+
     nltk_status = "متاحة ✅" if NLTK_AVAILABLE else "غير متاحة ❌"
 
     scan_time = scan_info.get("start_time", "لم يتم بعد")
@@ -1295,6 +1314,7 @@ async def show_diagnostics_command(update: Update, context: ContextTypes.DEFAULT
     await safe_edit_message(query, report, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 تحديث", callback_data="db_diagnostics")], [InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")]]))
 
 # --- Settings UI ---
+# ... (Settings UI functions remain unchanged from v28.3, except for handle_preset_set)
 async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🎛️ تعديل المعايير المتقدمة", callback_data="settings_params")],
@@ -1413,30 +1433,31 @@ async def handle_scanner_toggle(update: Update, context: ContextTypes.DEFAULT_TY
     else:
         active_scanners.append(scanner_key)
     
-    # Any manual toggle makes the preset "Custom"
-    bot_data.active_preset_name = "مخصص"
     save_settings()
+    determine_active_preset() # Re-evaluate preset status after change
     await query.answer(f"{STRATEGY_NAMES_AR[scanner_key]} {'تم تفعيله' if scanner_key in active_scanners else 'تم تعطيله'}")
     await show_scanners_menu(update, context)
 
-# --- PRESET LOGIC FIX ---
+# --- ROBUST PRESET LOGIC ---
 async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     preset_key = query.data.split('_')[-1]
     
     if preset_settings := SETTINGS_PRESETS.get(preset_key):
-        # Merge the preset settings into the current settings
-        # This preserves customizations like the active scanner list
-        for key, value in preset_settings.items():
-            if key != 'active_scanners': # Don't overwrite scanner toggles
-                 bot_data.settings[key] = value
+        # Preserve the user's scanner customization
+        current_scanners = bot_data.settings.get('active_scanners', [])
         
-        # After applying, the state is effectively custom, reflecting the merge
-        bot_data.active_preset_name = "مخصص"
+        # Perform a clean overwrite with a deep copy of the chosen preset
+        bot_data.settings = copy.deepcopy(preset_settings)
+        
+        # Re-apply the user's scanner customization
+        bot_data.settings['active_scanners'] = current_scanners
+        
+        # Now, determine the *actual* active preset name based on the final state
+        determine_active_preset() 
         save_settings()
-        determine_active_preset() # Re-evaluate to see if it matches another preset perfectly now
         
-        await query.answer(f"تم دمج إعدادات نمط '{PRESET_NAMES_AR.get(preset_key)}'!")
+        await query.answer(f"نمط '{PRESET_NAMES_AR.get(preset_key)}' تم تطبيقه. الحالة الحالية: '{bot_data.active_preset_name}'")
         await show_settings_menu(update, context)
     else:
         await query.answer("لم يتم العثور على النمط.")
@@ -1453,8 +1474,8 @@ async def handle_toggle_parameter(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     param_key = query.data.replace("param_toggle_", "")
     bot_data.settings[param_key] = not bot_data.settings.get(param_key, False)
-    bot_data.active_preset_name = "مخصص"
     save_settings()
+    determine_active_preset()
     await show_parameters_menu(update, context)
 
 async def handle_blacklist_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1485,8 +1506,8 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
                 await update.message.reply_text(f"⚠️ العملة `{symbol}` غير موجودة في القائمة.")
 
         bot_data.settings['asset_blacklist'] = blacklist
-        bot_data.active_preset_name = "مخصص"
         save_settings()
+        determine_active_preset()
         await show_blacklist_menu(Update(update.update_id, callback_query=type('Query', (), {'message': update.message, 'data': 'settings_blacklist', 'edit_message_text': (lambda *args, **kwargs: None), 'answer': (lambda *args, **kwargs: None)})()), context)
 
         return
@@ -1499,8 +1520,8 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
         else: new_value = float(user_input)
 
         bot_data.settings[setting_key] = new_value
-        bot_data.active_preset_name = "مخصص"
         save_settings()
+        determine_active_preset()
         await update.message.reply_text(f"✅ تم تحديث `{setting_key}` إلى `{new_value}`.")
     except (ValueError, KeyError):
         await update.message.reply_text("❌ قيمة غير صالحة. الرجاء إرسال رقم.")
@@ -1583,7 +1604,7 @@ async def post_init(application: Application):
 
     logger.info(f"Scanner scheduled for every {SCAN_INTERVAL_SECONDS}s. Supervisor will audit every {SUPERVISOR_INTERVAL_SECONDS}s.")
     try:
-        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🚀 OKX Mastermind Trader v28.3 بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🚀 OKX Mastermind Trader v28.4 بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden:
         logger.critical(f"FATAL: Bot is not authorized for chat ID {TELEGRAM_CHAT_ID}.")
         return
@@ -1594,7 +1615,7 @@ async def post_shutdown(application: Application):
     logger.info("Bot has shut down.")
 
 def main():
-    logger.info("--- Starting OKX Mastermind Trader v28.3 ---")
+    logger.info("--- Starting OKX Mastermind Trader v28.4 ---")
     load_settings(); asyncio.run(init_database())
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
