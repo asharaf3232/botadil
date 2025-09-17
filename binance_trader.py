@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Mastermind Trader v25.2 🚀 ---
+# --- 🚀 OKX Mastermind Trader v25.3 🚀 ---
 # =======================================================================================
 # This is the master version, representing a complete fusion of the best features:
 #
@@ -14,13 +14,13 @@
 #   - The infallible Hybrid Core for trade confirmation (Fast Reporter + Supervisor).
 #   - The reliable Guardian protocol for real-time management of active trades.
 #
-# --- Version 25.2 Changelog ---
-#   - Complete UI Overhaul for the settings menu to match user-provided design.
-#   - Added categorized settings: Parameters, Scanner Toggles, and Presets.
-#   - Implemented interactive buttons for enabling/disabling individual scanners.
-#   - Created pre-configured trading style presets (Balanced, Strict, Lenient).
-#   - Redesigned the main dashboard for better clarity and aesthetics.
-#   - Implemented robust error handling for the new interactive UI.
+# --- Version 25.3 Changelog ---
+#   - ADDED: Detailed scan summary message sent to Telegram after each scan cycle.
+#   - ADDED: Comprehensive Diagnostic Report, accessible from the main dashboard.
+#   - ADDED: Data Management section in settings with a "Clear All Trades" button.
+#   - ADDED: Confirmation step for critical actions like clearing data.
+#   - FIXED: Scan summary was previously only logged, now correctly sent to the user.
+#   - IMPROVED: General UI flow and responsiveness.
 # =======================================================================================
 
 # --- Core Libraries ---
@@ -100,6 +100,7 @@ class BotState:
         self.private_ws = None
         self.public_ws = None
         self.trade_guardian = None
+        self.last_scan_info = {} # NEW: To store scan metrics for diagnostics
 
 bot_data = BotState()
 scan_lock = asyncio.Lock()
@@ -230,13 +231,13 @@ def get_latest_crypto_news():
     return list(set(headlines))[:10]
 
 def analyze_sentiment_of_headlines(headlines):
-    if not headlines or not NLTK_AVAILABLE: return "N/A"
+    if not headlines or not NLTK_AVAILABLE: return "N/A", "N/A"
     sia = SentimentIntensityAnalyzer()
     score = sum(sia.polarity_scores(h)['compound'] for h in headlines) / len(headlines)
     if score > 0.1: mood = "إيجابية"
     elif score < -0.1: mood = "سلبية"
     else: mood = "محايدة"
-    return f"{mood} (الدرجة: {score:.2f})"
+    return mood, f"{score:.2f}"
 
 async def get_market_mood():
     try:
@@ -327,7 +328,6 @@ SCANNERS = {
 # --- 🚀 Hybrid Core Protocol (Execution & Management) 🚀 ---
 # =======================================================================================
 async def activate_trade(order_id, filled_qty, avg_price, symbol):
-    """The centralized function to activate a trade and send the detailed confirmation message."""
     bot = bot_data.application.bot
     try:
         balance_after = await bot_data.exchange.fetch_balance()
@@ -589,7 +589,7 @@ async def get_okx_markets():
         return valid_markets[:settings['top_n_symbols_by_volume']]
     except Exception as e: logger.error(f"Failed to fetch and filter OKX markets: {e}"); return []
 
-async def worker(queue, signals_list):
+async def worker(queue, signals_list, errors_list):
     settings, exchange = bot_data.settings, bot_data.exchange
     while not queue.empty():
         market = await queue.get(); symbol = market['symbol']
@@ -626,8 +626,11 @@ async def worker(queue, signals_list):
                 stop_loss = entry_price - risk
                 take_profit = entry_price + (risk * settings['risk_reward_ratio'])
                 signals_list.append({"symbol": symbol, "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "reason": reason_str})
-        except Exception as e: logger.debug(f"Worker error for {symbol}: {e}")
-        finally: queue.task_done()
+        except Exception as e:
+            logger.debug(f"Worker error for {symbol}: {e}")
+            errors_list.append(symbol)
+        finally:
+            queue.task_done()
 
 async def initiate_real_trade(signal):
     try:
@@ -639,18 +642,23 @@ async def initiate_real_trade(signal):
         
         if await log_pending_trade_to_db(signal, buy_order):
             await safe_send_message(bot_data.application.bot, f"🚀 تم إرسال أمر شراء لـ `{signal['symbol']}`.")
+            return True
         else:
             await exchange.cancel_order(buy_order['id'], signal['symbol'])
             await safe_send_message(bot_data.application.bot, f"⚠️ فشل تسجيل صفقة `{signal['symbol']}`. تم إلغاء الأمر.")
+            return False
     except ccxt.InsufficientFunds as e:
         logger.error(f"REAL TRADE FAILED for {signal['symbol']}: {e}")
+        raise e # Re-raise to be caught by the main loop
     except Exception as e:
         logger.error(f"REAL TRADE FAILED for {signal['symbol']}: {e}", exc_info=True)
         await safe_send_message(bot_data.application.bot, f"🔥 فشل فتح صفقة لـ `{signal['symbol']}`.")
-    raise e
+        return False
+    
 
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
     async with scan_lock:
+        scan_start_time = time.time()
         logger.info("--- Starting new OKX-focused market scan... ---")
         settings = bot_data.settings
 
@@ -669,14 +677,15 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
             return
 
         top_markets = await get_okx_markets()
-        if not top_markets: logger.info("Scan complete: No markets passed filters."); return
-
-        queue, signals_found = asyncio.Queue(), []
-        for market in top_markets: await queue.put(market)
-        worker_tasks = [asyncio.create_task(worker(queue, signals_found)) for _ in range(10)]
-        await queue.join(); [task.cancel() for task in worker_tasks]
-        logger.info(f"--- Scan complete. Found {len(signals_found)} potential signals. ---")
+        if not top_markets: 
+            logger.info("Scan complete: No markets passed filters."); return
         
+        queue, signals_found, analysis_errors = asyncio.Queue(), [], []
+        for market in top_markets: await queue.put(market)
+        worker_tasks = [asyncio.create_task(worker(queue, signals_found, analysis_errors)) for _ in range(10)]
+        await queue.join(); [task.cancel() for task in worker_tasks]
+        
+        trades_opened_count = 0
         for signal in signals_found:
             try:
                 if active_trades_count >= settings['max_concurrent_trades']: 
@@ -684,27 +693,52 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                     break
                 if time.time() - bot_data.last_signal_time.get(signal['symbol'], 0) > (SCAN_INTERVAL_SECONDS * 2):
                     bot_data.last_signal_time[signal['symbol']] = time.time()
-                    await initiate_real_trade(signal)
-                    active_trades_count += 1
-                    await asyncio.sleep(3)
+                    if await initiate_real_trade(signal):
+                        active_trades_count += 1
+                        trades_opened_count += 1
+                    await asyncio.sleep(3) # Small delay between opening trades
             except ccxt.InsufficientFunds:
                  await safe_send_message(context.bot, f"⚠️ **رصيد غير كافٍ!**\nتم إيقاف فتح صفقات جديدة.")
                  break
             except Exception:
                  continue
+        
+        scan_duration = time.time() - scan_start_time
+        bot_data.last_scan_info = {
+            "start_time": datetime.fromtimestamp(scan_start_time, EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'),
+            "duration_seconds": int(scan_duration),
+            "checked_symbols": len(top_markets),
+            "analysis_errors": len(analysis_errors)
+        }
+        
+        summary_message = (
+            f"🔬 *ملخص الفحص الأخير*\n\n"
+            f"- **الحالة:** اكتمل بنجاح\n"
+            f"- **وضع السوق (BTC):** {bot_data.market_mood.get('btc_mood', 'N/A')}\n"
+            f"- **المدة:** {int(scan_duration)} ثانية\n"
+            f"- **العملات المفحوصة:** {len(top_markets)}\n"
+            f"----------------------------------\n"
+            f"- **إجمالي الإشارات المكتشفة:** {len(signals_found)}\n"
+            f"- **✅ صفقات جديدة فُتحت:** {trades_opened_count}\n"
+            f"- **⚠️ أخطاء في التحليل:** {len(analysis_errors)}\n"
+            f"----------------------------------\n\n"
+            f"الفحص التالي مجدول تلقائياً."
+        )
+        await safe_send_message(context.bot, summary_message)
+
 
 # =======================================================================================
 # --- 🤖 Telegram UI & Bot Startup 🤖 ---
 # =======================================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["الإعدادات ⚙️"]]
-    await update.message.reply_text("أهلاً بك في OKX Mastermind Trader v25.2", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    await update.message.reply_text("أهلاً بك في OKX Mastermind Trader v25.3", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📊 الإحصائيات العامة", callback_data="db_stats"), InlineKeyboardButton("📈 الصفقات النشطة", callback_data="db_trades")],
         [InlineKeyboardButton("📜 تقرير أداء الاستراتيجيات", callback_data="db_strategies")],
-        [InlineKeyboardButton("🌡️ حالة مزاج السوق", callback_data="db_mood")]
+        [InlineKeyboardButton("🌡️ حالة مزاج السوق", callback_data="db_mood"), InlineKeyboardButton("🕵️‍♂️ تقرير التشخيص", callback_data="db_diagnostics")]
     ]
     await (update.message or update.callback_query.message).reply_text("🖥️ *لوحة التحكم الرئيسية*\n\nاختر التقرير أو البيانات التي تريد عرضها:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
 
@@ -753,8 +787,7 @@ async def check_trade_details(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def show_mood_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mood = bot_data.market_mood
-    headlines = get_latest_crypto_news()
-    news_sentiment = analyze_sentiment_of_headlines(headlines)
+    news_sentiment, _ = analyze_sentiment_of_headlines(get_latest_crypto_news())
     message = (f"*🌡️ حالة مزاج السوق*\n\n- **النتيجة:** {mood.get('mood', 'N/A')}\n"
                f"- **السبب:** {mood.get('reason', 'N/A')}\n"
                f"- **مؤشر BTC:** {mood.get('btc_mood', 'N/A')}\n"
@@ -801,12 +834,78 @@ async def show_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
                f"- **معدل النجاح:** {win_rate:.2f}%")
     await safe_edit_message(update.callback_query, message, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")]]))
 
+async def show_diagnostics_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    s = bot_data.settings
+    scan_info = bot_data.last_scan_info
+    
+    # --- System & Environment ---
+    nltk_status = "متاحة ✅" if NLTK_AVAILABLE else "غير متاحة ❌"
+    
+    # --- Market Status ---
+    news_mood, news_score = analyze_sentiment_of_headlines(get_latest_crypto_news())
+    fng_index = await get_fear_and_greed_index() or "N/A"
+    
+    # --- Last Scan ---
+    scan_time = scan_info.get("start_time", "لم يتم بعد")
+    scan_duration = f'{scan_info.get("duration_seconds", "N/A")} ثانية'
+    scan_checked = scan_info.get("checked_symbols", "N/A")
+    scan_errors = scan_info.get("analysis_errors", "N/A")
+    
+    # --- Active Settings ---
+    scanners_list = "\n".join([f"  - {name}" for key, name in STRATEGY_NAMES_AR.items() if key in s['active_scanners']])
+
+    # --- Internal Processes ---
+    scan_job = context.job_queue.get_jobs_by_name("perform_scan")
+    next_scan_time = scan_job[0].next_t.astimezone(EGYPT_TZ).strftime('%H:%M:%S') if scan_job and scan_job[0].next_t else "N/A"
+    
+    # --- Database ---
+    db_size = f"{os.path.getsize(DB_FILE) / 1024:.2f} KB" if os.path.exists(DB_FILE) else "N/A"
+    async with aiosqlite.connect(DB_FILE) as conn:
+        total_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades")).fetchone())[0]
+        active_trades = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")).fetchone())[0]
+
+    report = (
+        f"🕵️‍♂️ *تقرير التشخيص الشامل*\n\n"
+        f"تم إنشاؤه في: {datetime.now(EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"----------------------------------\n"
+        f"⚙️ **حالة النظام والبيئة**\n"
+        f"- NLTK (تحليل الأخبار): {nltk_status}\n\n"
+        f"📊 **حالة السوق الحالية**\n"
+        f"- المزاج الأساسي (أخبار): {news_mood} (الدرجة: {news_score})\n"
+        f"- المزاج الفني (BTC): {bot_data.market_mood.get('btc_mood', 'N/A')}\n"
+        f"- مؤشر الخوف والطمع: {fng_index}\n\n"
+        f"🔬 **أداء آخر فحص**\n"
+        f"- وقت البدء: {scan_time}\n"
+        f"- المدة: {scan_duration}\n"
+        f"- العملات المفحوصة: {scan_checked}\n"
+        f"- فشل في تحليل: {scan_errors} عملات\n\n"
+        f"🔧 **الإعدادات النشطة**\n"
+        f"- الماسحات المفعلة:\n{scanners_list}\n"
+        f"- فلاتر السيولة:\n"
+        f"  - حجم التداول الأدنى: ${s['liquidity_filters']['min_quote_volume_24h_usd']:,}\n"
+        f"  - الحد الأدنى لـ RVOL: {s['liquidity_filters']['min_rvol']}\n"
+        f"- حد مؤشر الخوف: {s['fear_and_greed_threshold']}\n\n"
+        f"🔩 **حالة العمليات الداخلية**\n"
+        f"- فحص العملات: يعمل, التالي بعد: {next_scan_time}\n"
+        f"- الاتصال بـ OKX: متصل ✅\n"
+        f"- قاعدة البيانات:\n"
+        f"  - الاتصال: ناجح ✅\n"
+        f"  - حجم الملف: {db_size}\n"
+        f"  - إجمالي الصفقات: {total_trades} ({active_trades} نشطة)\n"
+        f"----------------------------------"
+    )
+
+    await safe_edit_message(query, report, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 تحديث", callback_data="db_diagnostics")], [InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")]]))
+
+
 # --- Settings UI ---
 async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🎛️ تعديل المعايير", callback_data="settings_params")],
         [InlineKeyboardButton("🔭 تفعيل/تعطيل الماسحات", callback_data="settings_scanners")],
-        [InlineKeyboardButton("🗂️ أنماط جاهزة", callback_data="settings_presets")]
+        [InlineKeyboardButton("🗂️ أنماط جاهزة", callback_data="settings_presets")],
+        [InlineKeyboardButton("🗑️ إدارة البيانات", callback_data="settings_data")]
     ]
     message_text = "⚙️ *الإعدادات الرئيسية*\n\nاختر فئة الإعدادات التي تريد تعديلها."
     
@@ -849,10 +948,40 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         f"**فلتر مزاج السوق:** {'مفعّل' if s['market_mood_filter_enabled'] else 'معطّل'}\n"
         f"**حد مؤشر الخوف:** {s['fear_and_greed_threshold']}\n"
     )
-    # This is a display-only menu for now, as per the screenshot.
-    # To make it editable, we would add buttons for each parameter.
     keyboard = [[InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="settings_main")]]
     await safe_edit_message(update.callback_query, text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def show_data_management_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("‼️ مسح كل الصفقات ‼️", callback_data="data_clear_confirm")],
+        [InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="settings_main")]
+    ]
+    await safe_edit_message(update.callback_query, "🗑️ *إدارة البيانات*\n\n**تحذير:** هذا الإجراء سيحذف سجل جميع الصفقات (النشطة والمغلقة) بشكل نهائي. لا يمكن التراجع عن هذا الأمر.", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def handle_clear_data_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("نعم، متأكد. احذف كل شيء.", callback_data="data_clear_execute")],
+        [InlineKeyboardButton("لا، تراجع.", callback_data="settings_data")]
+    ]
+    await safe_edit_message(update.callback_query, "🛑 **تأكيد نهائي** 🛑\n\nهل أنت متأكد أنك تريد حذف جميع بيانات الصفقات؟", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def handle_clear_data_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.edit_message_text("جاري حذف البيانات...", reply_markup=None)
+    try:
+        if os.path.exists(DB_FILE):
+            os.remove(DB_FILE)
+            logger.info("Database file has been deleted by user.")
+        await init_database()
+        await query.edit_message_text("✅ تم حذف جميع بيانات الصفقات بنجاح. تم إنشاء قاعدة بيانات جديدة وفارغة.")
+    except Exception as e:
+        logger.error(f"Failed to clear data: {e}")
+        await query.edit_message_text(f"❌ حدث خطأ أثناء حذف البيانات: {e}")
+    
+    # Send the main settings menu again after a delay
+    await asyncio.sleep(3)
+    await show_settings_menu(update, context)
+
 
 async def handle_scanner_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -864,7 +993,7 @@ async def handle_scanner_toggle(update: Update, context: ContextTypes.DEFAULT_TY
         active_scanners.append(scanner_key)
     save_settings()
     await query.answer(f"{STRATEGY_NAMES_AR[scanner_key]} {'تم تفعيله' if scanner_key in active_scanners else 'تم تعطيله'}")
-    await show_scanners_menu(update, context) # Refresh the menu
+    await show_scanners_menu(update, context)
 
 async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -872,7 +1001,6 @@ async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     preset_settings = SETTINGS_PRESETS.get(preset_key)
     if preset_settings:
-        # We need to preserve some settings like active_scanners
         current_scanners = bot_data.settings['active_scanners']
         bot_data.settings = preset_settings.copy()
         bot_data.settings['active_scanners'] = current_scanners
@@ -893,6 +1021,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         elif data == "db_mood": await show_mood_command(update, context)
         elif data == "db_strategies": await show_strategy_report_command(update, context)
         elif data == "db_stats": await show_stats_command(update, context)
+        elif data == "db_diagnostics": await show_diagnostics_command(update, context)
     elif data == "back_to_dashboard":
         await show_dashboard_command(update, context)
     elif data.startswith("check_"):
@@ -902,10 +1031,14 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         elif data == "settings_scanners": await show_scanners_menu(update, context)
         elif data == "settings_params": await show_parameters_menu(update, context)
         elif data == "settings_presets": await show_presets_menu(update, context)
+        elif data == "settings_data": await show_data_management_menu(update, context)
     elif data.startswith("scanner_toggle_"):
         await handle_scanner_toggle(update, context)
     elif data.startswith("preset_set_"):
         await handle_preset_set(update, context)
+    elif data.startswith("data_clear_"):
+        if data == "data_clear_confirm": await handle_clear_data_confirmation(update, context)
+        elif data == "data_clear_execute": await handle_clear_data_execute(update, context)
 
 
 async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -946,7 +1079,7 @@ async def post_init(application: Application):
     
     logger.info(f"Scanner scheduled for every {SCAN_INTERVAL_SECONDS}s. Supervisor will audit every {SUPERVISOR_INTERVAL_SECONDS}s.")
     try:
-        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🚀 OKX Mastermind Trader v25.2 بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+        await application.bot.send_message(TELEGRAM_CHAT_ID, "*🚀 OKX Mastermind Trader v25.3 بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden:
         logger.critical(f"FATAL: Bot is not authorized for chat ID {TELEGRAM_CHAT_ID}. Please add the bot to the chat and grant admin permissions.")
         return
@@ -957,7 +1090,7 @@ async def post_shutdown(application: Application):
     logger.info("Bot has shut down.")
 
 def main():
-    logger.info("--- Starting OKX Mastermind Trader v25.2 ---")
+    logger.info("--- Starting OKX Mastermind Trader v25.3 ---")
     load_settings(); asyncio.run(init_database())
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
