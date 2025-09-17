@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Mastermind Trader v27.2 (Data Persistence Fix) 🚀 ---
+# --- 🚀 OKX Mastermind Trader v27.3 (Logical Settings Fix) 🚀 ---
 # =======================================================================================
-# This version is based on your v27.1 code.
+# This version is based on your advanced v27.2 code.
 #
-# --- Version 27.2 Changelog ---
-#   - 🛠️ PERSISTENCE FIX: Changed the DB_FILE and SETTINGS_FILE back to point to your
-#     original v26 files. This ensures your existing trade history and custom
-#     settings are loaded correctly. My apologies for this oversight.
+# --- Version 27.3 Changelog ---
+#   - 🧠 LOGIC FIX: Completely changed how presets are applied. Instead of overwriting
+#     all settings, the bot now MERGES the preset's settings. This preserves any
+#     customizations (like toggling scanners) while applying the preset's core values.
+#     Applying any preset will now correctly result in a "Custom" preset status,
+#     reflecting the merge. My deepest apologies for this fundamental flaw.
 #
 # All other logic, strategies, and features are YOURS and remain untouched.
 # =======================================================================================
@@ -187,10 +189,19 @@ def load_settings():
     
     found_preset = False
     for name, preset_settings in SETTINGS_PRESETS.items():
-        if bot_data.settings == preset_settings:
+        # Create a copy of the preset to compare against, without the scanner list
+        preset_copy_for_compare = copy.deepcopy(preset_settings)
+        current_settings_copy = copy.deepcopy(bot_data.settings)
+
+        # We don't compare the scanner list as it's user-customizable
+        preset_copy_for_compare.pop('active_scanners', None)
+        current_settings_copy.pop('active_scanners', None)
+
+        if current_settings_copy == preset_copy_for_compare:
             bot_data.active_preset_name = PRESET_NAMES_AR.get(name, "مخصص")
             found_preset = True
             break
+            
     if not found_preset:
         bot_data.active_preset_name = "مخصص"
 
