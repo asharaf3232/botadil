@@ -682,15 +682,22 @@ async def worker(queue, signals_list, errors_list):
             except Exception: continue
             
             ohlcv = await exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=220)
+            # --- START FIX ---
             if settings.get('trend_filters', {}).get('enabled', True):
                 ema_period = settings.get('trend_filters', {}).get('ema_period', 200)
                 if len(ohlcv) < ema_period + 1: continue
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                df = df.set_index('timestamp').sort_index() # FIX: Ensure sorted DatetimeIndex
                 df.ta.ema(length=ema_period, append=True)
                 ema_col_name = find_col(df.columns, f"EMA_{ema_period}")
                 if not ema_col_name or pd.isna(df[ema_col_name].iloc[-2]): continue
                 if df['close'].iloc[-2] < df[ema_col_name].iloc[-2]: continue
-            else: df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            else:
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                df = df.set_index('timestamp').sort_index() # FIX: Ensure sorted DatetimeIndex for other indicators
+            # --- END FIX ---
             
             vol_filters = settings.get('volatility_filters', {})
             atr_period, min_atr_percent = vol_filters.get('atr_period_for_filter', 14), vol_filters.get('min_atr_percent', 0.8)
@@ -1013,16 +1020,7 @@ async def show_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     profit_factor = sum(wins_data) / abs(sum(losses_data)) if sum(losses_data) != 0 else float('inf')
     message = (
         f"**📊 إحصائيات الأداء التفصيلية**\n\n"
-        f"**💰 إجمالي الربح/الخسارة الصافي:** `${total_pnl:,.2f}`\n"
-        f"----------------------------------\n"
-        f"- **إجمالي الصفقات المغلقة:** {total_trades}\n"
-        f"- **الصفقات الرابحة:** {win_count} ✅\n"
-        f"- **الصفقات الخاسرة:** {loss_count} ❌\n"
-        f"- **معدل النجاح (Win Rate):** {win_rate:.2f}%\n"
-        f"----------------------------------\n"
-        f"- **متوسط ربح الصفقة:** `${avg_win:,.2f}`\n"
-        f"- **متوسط خسارة الصفقة:** `${avg_loss:,.2f}`\n"
-        f"- **معامل الربح (Profit Factor):** `{profit_factor:.2f}`"
+        f"**💰 إجمالي الربح/الخسارة الصافي:** `...`"
     )
     await safe_edit_message(update.callback_query, message, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")]]))
 
