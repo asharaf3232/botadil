@@ -186,18 +186,32 @@ SETTINGS_PRESETS = {
 # --- Helper, Settings & DB Management ---
 # =======================================================================================
 def load_settings():
+    loaded_data = {}
     try:
         if os.path.exists(SETTINGS_FILE):
-            with open(SETTINGS_FILE, 'r') as f: bot_data.settings = json.load(f)
-        else: bot_data.settings = copy.deepcopy(DEFAULT_SETTINGS)
-    except Exception: bot_data.settings = copy.deepcopy(DEFAULT_SETTINGS)
+            with open(SETTINGS_FILE, 'r') as f:
+                loaded_data = json.load(f)
+    except Exception:
+        pass  # If file is corrupt or empty, loaded_data remains {}
+
+    # 1. نستخرج اسم النمط المحفوظ. إذا لم يكن موجوداً، نستخدم "مخصص"
+    bot_data.active_preset_name = loaded_data.pop('_preset_name', 'مخصص')
+
+    # 2. نستخدم بقية البيانات كإعدادات للبوت
+    bot_data.settings = loaded_data
+
+    # 3. نضمن أن كل الإعدادات الافتراضية موجودة (للتوافق مع التحديثات المستقبلية)
     default_copy = copy.deepcopy(DEFAULT_SETTINGS)
     for key, value in default_copy.items():
         if isinstance(value, dict):
-            if key not in bot_data.settings or not isinstance(bot_data.settings[key], dict): bot_data.settings[key] = {}
-            for sub_key, sub_value in value.items(): bot_data.settings[key].setdefault(sub_key, sub_value)
-        else: bot_data.settings.setdefault(key, value)
-    # determine_active_preset() # ❌ تم حذف هذا السطر
+            if key not in bot_data.settings or not isinstance(bot_data.settings[key], dict):
+                bot_data.settings[key] = {}
+            for sub_key, sub_value in value.items():
+                bot_data.settings[key].setdefault(sub_key, sub_value)
+        else:
+            bot_data.settings.setdefault(key, value)
+
+    # 4. نحفظ الإعدادات للتأكد من أن الملف محدث دائماً
     save_settings()
     logger.info(f"Settings loaded. Active preset: {bot_data.active_preset_name}")
     
@@ -209,8 +223,6 @@ def determine_active_preset():
     bot_data.active_preset_name = "مخصص"
 
 def save_settings():
-    with open(SETTINGS_FILE, 'w') as f: json.dump(bot_data.settings, f, indent=4)
-
 async def safe_send_message(bot, text, **kwargs):
     try: await bot.send_message(TELEGRAM_CHAT_ID, text, parse_mode=ParseMode.MARKDOWN, **kwargs)
     except Exception as e: logger.error(f"Telegram Send Error: {e}")
