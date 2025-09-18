@@ -186,49 +186,33 @@ SETTINGS_PRESETS = {
 # --- Helper, Settings & DB Management ---
 # =======================================================================================
 def load_settings():
-    loaded_data = {}
     try:
         if os.path.exists(SETTINGS_FILE):
-            with open(SETTINGS_FILE, 'r') as f:
-                loaded_data = json.load(f)
-    except Exception:
-        pass  # If file is corrupt or empty, loaded_data remains {}
-
-    # 1. نستخرج اسم النمط المحفوظ. إذا لم يكن موجوداً، نستخدم "مخصص"
-    bot_data.active_preset_name = loaded_data.pop('_preset_name', 'مخصص')
-
-    # 2. نستخدم بقية البيانات كإعدادات للبوت
-    bot_data.settings = loaded_data
-
-    # 3. نضمن أن كل الإعدادات الافتراضية موجودة (للتوافق مع التحديثات المستقبلية)
+            with open(SETTINGS_FILE, 'r') as f: bot_data.settings = json.load(f)
+        else: bot_data.settings = copy.deepcopy(DEFAULT_SETTINGS)
+    except Exception: bot_data.settings = copy.deepcopy(DEFAULT_SETTINGS)
     default_copy = copy.deepcopy(DEFAULT_SETTINGS)
     for key, value in default_copy.items():
         if isinstance(value, dict):
-            if key not in bot_data.settings or not isinstance(bot_data.settings[key], dict):
-                bot_data.settings[key] = {}
-            for sub_key, sub_value in value.items():
-                bot_data.settings[key].setdefault(sub_key, sub_value)
-        else:
-            bot_data.settings.setdefault(key, value)
-
-    # 4. نحفظ الإعدادات للتأكد من أن الملف محدث دائماً
-    save_settings()
+            if key not in bot_data.settings or not isinstance(bot_data.settings[key], dict): bot_data.settings[key] = {}
+            for sub_key, sub_value in value.items(): bot_data.settings[key].setdefault(sub_key, sub_value)
+        else: bot_data.settings.setdefault(key, value)
+    determine_active_preset(); save_settings()
     logger.info(f"Settings loaded. Active preset: {bot_data.active_preset_name}")
 
-# --- تم إصلاح هذه الدالة ---
-def save_settings():
-    settings_to_save = copy.deepcopy(bot_data.settings)
-    # إضافة اسم النمط إلى البيانات المحفوظة
-    settings_to_save['_preset_name'] = bot_data.active_preset_name
-    with open(SETTINGS_FILE, 'w') as f:
-        json.dump(settings_to_save, f, indent=4)
+def determine_active_preset():
+    current_settings_for_compare = copy.deepcopy(bot_data.settings)
+    for name, preset_settings in SETTINGS_PRESETS.items():
+        if current_settings_for_compare == preset_settings:
+            bot_data.active_preset_name = PRESET_NAMES_AR.get(name, "مخصص"); return
+    bot_data.active_preset_name = "مخصص"
 
-# --- تم حذف دالة determine_active_preset() القديمة ---
+def save_settings():
+    with open(SETTINGS_FILE, 'w') as f: json.dump(bot_data.settings, f, indent=4)
 
 async def safe_send_message(bot, text, **kwargs):
     try: await bot.send_message(TELEGRAM_CHAT_ID, text, parse_mode=ParseMode.MARKDOWN, **kwargs)
     except Exception as e: logger.error(f"Telegram Send Error: {e}")
-
 async def safe_edit_message(query, text, **kwargs):
     try: await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, **kwargs)
     except BadRequest as e:
@@ -1115,7 +1099,7 @@ async def show_trade_history_command(update: Update, context: ContextTypes.DEFAU
 async def show_diagnostics_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; s = bot_data.settings
     scan_info = bot_data.last_scan_info
-    # determine_active_preset() # ❌ تم حذف هذا السطر
+    determine_active_preset()
     nltk_status = "متاحة ✅" if NLTK_AVAILABLE else "غير متاحة ❌"
     scan_time = scan_info.get("start_time", "لم يتم بعد")
     scan_duration = f'{scan_info.get("duration_seconds", "N/A")} ثانية'
@@ -1153,7 +1137,7 @@ async def show_diagnostics_command(update: Update, context: ContextTypes.DEFAULT
         f"----------------------------------"
     )
     await safe_edit_message(query, report, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 تحديث", callback_data="db_diagnostics")], [InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")]]))
-    
+
 async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🎛️ تعديل المعايير المتقدمة", callback_data="settings_params")],
@@ -1266,30 +1250,20 @@ async def handle_scanner_toggle(update: Update, context: ContextTypes.DEFAULT_TY
         if len(active_scanners) > 1: active_scanners.remove(scanner_key)
         else: await query.answer("يجب تفعيل ماسح واحد على الأقل.", show_alert=True); return
     else: active_scanners.append(scanner_key)
-    save_settings()
-    bot_data.active_preset_name = "مخصص" # ✅ تم إضافة هذا السطر
+    save_settings(); determine_active_preset()
     await query.answer(f"{STRATEGY_NAMES_AR[scanner_key]} {'تم تفعيله' if scanner_key in active_scanners else 'تم تعطيله'}")
     await show_scanners_menu(update, context)
 
 async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    preset_key = query.data.split('_')[-1]
-    
+    query = update.callback_query; preset_key = query.data.split('_')[-1]
     if preset_settings := SETTINGS_PRESETS.get(preset_key):
-        # 1. نقوم بتطبيق النمط الجديد بالكامل
+        current_scanners = bot_data.settings.get('active_scanners', [])
         bot_data.settings = copy.deepcopy(preset_settings)
-        
-        # 2. نقوم بتخزين اسم النمط الجديد بشكل صريح ومباشر
-        bot_data.active_preset_name = PRESET_NAMES_AR.get(preset_key, "مخصص")
-        
-        # 3. نحفظ الإعدادات الجديدة
-        save_settings()
-        
-        # 4. الآن الرسالة ستعرض الاسم الصحيح دائمًا
-        await query.answer(f"نمط '{bot_data.active_preset_name}' تم تطبيقه بنجاح.")
+        bot_data.settings['active_scanners'] = current_scanners
+        determine_active_preset(); save_settings()
+        await query.answer(f"نمط '{PRESET_NAMES_AR.get(preset_key)}' تم تطبيقه. الحالة الحالية: '{bot_data.active_preset_name}'")
         await show_settings_menu(update, context)
-    else:
-        await query.answer("لم يتم العثور على النمط.")
+    else: await query.answer("لم يتم العثور على النمط.")
 
 async def handle_parameter_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; param_key = query.data.replace("param_set_", "")
@@ -1300,8 +1274,7 @@ async def handle_parameter_selection(update: Update, context: ContextTypes.DEFAU
 async def handle_toggle_parameter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; param_key = query.data.replace("param_toggle_", "")
     bot_data.settings[param_key] = not bot_data.settings.get(param_key, False)
-    save_settings()
-    bot_data.active_preset_name = "مخصص" # ✅ تم إضافة هذا السطر
+    save_settings(); determine_active_preset()
     await show_parameters_menu(update, context)
 
 async def handle_blacklist_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1320,17 +1293,14 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
         elif action == 'remove':
             if symbol in blacklist: blacklist.remove(symbol); await update.message.reply_text(f"✅ تم إزالة `{symbol}` من القائمة السوداء.")
             else: await update.message.reply_text(f"⚠️ العملة `{symbol}` غير موجودة في القائمة.")
-
-        # --- الترتيب الصحيح هنا ---
-        bot_data.settings['asset_blacklist'] = blacklist
-        bot_data.active_preset_name = "مخصص" # 1. نغير الاسم أولاً
-        save_settings()                     # 2. ثم نحفظ الإعدادات
-
+        bot_data.settings['asset_blacklist'] = blacklist; save_settings(); determine_active_preset()
         await show_blacklist_menu(Update(update.update_id, callback_query=type('Query', (), {'message': update.message, 'data': 'settings_blacklist', 'edit_message_text': (lambda *args, **kwargs: None), 'answer': (lambda *args, **kwargs: None)})()), context); return
 
     if not (setting_key := context.user_data.get('setting_to_change')): return
 
     try:
+        # --- START OF FIX ---
+        # First, check if the key is a top-level (simple) setting
         if setting_key in bot_data.settings:
             original_value = bot_data.settings[setting_key]
             if isinstance(original_value, int):
@@ -1338,6 +1308,7 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
             else:
                 new_value = float(user_input)
             bot_data.settings[setting_key] = new_value
+        # If not a top-level key, THEN treat it as a nested setting
         else:
             keys = setting_key.split('_'); current_dict = bot_data.settings
             for key in keys[:-1]:
@@ -1349,11 +1320,9 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
             else:
                 new_value = float(user_input)
             current_dict[last_key] = new_value
+        # --- END OF FIX ---
 
-        # --- الترتيب الصحيح هنا أيضًا ---
-        bot_data.active_preset_name = "مخصص" # 1. نغير الاسم أولاً
-        save_settings()                     # 2. ثم نحفظ الإعدادات
-
+        save_settings(); determine_active_preset()
         await update.message.reply_text(f"✅ تم تحديث `{setting_key}` إلى `{new_value}`.")
     except (ValueError, KeyError):
         await update.message.reply_text("❌ قيمة غير صالحة. الرجاء إرسال رقم.")
