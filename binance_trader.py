@@ -214,19 +214,21 @@ def load_settings():
     # 4. نحفظ الإعدادات للتأكد من أن الملف محدث دائماً
     save_settings()
     logger.info(f"Settings loaded. Active preset: {bot_data.active_preset_name}")
-    
-def determine_active_preset():
-    current_settings_for_compare = copy.deepcopy(bot_data.settings)
-    for name, preset_settings in SETTINGS_PRESETS.items():
-        if current_settings_for_compare == preset_settings:
-            bot_data.active_preset_name = PRESET_NAMES_AR.get(name, "مخصص"); return
-    bot_data.active_preset_name = "مخصص"
 
+# --- تم إصلاح هذه الدالة ---
 def save_settings():
-    
+    settings_to_save = copy.deepcopy(bot_data.settings)
+    # إضافة اسم النمط إلى البيانات المحفوظة
+    settings_to_save['_preset_name'] = bot_data.active_preset_name
+    with open(SETTINGS_FILE, 'w') as f:
+        json.dump(settings_to_save, f, indent=4)
+
+# --- تم حذف دالة determine_active_preset() القديمة ---
+
 async def safe_send_message(bot, text, **kwargs):
     try: await bot.send_message(TELEGRAM_CHAT_ID, text, parse_mode=ParseMode.MARKDOWN, **kwargs)
     except Exception as e: logger.error(f"Telegram Send Error: {e}")
+
 async def safe_edit_message(query, text, **kwargs):
     try: await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, **kwargs)
     except BadRequest as e:
