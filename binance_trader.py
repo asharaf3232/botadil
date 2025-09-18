@@ -1320,13 +1320,11 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
         elif action == 'remove':
             if symbol in blacklist: blacklist.remove(symbol); await update.message.reply_text(f"✅ تم إزالة `{symbol}` من القائمة السوداء.")
             else: await update.message.reply_text(f"⚠️ العملة `{symbol}` غير موجودة في القائمة.")
-        
-        # --- START OF FIX ---
+
+        # --- الترتيب الصحيح هنا ---
         bot_data.settings['asset_blacklist'] = blacklist
-        save_settings()
-        # determine_active_preset() # ❌ تم حذف هذا السطر الخطير
-        bot_data.active_preset_name = "مخصص" # Any change to blacklist makes it custom
-        # --- END OF FIX ---
+        bot_data.active_preset_name = "مخصص" # 1. نغير الاسم أولاً
+        save_settings()                     # 2. ثم نحفظ الإعدادات
 
         await show_blacklist_menu(Update(update.update_id, callback_query=type('Query', (), {'message': update.message, 'data': 'settings_blacklist', 'edit_message_text': (lambda *args, **kwargs: None), 'answer': (lambda *args, **kwargs: None)})()), context); return
 
@@ -1352,8 +1350,9 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
                 new_value = float(user_input)
             current_dict[last_key] = new_value
 
-        save_settings()
-        bot_data.active_preset_name = "مخصص"
+        # --- الترتيب الصحيح هنا أيضًا ---
+        bot_data.active_preset_name = "مخصص" # 1. نغير الاسم أولاً
+        save_settings()                     # 2. ثم نحفظ الإعدادات
 
         await update.message.reply_text(f"✅ تم تحديث `{setting_key}` إلى `{new_value}`.")
     except (ValueError, KeyError):
