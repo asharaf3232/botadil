@@ -179,9 +179,21 @@ SETTINGS_PRESETS = {
     "professional": copy.deepcopy(DEFAULT_SETTINGS),
     "strict": {**copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 3, "risk_reward_ratio": 2.5, "fear_and_greed_threshold": 40, "adx_filter_level": 28, "liquidity_filters": {"min_quote_volume_24h_usd": 2000000, "min_rvol": 2.0}},
     "lenient": {**copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 8, "risk_reward_ratio": 1.8, "fear_and_greed_threshold": 25, "adx_filter_level": 20, "liquidity_filters": {"min_quote_volume_24h_usd": 500000, "min_rvol": 1.2}},
-    "very_lenient": {**copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 12, "adx_filter_enabled": False, "market_mood_filter_enabled": False, "trend_filters": {"ema_period": 200, "htf_period": 50, "enabled": False}, "liquidity_filters": {"min_quote_volume_24h_usd": 250000, "min_rvol": 1.0}}
+    
+    # --- START OF FIX ---
+    "very_lenient": {
+        **copy.deepcopy(DEFAULT_SETTINGS), 
+        "max_concurrent_trades": 12, 
+        "adx_filter_enabled": False, 
+        "market_mood_filter_enabled": False, 
+        "trend_filters": {"ema_period": 200, "htf_period": 50, "enabled": False}, 
+        "liquidity_filters": {"min_quote_volume_24h_usd": 250000, "min_rvol": 1.0},
+        # تمت إضافة هذين السطرين لتعريف قيم خاصة بالنمط فائق التساهل
+        "volatility_filters": {"atr_period_for_filter": 14, "min_atr_percent": 0.4},
+        "spread_filter": {"max_spread_percent": 1.5}
+    }
+    # --- END OF FIX ---
 }
-
 # =======================================================================================
 # --- Helper, Settings & DB Management ---
 # =======================================================================================
