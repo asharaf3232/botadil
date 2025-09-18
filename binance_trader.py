@@ -1269,7 +1269,7 @@ async def handle_scanner_toggle(update: Update, context: ContextTypes.DEFAULT_TY
 async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     # استخلاص اسم النمط من بيانات الزر، مثال: "strict" من "preset_set_strict"
-    preset_key = query.data.split('_')[-1]
+    preset_key = query.data.replace("preset_set_", "")
 
     if preset_settings := SETTINGS_PRESETS.get(preset_key):
         # 1. تحديث الإعدادات بنفس المنطق السابق
