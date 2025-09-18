@@ -1268,26 +1268,53 @@ async def handle_scanner_toggle(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    preset_key = '_'.join(query.data.split('_')[2:])
-
-    # --- كاشف الأخطاء رقم 1 ---
-    logger.info(f"--- DEBUG: تم الضغط على زر النمط. القيمة المستلمة: '{preset_key}' ---")
+    # استخلاص اسم النمط من بيانات الزر، مثال: "strict" من "preset_set_strict"
+    preset_key = query.data.split('_')[-1]
 
     if preset_settings := SETTINGS_PRESETS.get(preset_key):
+        # 1. تحديث الإعدادات بنفس المنطق السابق
+        current_scanners = bot_data.settings.get('active_scanners', [])
         bot_data.settings = copy.deepcopy(preset_settings)
-
-        arabic_name = PRESET_NAMES_AR.get(preset_key, "مخصص")
-        # --- كاشف الأخطاء رقم 2 ---
-        logger.info(f"--- DEBUG: تم البحث عن '{preset_key}'. القيمة العربية الناتجة: '{arabic_name}'. ---")
-
-        bot_data.active_preset_name = arabic_name
+        bot_data.settings['active_scanners'] = current_scanners
+        determine_active_preset()
         save_settings()
 
-        await query.answer(f"نمط '{bot_data.active_preset_name}' تم تطبيقه بنجاح.")
-        await show_settings_menu(update, context)
+        # 2. استخلاص أهم القيم لعرضها في رسالة التأكيد
+        lf = preset_settings.get('liquidity_filters', {})
+        vf = preset_settings.get('volatility_filters', {})
+        sf = preset_settings.get('spread_filter', {})
+
+        # 3. إنشاء رسالة التأكيد الديناميكية والواضحة
+        confirmation_text = (
+            f"✅ *تم تفعيل النمط: {PRESET_NAMES_AR.get(preset_key, preset_key)}*\n\n"
+            f"*أهم القيم:*\n"
+            f"- `min_rvol: {lf.get('min_rvol', 'N/A')}`\n"
+            f"- `max_spread: {sf.get('max_spread_percent', 'N/A')}%`\n"
+            f"- `min_atr: {vf.get('min_atr_percent', 'N/A')}%`"
+        )
+        
+        # 4. إعادة بناء قائمة الأزرار لإبقاء القائمة تفاعلية
+        presets_keyboard_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🚦 احترافي", callback_data="preset_set_professional")],
+            [InlineKeyboardButton("🎯 متشدد", callback_data="preset_set_strict")],
+            [InlineKeyboardButton("🌙 متساهل", callback_data="preset_set_lenient")],
+            [InlineKeyboardButton("⚠️ فائق التساهل", callback_data="preset_set_very_lenient")],
+            [InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="settings_main")]
+        ])
+        
+        # 5. تعديل الرسالة الأصلية بسلاسة لعرض التأكيد
+        try:
+            await query.edit_message_text(
+                confirmation_text,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=presets_keyboard_markup
+            )
+        except BadRequest as e:
+            # لتجنب الأخطاء إذا لم يتغير شيء في الرسالة
+            if "Message is not modified" not in str(e):
+                logger.warning(f"Error editing preset message: {e}")
+
     else:
-        # --- كاشف الأخطاء رقم 3 ---
-        logger.info(f"--- DEBUG: القيمة '{preset_key}' لم يتم العثور عليها في قواميس الإعدادات. ---")
         await query.answer("لم يتم العثور على النمط.")
 
 async def handle_parameter_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
