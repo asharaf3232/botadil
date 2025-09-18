@@ -243,6 +243,31 @@ async def log_pending_trade_to_db(signal, buy_order):
 # =======================================================================================
 # --- 🧠 Mastermind Brain (Analysis & Mood) 🧠 ---
 # =======================================================================================
+# NEW FUNCTION - Added as part of the integration
+async def translate_text_gemini(text_list):
+    if not GEMINI_API_KEY:
+        logger.warning("GEMINI_API_KEY not found in .env file. Skipping translation.")
+        return text_list, False
+    if not text_list:
+        return [], True
+
+    prompt = "Translate the following English headlines to Arabic. Return only the translated text, with each headline on a new line:\n\n" + "\n".join(text_list)
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(url, json=payload, headers={"Content-Type": "application/json"})
+            response.raise_for_status()
+            result = response.json()
+            translated_text = result['candidates'][0]['content']['parts'][0]['text']
+            return translated_text.strip().split('\n'), True
+    except Exception as e:
+        logger.error(f"Gemini translation failed: {e}")
+        return text_list, False
+
+
 def get_alpha_vantage_economic_events():
     if not ALPHA_VANTAGE_API_KEY or ALPHA_VANTAGE_API_KEY == 'YOUR_AV_KEY_HERE': return []
     today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
