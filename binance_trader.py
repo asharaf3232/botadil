@@ -1268,7 +1268,7 @@ async def handle_scanner_toggle(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    preset_key = query.data.split('_')[-1]
+    preset_key = '_'.join(query.data.split('_')[2:])
 
     # --- كاشف الأخطاء رقم 1 ---
     logger.info(f"--- DEBUG: تم الضغط على زر النمط. القيمة المستلمة: '{preset_key}' ---")
