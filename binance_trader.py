@@ -223,6 +223,7 @@ def determine_active_preset():
     bot_data.active_preset_name = "مخصص"
 
 def save_settings():
+    
 async def safe_send_message(bot, text, **kwargs):
     try: await bot.send_message(TELEGRAM_CHAT_ID, text, parse_mode=ParseMode.MARKDOWN, **kwargs)
     except Exception as e: logger.error(f"Telegram Send Error: {e}")
