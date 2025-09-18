@@ -477,8 +477,15 @@ async def activate_trade(order_id, symbol):
 
     await bot_data.public_ws.subscribe([symbol])
     trade_cost, tp_percent, sl_percent = filled_price * net_filled_quantity, (new_take_profit / filled_price - 1) * 100, (1 - trade['stop_loss'] / filled_price) * 100
+    
+    # --- START OF FIX ---
+    reasons_en = trade['reason'].split(' + ')
+    reasons_ar = [STRATEGY_NAMES_AR.get(r.strip(), r.strip()) for r in reasons_en]
+    reason_display_str = ' + '.join(reasons_ar)
     strength_stars = '⭐' * trade.get('signal_strength', 1)
-    success_msg = (f"**✅ تم تأكيد الشراء | {symbol}**\n**الاستراتيجية:** {trade['reason']}\n**قوة الإشارة:** {strength_stars}\n"
+    # --- END OF FIX ---
+
+    success_msg = (f"**✅ تم تأكيد الشراء | {symbol}**\n**الاستراتيجية:** {reason_display_str}\n**قوة الإشارة:** {strength_stars}\n"
                    f"━━━━━━━━━━━━━━━━━━━━\n"
                    f"🔸 **الصفقة رقم:** `#{trade['id']}`\n"
                    f"🔸 **سعر التنفيذ:** `${filled_price:,.4f}`\n"
@@ -1288,27 +1295,42 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
             else: await update.message.reply_text(f"⚠️ العملة `{symbol}` غير موجودة في القائمة.")
         bot_data.settings['asset_blacklist'] = blacklist; save_settings(); determine_active_preset()
         await show_blacklist_menu(Update(update.update_id, callback_query=type('Query', (), {'message': update.message, 'data': 'settings_blacklist', 'edit_message_text': (lambda *args, **kwargs: None), 'answer': (lambda *args, **kwargs: None)})()), context); return
+
     if not (setting_key := context.user_data.get('setting_to_change')): return
+
     try:
-        if '_' in setting_key:
-            keys = setting_key.split('_'); current_dict = bot_data.settings
-            for key in keys[:-1]: current_dict = current_dict.get(key, {})
-            last_key = keys[-1]; original_value = current_dict[last_key]
-            if isinstance(original_value, int): new_value = int(user_input)
-            else: new_value = float(user_input)
-            current_dict[last_key] = new_value
-        else:
+        # --- START OF FIX ---
+        # First, check if the key is a top-level (simple) setting
+        if setting_key in bot_data.settings:
             original_value = bot_data.settings[setting_key]
-            if isinstance(original_value, int): new_value = int(user_input)
-            else: new_value = float(user_input)
+            if isinstance(original_value, int):
+                new_value = int(user_input)
+            else:
+                new_value = float(user_input)
             bot_data.settings[setting_key] = new_value
+        # If not a top-level key, THEN treat it as a nested setting
+        else:
+            keys = setting_key.split('_'); current_dict = bot_data.settings
+            for key in keys[:-1]:
+                current_dict = current_dict[key]
+            last_key = keys[-1]
+            original_value = current_dict[last_key]
+            if isinstance(original_value, int):
+                new_value = int(user_input)
+            else:
+                new_value = float(user_input)
+            current_dict[last_key] = new_value
+        # --- END OF FIX ---
+
         save_settings(); determine_active_preset()
         await update.message.reply_text(f"✅ تم تحديث `{setting_key}` إلى `{new_value}`.")
-    except (ValueError, KeyError): await update.message.reply_text("❌ قيمة غير صالحة. الرجاء إرسال رقم.")
+    except (ValueError, KeyError):
+        await update.message.reply_text("❌ قيمة غير صالحة. الرجاء إرسال رقم.")
     finally:
-        del context.user_data['setting_to_change']
+        if 'setting_to_change' in context.user_data:
+            del context.user_data['setting_to_change']
         await show_parameters_menu(Update(update.update_id, callback_query=type('Query', (), {'message': update.message, 'data': 'settings_params', 'edit_message_text': (lambda *args, **kwargs: None), 'answer': (lambda *args, **kwargs: None)})()), context)
-
+        
 async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'setting_to_change' in context.user_data or 'blacklist_action' in context.user_data:
         await handle_setting_value(update, context); return
