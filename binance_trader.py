@@ -1,17 +1,18 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Sniper Bot | v31.0 (Definitive Edition) 🚀 ---
+# --- 🚀 OKX Sniper Bot | v31.1 (Definitive Edition) 🚀 ---
 # =======================================================================================
 #
 # هذا هو الإصدار النهائي والمتكامل الذي يجمع كل التحسينات الأمنية،
 # الكفاءة، والمرونة التي تم تطويرها. تم بناء هذه النسخة لتعمل
 # بشكل موثوق ومستقر كأداة تداول احترافية.
 #
-# --- Definitive Edition Changelog v31.0 ---
+# --- Definitive Edition Changelog v31.1 ---
+#   ✅ [الإشعارات] **إصلاح:** إعادة رسالة التنبيه التي تشرح سبب توقف الفحص التلقائي.
 #   ✅ [الأمان] تنفيذ آلية إعادة محاولة الإغلاق (Retry) مع مراقب للصفقات الحرجة.
 #   ✅ [الأمان] إضافة نظام المزامنة العكسية عند بدء التشغيل لمطابقة المنصة مع قاعدة البيانات.
 #   ✅ [الكفاءة] تطبيق نظام الجلب المجمع للبيانات (Batch Fetching) لتسريع الفحص.
-#   ✅ [الإشعارات] **إضافة نظام إشعارات الربح المتزايدة (الجديد)** القائم على نسبة مئوية.
+#   ✅ [الإشعارات] إضافة نظام إشعارات الربح المتزايدة (الجديد) القائم على نسبة مئوية.
 #   ✅ [المرونة] إضافة نمط "القلب الجريء" وتعديل فلتر الأطر الزمنية المتعددة.
 #   ✅ [التقارير] تحسين تقارير الإغلاق لتشمل مقاييس أداء دقيقة مثل "كفاءة الخروج".
 #   ✅ [الماسحات] تحسين "رادار الحيتان" ليعمل بشكل مستقل ويتجاوز الفلاتر غير الضرورية.
@@ -786,22 +787,35 @@ async def fetch_ohlcv_batch(exchange, symbols, timeframe, limit):
     
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
     async with scan_lock:
-        if not bot_data.trading_enabled: logger.info("Scan skipped: Kill Switch is active."); return
-        scan_start_time = time.time(); logger.info("--- Starting new Phoenix Engine scan... ---")
+        if not bot_data.trading_enabled: 
+            logger.info("Scan skipped: Kill Switch is active.")
+            return
+        scan_start_time = time.time()
+        logger.info("--- Starting new Definitive Edition scan... ---")
         settings, bot = bot_data.settings, context.bot
         
+        # --- START OF FIX: ADDED DETAILED TELEGRAM NOTIFICATIONS FOR SKIPS ---
         if settings.get('news_filter_enabled', True):
             mood_result_fundamental = await get_fundamental_market_mood()
             if mood_result_fundamental['mood'] in ["NEGATIVE", "DANGEROUS"]:
                 bot_data.market_mood = mood_result_fundamental
                 logger.warning(f"SCAN SKIPPED: Fundamental mood is {mood_result_fundamental['mood']}. Reason: {mood_result_fundamental['reason']}")
+                await safe_send_message(bot, f"🚨 **تنبيه: فحص السوق تم إيقافه!**\n"
+                                           f"━━━━━━━━━━━━━━━━━━━━\n"
+                                           f"**السبب:** {mood_result_fundamental['reason']}\n"
+                                           f"**الإجراء:** تم تخطي الفحص لحماية رأس المال من تقلبات الأخبار.")
                 return
         
         mood_result = await get_market_mood()
         bot_data.market_mood = mood_result
         if mood_result['mood'] in ["NEGATIVE", "DANGEROUS"]:
             logger.warning(f"SCAN SKIPPED: {mood_result['reason']}")
+            await safe_send_message(bot, f"🚨 **تنبيه: فحص السوق تم إيقافه!**\n"
+                                       f"━━━━━━━━━━━━━━━━━━━━\n"
+                                       f"**السبب:** {mood_result['reason']} (BTC: {mood_result.get('btc_mood', 'N/A')})\n"
+                                       f"**الإجراء:** تم تخطي الفحص بسبب ظروف السوق السلبية.")
             return
+        # --- END OF FIX ---
         
         async with aiosqlite.connect(DB_FILE) as conn:
             active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active' OR status = 'pending'")).fetchone())[0]
@@ -1675,3 +1689,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
