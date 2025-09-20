@@ -626,7 +626,27 @@ class TradeGuardian:
             await bot_data.exchange.create_market_sell_order(symbol, formatted_quantity, params)
             pnl = (close_price - trade['entry_price']) * trade['quantity']
             pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
-            emoji = "✅" if pnl > 0 else "🛑"
+            
+            # --- START OF FIX ---
+            # تحديث منطق السبب والإيموجي
+            if pnl > 0 and reason == "فاشلة (SL)":
+                reason = "تم تأمين الربح (TSL)"
+                emoji = "✅"
+            elif pnl > 0:
+                emoji = "✅"
+            else:
+                emoji = "🛑"
+            
+            # حساب كفاءة الخروج
+            highest_price_val = max(trade.get('highest_price', 0), close_price)
+            highest_pnl_percent = ((highest_price_val / trade['entry_price'] - 1) * 100) if trade['entry_price'] > 0 else 0
+            
+            exit_efficiency_percent = 0
+            if highest_price_val > trade['entry_price']:
+                exit_efficiency_percent = (pnl / (highest_price_val - trade['entry_price']) * trade['quantity']) * 100
+
+            # --- END OF FIX ---
+
             async with aiosqlite.connect(DB_FILE) as conn:
                 await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (reason, close_price, pnl, trade['id'])); await conn.commit()
             await bot_data.public_ws.unsubscribe([symbol])
@@ -635,9 +655,7 @@ class TradeGuardian:
             duration = end_dt - start_dt
             days, rem = divmod(duration.total_seconds(), 86400); hours, rem = divmod(rem, 3600); minutes, _ = divmod(rem, 60)
             duration_str = f"{int(days)}d {int(hours)}h {int(minutes)}m" if days > 0 else f"{int(hours)}h {int(minutes)}m"
-            highest_price_val = max(trade.get('highest_price', 0), close_price)
-            highest_pnl_percent = ((highest_price_val - trade['entry_price']) / trade['entry_price'] * 100) if trade['entry_price'] > 0 else 0
-
+            
             # الرسالة الجديدة:
             msg = (f"{emoji} **تم إغلاق الصفقة | #{trade_id} {symbol}**\n"
                    f"**السبب:** {reason}\n"
@@ -645,6 +663,7 @@ class TradeGuardian:
                    f"**إحصائيات الأداء**\n"
                    f"**الربح/الخسارة:** `${pnl:,.2f}` ({pnl_percent:+.2f}%)\n"
                    f"**أعلى ربح مؤقت:** {highest_pnl_percent:+.2f}%\n"
+                   f"**كفاءة الخروج:** {exit_efficiency_percent:.2f}%\n"
                    f"**مدة الصفقة:** {duration_str}")
             await safe_send_message(bot, msg)
         except Exception as e:
