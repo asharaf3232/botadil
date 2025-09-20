@@ -168,24 +168,24 @@ DEFAULT_SETTINGS = {
     "spread_filter": {"max_spread_percent": 0.5},
     "rsi_divergence": {"rsi_period": 14, "lookback_period": 35, "peak_trough_lookback": 5, "confirm_with_rsi_exit": True},
     "supertrend_pullback": {"atr_period": 10, "atr_multiplier": 3.0, "swing_high_lookback": 10},
-    "profit_notifications_enabled": False, # new setting for profit notification/breakeven
-    "take_profit_levels": [2.0, 5.0, 10.0], # new setting for profit notification levels
-    "multi_timeframe_enabled": True, # new setting for multi-timeframe analysis
-    "multi_timeframe_htf": '4h', # new setting for high timeframe
-    "multi_timeframe_ltf": '15m', # new setting for low timeframe
-    "volume_filter_multiplier": 2.0, # new setting for volume filter
+    "profit_notifications_enabled": False, 
+    "take_profit_levels": [2.0, 5.0, 10.0], 
+    "multi_timeframe_enabled": True, 
+    "multi_timeframe_htf": '4h', 
+    "multi_timeframe_ltf": '15m', 
+    "volume_filter_multiplier": 2.0,
+    "close_retries": 3,
 }
 STRATEGY_NAMES_AR = {
     "momentum_breakout": "زخم اختراقي", "breakout_squeeze_pro": "اختراق انضغاطي",
     "support_rebound": "ارتداد الدعم", "sniper_pro": "القناص المحترف", "whale_radar": "رادار الحيتان",
     "rsi_divergence": "دايفرجنس RSI", "supertrend_pullback": "انعكاس سوبرترند"
 }
-PRESET_NAMES_AR = {"professional": "احترافي", "strict": "متشدد", "lenient": "متساهل", "very_lenient": "فائق التساهل"}
+PRESET_NAMES_AR = {"professional": "احترافي", "strict": "متشدد", "lenient": "متساهل", "very_lenient": "فائق التساهل", "bold_heart": "القلب الجريء"}
 SETTINGS_PRESETS = {
     "professional": copy.deepcopy(DEFAULT_SETTINGS),
     "strict": {**copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 3, "risk_reward_ratio": 2.5, "fear_and_greed_threshold": 40, "adx_filter_level": 28, "liquidity_filters": {"min_quote_volume_24h_usd": 2000000, "min_rvol": 2.0}},
     "lenient": {**copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 8, "risk_reward_ratio": 1.8, "fear_and_greed_threshold": 25, "adx_filter_level": 20, "liquidity_filters": {"min_quote_volume_24h_usd": 500000, "min_rvol": 1.2}},
-    
     "very_lenient": {
         **copy.deepcopy(DEFAULT_SETTINGS), 
         "max_concurrent_trades": 12, 
@@ -195,6 +195,20 @@ SETTINGS_PRESETS = {
         "liquidity_filters": {"min_quote_volume_24h_usd": 250000, "min_rvol": 1.0},
         "volatility_filters": {"atr_period_for_filter": 14, "min_atr_percent": 0.4},
         "spread_filter": {"max_spread_percent": 1.5}
+    },
+    "bold_heart": {
+        **copy.deepcopy(DEFAULT_SETTINGS), 
+        "max_concurrent_trades": 15,
+        "risk_reward_ratio": 1.5,
+        "multi_timeframe_enabled": False,
+        "market_mood_filter_enabled": False,
+        "adx_filter_enabled": False,
+        "btc_trend_filter_enabled": False,
+        "news_filter_enabled": False,
+        "volume_filter_multiplier": 1.0,
+        "liquidity_filters": {"min_quote_volume_24h_usd": 100000, "min_rvol": 1.0},
+        "volatility_filters": {"atr_period_for_filter": 14, "min_atr_percent": 0.2},
+        "spread_filter": {"max_spread_percent": 2.0}
     }
 }
 # =======================================================================================
@@ -237,11 +251,12 @@ async def safe_edit_message(query, text, **kwargs):
 async def init_database():
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
-            await conn.execute('CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, symbol TEXT, entry_price REAL, take_profit REAL, stop_loss REAL, quantity REAL, status TEXT, reason TEXT, order_id TEXT, highest_price REAL DEFAULT 0, trailing_sl_active BOOLEANE DEFAULT 0, close_price REAL, pnl_usdt REAL, signal_strength INTEGER DEFAULT 1, profit_levels_notified TEXT DEFAULT "[]")')
+            await conn.execute('CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, symbol TEXT, entry_price REAL, take_profit REAL, stop_loss REAL, quantity REAL, status TEXT, reason TEXT, order_id TEXT, highest_price REAL DEFAULT 0, trailing_sl_active BOOLEANE DEFAULT 0, close_price REAL, pnl_usdt REAL, signal_strength INTEGER DEFAULT 1, profit_levels_notified TEXT DEFAULT "[]", close_retries INTEGER DEFAULT 0)')
             cursor = await conn.execute("PRAGMA table_info(trades)")
             columns = [row[1] for row in await cursor.fetchall()]
             if 'signal_strength' not in columns: await conn.execute("ALTER TABLE trades ADD COLUMN signal_strength INTEGER DEFAULT 1")
             if 'profit_levels_notified' not in columns: await conn.execute("ALTER TABLE trades ADD COLUMN profit_levels_notified TEXT DEFAULT \"[]\"")
+            if 'close_retries' not in columns: await conn.execute("ALTER TABLE trades ADD COLUMN close_retries INTEGER DEFAULT 0")
             await conn.commit()
         logger.info("Phoenix database initialized successfully.")
     except Exception as e: logger.critical(f"Database initialization failed: {e}")
@@ -584,7 +599,6 @@ class TradeGuardian:
                     if not trade: return
                     trade = dict(trade); settings = bot_data.settings
                     
-                    # --- NEW LOGIC FOR INCREMENTAL PROFIT NOTIFICATIONS & BREAKEVEN ---
                     if settings.get('profit_notifications_enabled', False):
                         notified_levels = json.loads(trade['profit_levels_notified'])
                         for level in sorted(settings.get('take_profit_levels', []), reverse=True):
@@ -599,13 +613,11 @@ class TradeGuardian:
                                     )
                                     await safe_send_message(self.application.bot, notification_message)
                                     
-                                    # Update trade state in DB
                                     notified_levels.append(level)
                                     await conn.execute("UPDATE trades SET stop_loss = ?, profit_levels_notified = ? WHERE id = ?", (trade['entry_price'], json.dumps(notified_levels), trade['id']))
                                     trade['stop_loss'] = trade['entry_price']
                                     break
-                    # --- END OF NEW LOGIC ---
-
+                    
                     if settings['trailing_sl_enabled']:
                         new_highest_price = max(trade.get('highest_price', 0), current_price)
                         if new_highest_price > trade.get('highest_price', 0): await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (new_highest_price, trade['id']))
@@ -631,10 +643,15 @@ class TradeGuardian:
         symbol, trade_id = trade['symbol'], trade['id']
         bot, log_ctx = self.application.bot, {'trade_id': trade_id}
         logger.info(f"Guardian: Closing {symbol}. Reason: {reason}", extra=log_ctx)
+        
+        close_retries = trade.get('close_retries', 0)
+        max_retries = bot_data.settings.get('close_retries', 3)
+        
         try:
             asset_to_sell = symbol.split('/')[0]
             balance = await bot_data.exchange.fetch_balance()
             available_quantity = balance.get(asset_to_sell, {}).get('free', 0.0)
+
             if available_quantity <= 0:
                 logger.critical(f"Attempted to close #{trade_id} but no balance for {asset_to_sell}.", extra=log_ctx)
                 async with aiosqlite.connect(DB_FILE) as conn:
@@ -642,9 +659,11 @@ class TradeGuardian:
                 await safe_send_message(bot, f"🚨 **فشل حرج: لا يوجد رصيد**\n"
                                              f"لا يمكن إغلاق الصفقة #{trade_id} لعدم توفر رصيد كافٍ من {asset_to_sell}.")
                 return
+
             formatted_quantity = bot_data.exchange.amount_to_precision(symbol, available_quantity)
             params = {'tdMode': 'cash', 'clOrdId': f"close{trade_id}{int(time.time() * 1000)}"}
             await bot_data.exchange.create_market_sell_order(symbol, formatted_quantity, params)
+            
             pnl = (close_price - trade['entry_price']) * trade['quantity']
             pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
             
@@ -661,16 +680,14 @@ class TradeGuardian:
             
             exit_efficiency_percent = 0
             if highest_price_val > trade['entry_price']:
-                # --- START OF FIX: Avoiding division by zero ---
                 highest_pnl_usdt = (highest_price_val - trade['entry_price']) * trade['quantity']
                 if highest_pnl_usdt > 0:
                     exit_efficiency_percent = (pnl / highest_pnl_usdt) * 100
                 else:
                     exit_efficiency_percent = 0
-                # --- END OF FIX ---
 
             async with aiosqlite.connect(DB_FILE) as conn:
-                await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (reason, close_price, pnl, trade['id'])); await conn.commit()
+                await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ?, close_retries = 0 WHERE id = ?", (reason, close_price, pnl, trade['id'])); await conn.commit()
             await bot_data.public_ws.unsubscribe([symbol])
             
             start_dt = datetime.fromisoformat(trade['timestamp']); end_dt = datetime.now(EGYPT_TZ)
@@ -687,9 +704,18 @@ class TradeGuardian:
                    f"**كفاءة الخروج:** {exit_efficiency_percent:.2f}%\n"
                    f"**مدة الصفقة:** {duration_str}")
             await safe_send_message(bot, msg)
+            
         except Exception as e:
-            logger.critical(f"Unexpected CRITICAL error closing trade: {e}", exc_info=True, extra=log_ctx)
-            await safe_send_message(bot, f"🚨 **فشل حرج** 🚨\nخطأ غير متوقع عند إغلاق `#{trade_id}`.")
+            if close_retries < max_retries:
+                logger.warning(f"Failed to close trade #{trade_id}. Retrying... ({close_retries + 1}/{max_retries})", exc_info=True, extra=log_ctx)
+                async with aiosqlite.connect(DB_FILE) as conn:
+                    await conn.execute("UPDATE trades SET close_retries = ? WHERE id = ?", (close_retries + 1, trade_id)); await conn.commit()
+            else:
+                logger.critical(f"CRITICAL: Failed to close trade #{trade_id} after {max_retries} retries. Reason: {e}", exc_info=True, extra=log_ctx)
+                async with aiosqlite.connect(DB_FILE) as conn:
+                    await conn.execute("UPDATE trades SET status = 'closure_failed', reason = 'Max retries exceeded' WHERE id = ?", (trade_id,)); await conn.commit()
+                await safe_send_message(bot, f"🚨 **فشل حرج** 🚨\nفشل إغلاق الصفقة `#{trade_id}` بعد عدة محاولات. الرجاء مراجعة المنصة يدوياً.")
+                await bot_data.public_ws.unsubscribe([symbol])
 
     async def sync_subscriptions(self):
         try:
@@ -721,6 +747,32 @@ class PublicWebSocketManager:
                     for ticker in data['data']: await self.handler(ticker)
     async def run(self): await exponential_backoff_with_jitter(self._run_loop)
 
+async def critical_trade_monitor(context: ContextTypes.DEFAULT_TYPE):
+    logger.info("🚨 Critical Trade Monitor: Checking for failed closures...")
+    async with aiosqlite.connect(DB_FILE) as conn:
+        conn.row_factory = aiosqlite.Row
+        failed_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'closure_failed'")).fetchall()
+        if not failed_trades:
+            logger.info("🚨 Critical Trade Monitor: No failed closures found.")
+            return
+
+        for trade in failed_trades:
+            trade = dict(trade)
+            logger.warning(f"🚨 Found a failed closure for trade #{trade['id']}. Symbol: {trade['symbol']}. Attempting manual intervention.")
+            
+            try:
+                positions = await bot_data.exchange.fetch_positions(symbols=[trade['symbol']])
+                position_exists_on_exchange = any(p['side'] == 'long' and p['amount'] > 0 for p in positions)
+                
+                if position_exists_on_exchange:
+                    await TradeGuardian(context.application)._close_trade(trade, "Failed (retry)", 0)
+                else:
+                    logger.warning(f"🚨 Trade #{trade['id']} not found on exchange. Updating DB status to 'closed manually'.")
+                    await conn.execute("UPDATE trades SET status = 'closed manually' WHERE id = ?", (trade['id'],))
+                    await conn.commit()
+            except Exception as e:
+                logger.error(f"🚨 Failed to perform critical monitor action for trade #{trade['id']}: {e}")
+            
 # =======================================================================================
 # --- ⚡ Core Scanner & Trade Initiation Logic ⚡ ---
 # =======================================================================================
@@ -736,122 +788,11 @@ async def get_okx_markets():
     valid_markets.sort(key=lambda m: m.get('quoteVolume', 0), reverse=True)
     return valid_markets[:settings['top_n_symbols_by_volume']]
 
-async def worker(queue, signals_list, errors_list):
-    settings, exchange = bot_data.settings, bot_data.exchange
-    while not queue.empty():
-        market = await queue.get(); symbol = market['symbol']
-        try:
-            try:
-                orderbook = await exchange.fetch_order_book(symbol, limit=1)
-                best_bid, best_ask = orderbook['bids'][0][0], orderbook['asks'][0][0]
-                if best_bid <= 0: continue
-                spread_percent = ((best_ask - best_bid) / best_bid) * 100
-                if spread_percent > settings.get('spread_filter', {}).get('max_spread_percent', 0.5): continue
-            except Exception: continue
-            
-            # --- START OF FIX: IMPROVED MULTI-TIMEFRAME ANALYSIS ---
-            if settings.get('multi_timeframe_enabled', True):
-                ohlcv_htf = await exchange.fetch_ohlcv(symbol, settings.get('multi_timeframe_htf'), limit=220)
-                df_htf = pd.DataFrame(ohlcv_htf, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                if len(df_htf) < 201: continue
-                df_htf['timestamp'] = pd.to_datetime(df_htf['timestamp'], unit='ms')
-                df_htf = df_htf.set_index('timestamp').sort_index()
-                df_htf.ta.ema(length=200, append=True)
-                ema_col_name_htf = find_col(df_htf.columns, "EMA_200")
-                if not ema_col_name_htf or pd.isna(df_htf[ema_col_name_htf].iloc[-2]): continue
-                
-                is_htf_bullish = df_htf['close'].iloc[-2] > df_htf[ema_col_name_htf].iloc[-2]
-            else:
-                is_htf_bullish = True # Always proceed if filter is disabled
-            # --- END OF FIX ---
-
-            ohlcv = await exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=220)
-            if settings.get('trend_filters', {}).get('enabled', True):
-                ema_period = settings.get('trend_filters', {}).get('ema_period', 200)
-                if len(ohlcv) < ema_period + 1: continue
-                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                df = df.set_index('timestamp').sort_index()
-                df.ta.ema(length=ema_period, append=True)
-                ema_col_name = find_col(df.columns, f"EMA_{ema_period}")
-                if not ema_col_name or pd.isna(df[ema_col_name].iloc[-2]): continue
-                if df['close'].iloc[-2] < df[ema_col_name].iloc[-2]: continue
-            else:
-                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                df = df.set_index('timestamp').sort_index()
-            
-            vol_filters = settings.get('volatility_filters', {})
-            atr_period, min_atr_percent = vol_filters.get('atr_period_for_filter', 14), vol_filters.get('min_atr_percent', 0.8)
-            df.ta.atr(length=atr_period, append=True)
-            atr_col_name = find_col(df.columns, f"ATRr_{atr_period}")
-            if not atr_col_name or pd.isna(df[atr_col_name].iloc[-2]): continue
-            last_close = df['close'].iloc[-2]
-            atr_percent = (df[atr_col_name].iloc[-2] / last_close) * 100 if last_close > 0 else 0
-            if atr_percent < min_atr_percent: continue
-
-            df['volume_sma'] = ta.sma(df['volume'], length=20)
-            if pd.isna(df['volume_sma'].iloc[-2]) or df['volume_sma'].iloc[-2] == 0: continue
-            rvol = df['volume'].iloc[-2] / df['volume_sma'].iloc[-2]
-            
-            if rvol < settings.get('volume_filter_multiplier', 2.0): continue
-
-            adx_value = 0
-            if settings.get('adx_filter_enabled', False):
-                df.ta.adx(append=True); adx_col = find_col(df.columns, "ADX_")
-                adx_value = df[adx_col].iloc[-2] if adx_col and pd.notna(df[adx_col].iloc[-2]) else 0
-                if adx_value < settings.get('adx_filter_level', 25): continue
-            
-            confirmed_reasons = []
-            for name in settings['active_scanners']:
-                if not (strategy_func := SCANNERS.get(name)): continue
-                params = settings.get(name, {})
-                func_args = {'df': df.copy(), 'params': params, 'rvol': rvol, 'adx_value': adx_value}
-                if name in ['support_rebound', 'whale_radar']:
-                    func_args.update({'exchange': exchange, 'symbol': symbol})
-                result = await strategy_func(**func_args) if asyncio.iscoroutinefunction(strategy_func) else strategy_func(**{k: v for k, v in func_args.items() if k not in ['exchange', 'symbol']})
-                if result: confirmed_reasons.append(result['reason'])
-
-            if confirmed_reasons:
-                reason_str, strength = ' + '.join(set(confirmed_reasons)), len(set(confirmed_reasons))
-                
-                # --- START OF FIX: Reduce signal strength if HTF is not bullish ---
-                if not is_htf_bullish:
-                    strength = max(1, int(strength / 2)) # Halve strength, but keep at least 1
-                    reason_str += " (اتجاه كبير ضعيف)"
-                # --- END OF FIX ---
-                
-                entry_price = df.iloc[-2]['close']
-                df.ta.atr(length=14, append=True)
-                atr = df.iloc[-2].get(find_col(df.columns, "ATRr_14"), 0)
-                risk = atr * settings['atr_sl_multiplier']
-                stop_loss, take_profit = entry_price - risk, entry_price + (risk * settings['risk_reward_ratio'])
-                signals_list.append({"symbol": symbol, "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "reason": reason_str, "strength": strength})
-        except Exception as e: logger.debug(f"Worker error for {symbol}: {e}"); errors_list.append(symbol)
-        finally: queue.task_done()
-
-async def initiate_real_trade(signal):
-    if not bot_data.trading_enabled:
-        logger.warning(f"Trade for {signal['symbol']} blocked: Kill Switch active."); return False
-    try:
-        settings, exchange = bot_data.settings, bot_data.exchange; await exchange.load_markets()
-        trade_size = settings['real_trade_size_usdt']
-        balance = await exchange.fetch_balance(); usdt_balance = balance.get('USDT', {}).get('free', 0.0)
-        if usdt_balance < trade_size:
-             logger.error(f"Insufficient USDT for {signal['symbol']}. Have: {usdt_balance}, Need: {trade_size}")
-             await safe_send_message(bot_data.application.bot, "🚨 **فشل الشراء: رصيد غير كافٍ**\n"
-                                                              f"لا يمكن فتح صفقة جديدة لأن رصيدك من USDT أقل من حجم الصفقة المحدَّد.")
-             return False
-        base_amount = trade_size / signal['entry_price']
-        formatted_amount = exchange.amount_to_precision(signal['symbol'], base_amount)
-        buy_order = await exchange.create_market_buy_order(signal['symbol'], formatted_amount)
-        if await log_pending_trade_to_db(signal, buy_order):
-            await safe_send_message(bot_data.application.bot, f"🚀 تم إرسال أمر شراء لـ `{signal['symbol']}`."); return True
-        else:
-            await exchange.cancel_order(buy_order['id'], signal['symbol']); return False
-    except ccxt.InsufficientFunds as e: logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}"); await safe_send_message(bot_data.application.bot, f"⚠️ **رصيد غير كافٍ!**"); return False
-    except Exception as e: logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}", exc_info=True); return False
-
+async def fetch_ohlcv_batch(exchange, symbols, timeframe, limit):
+    tasks = [exchange.fetch_ohlcv(s, timeframe, limit=limit) for s in symbols]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    return {symbols[i]: results[i] for i in range(len(symbols)) if not isinstance(results[i], Exception)}
+    
 async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
     async with scan_lock:
         if not bot_data.trading_enabled: logger.info("Scan skipped: Kill Switch is active."); return
@@ -896,13 +837,19 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         if active_trades_count >= settings['max_concurrent_trades']:
             logger.info(f"Scan skipped: Max trades ({active_trades_count}) reached."); return
 
-        top_markets = await get_okx_markets();
-        if not top_markets: logger.info("Scan complete: No markets passed filters."); return
+        top_markets = await get_okx_markets()
+        symbols_to_scan = [m['symbol'] for m in top_markets]
+        
+        ohlcv_data = await fetch_ohlcv_batch(bot_data.exchange, symbols_to_scan, TIMEFRAME, 220)
         
         queue, signals_found, analysis_errors = asyncio.Queue(), [], []
-        for market in top_markets: await queue.put(market)
-        worker_tasks = [asyncio.create_task(worker(queue, signals_found, analysis_errors)) for _ in range(settings.get("worker_threads", 10))]
-        await queue.join(); [task.cancel() for task in worker_tasks]
+        for market in top_markets:
+            if market['symbol'] in ohlcv_data:
+                await queue.put({'market': market, 'ohlcv': ohlcv_data[market['symbol']]})
+
+        worker_tasks = [asyncio.create_task(worker_batch(queue, signals_found, analysis_errors)) for _ in range(settings.get("worker_threads", 10))]
+        await queue.join()
+        [task.cancel() for task in worker_tasks]
         
         trades_opened_count = 0
         signals_found.sort(key=lambda s: s.get('strength', 0), reverse=True)
@@ -924,6 +871,130 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
                            f"  - **إشارات جديدة:** {len(signals_found)}\n"
                            f"  - **صفقات تم فتحها:** {trades_opened_count} صفقة\n"
                            f"  - **مشكلات تحليل:** {len(analysis_errors)} عملة")
+
+async def worker_batch(queue, signals_list, errors_list):
+    settings, exchange = bot_data.settings, bot_data.exchange
+    while not queue.empty():
+        item = await queue.get(); market, ohlcv = item['market'], item['ohlcv']; symbol = market['symbol']
+        
+        try:
+            orderbook = await exchange.fetch_order_book(symbol, limit=1)
+            best_bid, best_ask = orderbook['bids'][0][0], orderbook['asks'][0][0]
+            if best_bid <= 0: continue
+            spread_percent = ((best_ask - best_bid) / best_bid) * 100
+            if spread_percent > settings.get('spread_filter', {}).get('max_spread_percent', 0.5): continue
+        except Exception: 
+            queue.task_done()
+            continue
+
+        is_htf_bullish = True
+        if settings.get('multi_timeframe_enabled', True):
+            ohlcv_htf = await exchange.fetch_ohlcv(symbol, settings.get('multi_timeframe_htf'), limit=220)
+            df_htf = pd.DataFrame(ohlcv_htf, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            if len(df_htf) > 200:
+                df_htf['timestamp'] = pd.to_datetime(df_htf['timestamp'], unit='ms')
+                df_htf = df_htf.set_index('timestamp').sort_index()
+                df_htf.ta.ema(length=200, append=True)
+                ema_col_name_htf = find_col(df_htf.columns, "EMA_200")
+                if ema_col_name_htf and pd.notna(df_htf[ema_col_name_htf].iloc[-2]):
+                    is_htf_bullish = df_htf['close'].iloc[-2] > df_htf[ema_col_name_htf].iloc[-2]
+
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df = df.set_index('timestamp').sort_index()
+        
+        if settings.get('trend_filters', {}).get('enabled', True):
+            ema_period = settings.get('trend_filters', {}).get('ema_period', 200)
+            if len(df) < ema_period + 1:
+                queue.task_done()
+                continue
+            df.ta.ema(length=ema_period, append=True)
+            ema_col_name = find_col(df.columns, f"EMA_{ema_period}")
+            if not ema_col_name or pd.isna(df[ema_col_name].iloc[-2]):
+                queue.task_done()
+                continue
+            if df['close'].iloc[-2] < df[ema_col_name].iloc[-2]:
+                queue.task_done()
+                continue
+        
+        vol_filters = settings.get('volatility_filters', {})
+        atr_period, min_atr_percent = vol_filters.get('atr_period_for_filter', 14), vol_filters.get('min_atr_percent', 0.8)
+        df.ta.atr(length=atr_period, append=True)
+        atr_col_name = find_col(df.columns, f"ATRr_{atr_period}")
+        if not atr_col_name or pd.isna(df[atr_col_name].iloc[-2]):
+            queue.task_done()
+            continue
+        last_close = df['close'].iloc[-2]
+        atr_percent = (df[atr_col_name].iloc[-2] / last_close) * 100 if last_close > 0 else 0
+        if atr_percent < min_atr_percent:
+            queue.task_done()
+            continue
+
+        df['volume_sma'] = ta.sma(df['volume'], length=20)
+        if pd.isna(df['volume_sma'].iloc[-2]) or df['volume_sma'].iloc[-2] == 0:
+            queue.task_done()
+            continue
+        rvol = df['volume'].iloc[-2] / df['volume_sma'].iloc[-2]
+        
+        if rvol < settings.get('volume_filter_multiplier', 2.0):
+            queue.task_done()
+            continue
+
+        adx_value = 0
+        if settings.get('adx_filter_enabled', False):
+            df.ta.adx(append=True); adx_col = find_col(df.columns, "ADX_")
+            adx_value = df[adx_col].iloc[-2] if adx_col and pd.notna(df[adx_col].iloc[-2]) else 0
+            if adx_value < settings.get('adx_filter_level', 25):
+                queue.task_done()
+                continue
+        
+        confirmed_reasons = []
+        for name in settings['active_scanners']:
+            if not (strategy_func := SCANNERS.get(name)): continue
+            params = settings.get(name, {})
+            func_args = {'df': df.copy(), 'params': params, 'rvol': rvol, 'adx_value': adx_value}
+            if name in ['support_rebound', 'whale_radar']:
+                func_args.update({'exchange': exchange, 'symbol': symbol})
+            result = await strategy_func(**func_args) if asyncio.iscoroutinefunction(strategy_func) else strategy_func(**{k: v for k, v in func_args.items() if k not in ['exchange', 'symbol']})
+            if result: confirmed_reasons.append(result['reason'])
+
+        if confirmed_reasons:
+            reason_str, strength = ' + '.join(set(confirmed_reasons)), len(set(confirmed_reasons))
+            
+            if not is_htf_bullish:
+                strength = max(1, int(strength / 2))
+                reason_str += " (اتجاه كبير ضعيف)"
+            
+            entry_price = df.iloc[-2]['close']
+            df.ta.atr(length=14, append=True)
+            atr = df.iloc[-2].get(find_col(df.columns, "ATRr_14"), 0)
+            risk = atr * settings['atr_sl_multiplier']
+            stop_loss, take_profit = entry_price - risk, entry_price + (risk * settings['risk_reward_ratio'])
+            signals_list.append({"symbol": symbol, "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "reason": reason_str, "strength": strength})
+        
+        queue.task_done()
+
+async def initiate_real_trade(signal):
+    if not bot_data.trading_enabled:
+        logger.warning(f"Trade for {signal['symbol']} blocked: Kill Switch active."); return False
+    try:
+        settings, exchange = bot_data.settings, bot_data.exchange; await exchange.load_markets()
+        trade_size = settings['real_trade_size_usdt']
+        balance = await exchange.fetch_balance(); usdt_balance = balance.get('USDT', {}).get('free', 0.0)
+        if usdt_balance < trade_size:
+             logger.error(f"Insufficient USDT for {signal['symbol']}. Have: {usdt_balance}, Need: {trade_size}")
+             await safe_send_message(bot_data.application.bot, "🚨 **فشل الشراء: رصيد غير كافٍ**\n"
+                                                              f"لا يمكن فتح صفقة جديدة لأن رصيدك من USDT أقل من حجم الصفقة المحدَّد.")
+             return False
+        base_amount = trade_size / signal['entry_price']
+        formatted_amount = exchange.amount_to_precision(signal['symbol'], base_amount)
+        buy_order = await exchange.create_market_buy_order(signal['symbol'], formatted_amount)
+        if await log_pending_trade_to_db(signal, buy_order):
+            await safe_send_message(bot_data.application.bot, f"🚀 تم إرسال أمر شراء لـ `{signal['symbol']}`."); return True
+        else:
+            await exchange.cancel_order(buy_order['id'], signal['symbol']); return False
+    except ccxt.InsufficientFunds as e: logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}"); await safe_send_message(bot_data.application.bot, f"⚠️ **رصيد غير كافٍ!**"); return False
+    except Exception as e: logger.error(f"REAL TRADE FAILED {signal['symbol']}: {e}", exc_info=True); return False
 
 async def check_time_sync(context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -1305,6 +1376,7 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton(bool_format('trailing_sl_enabled', 'تفعيل الوقف المتحرك'), callback_data="param_toggle_trailing_sl_enabled")],
         [InlineKeyboardButton(f"تفعيل الوقف المتحرك (%): {s['trailing_sl_activation_percent']}", callback_data="param_set_trailing_sl_activation_percent"),
          InlineKeyboardButton(f"مسافة الوقف المتحرك (%): {s['trailing_sl_callback_percent']}", callback_data="param_set_trailing_sl_callback_percent")],
+        [InlineKeyboardButton(f"عدد محاولات الإغلاق: {s['close_retries']}", callback_data="param_set_close_retries")],
         [InlineKeyboardButton("--- إعدادات الإشارات والفلترة ---", callback_data="noop")],
         [InlineKeyboardButton(f"مضاعف فلتر الحجم: {s['volume_filter_multiplier']}", callback_data="param_set_volume_filter_multiplier")],
         [InlineKeyboardButton(bool_format('multi_timeframe_enabled', 'فلتر الأطر الزمنية المتعددة'), callback_data="param_toggle_multi_timeframe_enabled")],
@@ -1337,6 +1409,7 @@ async def show_presets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🎯 متشدد", callback_data="preset_set_strict")],
         [InlineKeyboardButton("🌙 متساهل", callback_data="preset_set_lenient")],
         [InlineKeyboardButton("⚠️ فائق التساهل", callback_data="preset_set_very_lenient")],
+        [InlineKeyboardButton("❤️ القلب الجريء", callback_data="preset_set_bold_heart")],
         [InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="settings_main")]
     ]
     await safe_edit_message(update.callback_query, "اختر نمط إعدادات جاهز:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1417,6 +1490,7 @@ async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🎯 متشدد", callback_data="preset_set_strict")],
             [InlineKeyboardButton("🌙 متساهل", callback_data="preset_set_lenient")],
             [InlineKeyboardButton("⚠️ فائق التساهل", callback_data="preset_set_very_lenient")],
+            [InlineKeyboardButton("❤️ القلب الجريء", callback_data="preset_set_bold_heart")],
             [InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="settings_main")]
         ])
         
@@ -1540,6 +1614,16 @@ async def post_init(application: Application):
         config = {'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 'password': OKX_API_PASSPHRASE, 'enableRateLimit': True}
         bot_data.exchange = ccxt.okx(config)
         await bot_data.exchange.load_markets()
+        open_positions = await bot_data.exchange.fetch_positions()
+        async with aiosqlite.connect(DB_FILE) as conn:
+            conn.row_factory = aiosqlite.Row
+            trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'active'")).fetchall()
+            for trade in trades:
+                position_on_exchange = next((p for p in open_positions if p['symbol'].replace('-', '/') == trade['symbol']), None)
+                if not position_on_exchange:
+                    logger.warning(f"Trade #{trade['id']} found in DB but not on exchange. Status will be changed to 'Closed Manually'.")
+                    await conn.execute("UPDATE trades SET status = 'closed manually' WHERE id = ?", (trade['id'],))
+            await conn.commit()
         await bot_data.exchange.fetch_balance()
         logger.info("✅ Successfully connected to OKX.")
     except Exception as e:
@@ -1555,6 +1639,7 @@ async def post_init(application: Application):
     jq.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
     jq.run_repeating(the_supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="the_supervisor_job")
     jq.run_repeating(check_time_sync, interval=TIME_SYNC_INTERVAL_SECONDS, first=TIME_SYNC_INTERVAL_SECONDS, name="time_sync_job")
+    jq.run_repeating(critical_trade_monitor, interval=SUPERVISOR_INTERVAL_SECONDS * 2, first=SUPERVISOR_INTERVAL_SECONDS * 2, name="critical_trade_monitor")
     jq.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
     logger.info(f"Jobs scheduled. Daily report at 23:55.")
     try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 قناص OKX | Phoenix Edition - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
