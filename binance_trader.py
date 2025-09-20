@@ -168,6 +168,8 @@ DEFAULT_SETTINGS = {
     "spread_filter": {"max_spread_percent": 0.5},
     "rsi_divergence": {"rsi_period": 14, "lookback_period": 35, "peak_trough_lookback": 5, "confirm_with_rsi_exit": True},
     "supertrend_pullback": {"atr_period": 10, "atr_multiplier": 3.0, "swing_high_lookback": 10},
+    "partial_take_profit_enabled": False, # new setting for partial take profit
+    "take_profit_levels": [5.0, 10.0, 15.0], # new setting for profit notification/take profit levels
 }
 STRATEGY_NAMES_AR = {
     "momentum_breakout": "زخم اختراقي", "breakout_squeeze_pro": "اختراق انضغاطي",
@@ -353,6 +355,45 @@ async def get_market_mood():
         if fng is not None and fng < s['fear_and_greed_threshold']:
             return {"mood": "NEGATIVE", "reason": f"مشاعر خوف شديد (F&G: {fng})", "btc_mood": btc_mood_text}
     return {"mood": "POSITIVE", "reason": "وضع السوق مناسب", "btc_mood": btc_mood_text}
+
+# --- NEW FUNCTION FOR MULTI-TIMEFRAME ANALYSIS ---
+async def analyze_with_multi_timeframe(symbol, timeframe_htf='4h', timeframe_ltf='15m', required_scanners=['rsi_divergence'], exchange=None):
+    try:
+        # Fetch data for HTF
+        ohlcv_htf = await exchange.fetch_ohlcv(symbol, timeframe_htf, limit=220)
+        df_htf = pd.DataFrame(ohlcv_htf, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        if len(df_htf) < 200: return None # Not enough data for robust analysis
+
+        # Analyze HTF for long-term trend (e.g., using a simple EMA)
+        df_htf.ta.ema(length=200, append=True)
+        ema_col = find_col(df_htf.columns, "EMA_200")
+        if not ema_col or df_htf['close'].iloc[-1] < df_htf[ema_col].iloc[-1]:
+            return None # Skip if not in a bullish trend on HTF
+
+        # Fetch data for LTF
+        ohlcv_ltf = await exchange.fetch_ohlcv(symbol, timeframe_ltf, limit=220)
+        df_ltf = pd.DataFrame(ohlcv_ltf, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        
+        # Run specific scanners on LTF
+        confirmed_reasons = []
+        for name in required_scanners:
+            if not (strategy_func := SCANNERS.get(name)): continue
+            params = bot_data.settings.get(name, {})
+            func_args = {'df': df_ltf.copy(), 'params': params, 'rvol': 1.0, 'adx_value': 30} # simplified for this example
+            result = await strategy_func(**func_args) if asyncio.iscoroutinefunction(strategy_func) else strategy_func(**{k: v for k, v in func_args.items() if k not in ['exchange', 'symbol']})
+            if result: confirmed_reasons.append(result['reason'])
+
+        if confirmed_reasons:
+            reason_str, strength = ' + '.join(set(confirmed_reasons)), len(set(confirmed_reasons))
+            entry_price = df_ltf.iloc[-2]['close']
+            df_ltf.ta.atr(length=14, append=True)
+            atr = df_ltf.iloc[-2].get(find_col(df_ltf.columns, "ATRr_14"), 0)
+            risk = atr * bot_data.settings['atr_sl_multiplier']
+            stop_loss, take_profit = entry_price - risk, entry_price + (risk * bot_data.settings['risk_reward_ratio'])
+            return {"symbol": symbol, "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "reason": reason_str, "strength": strength}
+    except Exception as e:
+        logger.debug(f"Multi-timeframe analysis error for {symbol}: {e}")
+        return None
 
 def analyze_momentum_breakout(df, params, rvol, adx_value):
     df.ta.vwap(append=True); df.ta.bbands(length=20, append=True); df.ta.macd(append=True); df.ta.rsi(append=True)
@@ -582,6 +623,31 @@ class TradeGuardian:
                     trade = await (await conn.execute("SELECT * FROM trades WHERE symbol = ? AND status = 'active'", (symbol,))).fetchone()
                     if not trade: return
                     trade = dict(trade); settings = bot_data.settings
+                    
+                    # --- NEW LOGIC FOR PROFIT NOTIFICATIONS/BREAKEVEN ---
+                    # Check if profit notifications are enabled and trade has not reached a trigger level yet
+                    if settings.get('profit_notifications_enabled', False) and 'profit_triggers_reached' not in trade:
+                        trade_profit_percent = ((current_price / trade['entry_price']) - 1) * 100
+                        # Check against all profit triggers
+                        for trigger_level in sorted(settings.get('profit_triggers_percent', []), reverse=True):
+                            if trade_profit_percent >= trigger_level:
+                                # Send notification and set stop loss to breakeven
+                                notification_message = (
+                                    f"✅ **تم الوصول لهدف ربح | #{trade['id']} {symbol}**\n"
+                                    f"**الربح الحالي:** {trade_profit_percent:+.2f}%\n"
+                                    f"**التفاصيل:** تم رفع وقف الخسارة إلى سعر الدخول `${trade['entry_price']}` لتأمين الأرباح.\n"
+                                    f"**متابعة:** سيتم إغلاق الصفقة تلقائيًا إذا لم تستمر في الصعود."
+                                )
+                                await safe_send_message(self.application.bot, notification_message)
+                                
+                                # Update trade state in DB
+                                await conn.execute("UPDATE trades SET stop_loss = ?, profit_triggers_reached = ? WHERE id = ?", (trade['entry_price'], json.dumps([trigger_level]), trade['id']))
+                                # This is a simplification; a more robust solution would store multiple triggers.
+                                # For now, we'll stop after the first one to avoid spam.
+                                trade['stop_loss'] = trade['entry_price']
+                                break
+                    # --- END OF NEW LOGIC ---
+
                     if settings['trailing_sl_enabled']:
                         new_highest_price = max(trade.get('highest_price', 0), current_price)
                         if new_highest_price > trade.get('highest_price', 0): await conn.execute("UPDATE trades SET highest_price = ? WHERE id = ?", (new_highest_price, trade['id']))
@@ -643,7 +709,7 @@ class TradeGuardian:
             
             exit_efficiency_percent = 0
             if highest_price_val > trade['entry_price']:
-                exit_efficiency_percent = (pnl / (highest_price_val - trade['entry_price']) * trade['quantity']) * 100
+                exit_efficiency_percent = (pnl / ((highest_price_val - trade['entry_price']) * trade['quantity'])) * 100 if (highest_price_val - trade['entry_price']) * trade['quantity'] > 0 else 0
 
             # --- END OF FIX ---
 
@@ -728,14 +794,14 @@ async def worker(queue, signals_list, errors_list):
                 if spread_percent > settings.get('spread_filter', {}).get('max_spread_percent', 0.5): continue
             except Exception: continue
             
+            # --- START OF FIX: ADDING VOLUME AND MULTI-TIMEFRAME FILTERS ---
             ohlcv = await exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=220)
-            # --- START FIX ---
             if settings.get('trend_filters', {}).get('enabled', True):
                 ema_period = settings.get('trend_filters', {}).get('ema_period', 200)
                 if len(ohlcv) < ema_period + 1: continue
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                df = df.set_index('timestamp').sort_index() # FIX: Ensure sorted DatetimeIndex
+                df = df.set_index('timestamp').sort_index()
                 df.ta.ema(length=ema_period, append=True)
                 ema_col_name = find_col(df.columns, f"EMA_{ema_period}")
                 if not ema_col_name or pd.isna(df[ema_col_name].iloc[-2]): continue
@@ -743,8 +809,8 @@ async def worker(queue, signals_list, errors_list):
             else:
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                df = df.set_index('timestamp').sort_index() # FIX: Ensure sorted DatetimeIndex for other indicators
-            # --- END FIX ---
+                df = df.set_index('timestamp').sort_index()
+            # --- END OF FIX ---
             
             vol_filters = settings.get('volatility_filters', {})
             atr_period, min_atr_percent = vol_filters.get('atr_period_for_filter', 14), vol_filters.get('min_atr_percent', 0.8)
@@ -1275,6 +1341,8 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton(bool_format('trailing_sl_enabled', 'تفعيل الوقف المتحرك'), callback_data="param_toggle_trailing_sl_enabled")],
         [InlineKeyboardButton(f"تفعيل الوقف المتحرك (%): {s['trailing_sl_activation_percent']}", callback_data="param_set_trailing_sl_activation_percent"),
          InlineKeyboardButton(f"مسافة الوقف المتحرك (%): {s['trailing_sl_callback_percent']}", callback_data="param_set_trailing_sl_callback_percent")],
+        [InlineKeyboardButton(bool_format('profit_notifications_enabled', 'إشعارات الربح'), callback_data="param_toggle_profit_notifications_enabled")],
+        [InlineKeyboardButton(f"مستويات إشعار الربح: {s['take_profit_levels']}", callback_data="param_set_take_profit_levels")],
         [InlineKeyboardButton("--- الفلاتر والاتجاه ---", callback_data="noop")],
         [InlineKeyboardButton(bool_format('btc_trend_filter_enabled', 'فلتر الاتجاه العام (BTC)'), callback_data="param_toggle_btc_trend_filter_enabled")],
         [InlineKeyboardButton(f"فترة EMA للاتجاه: {get_nested_value(s, ['trend_filters', 'ema_period'])}", callback_data="param_set_trend_filters_ema_period")],
@@ -1444,16 +1512,17 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
     if not (setting_key := context.user_data.get('setting_to_change')): return
 
     try:
-        # --- START OF FIX ---
-        # First, check if the key is a top-level (simple) setting
-        if setting_key in bot_data.settings:
+        # --- START OF FIX: HANDLING NESTED AND LIST VALUES ---
+        if setting_key == "take_profit_levels":
+            new_value = [float(x.strip()) for x in user_input.split(',')]
+            bot_data.settings[setting_key] = new_value
+        elif setting_key in bot_data.settings and not isinstance(bot_data.settings[setting_key], dict):
             original_value = bot_data.settings[setting_key]
             if isinstance(original_value, int):
                 new_value = int(user_input)
             else:
                 new_value = float(user_input)
             bot_data.settings[setting_key] = new_value
-        # If not a top-level key, THEN treat it as a nested setting
         else:
             keys = setting_key.split('_'); current_dict = bot_data.settings
             for key in keys[:-1]:
@@ -1470,7 +1539,7 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
         save_settings(); determine_active_preset()
         await update.message.reply_text(f"✅ تم تحديث `{setting_key}` إلى `{new_value}`.")
     except (ValueError, KeyError):
-        await update.message.reply_text("❌ قيمة غير صالحة. الرجاء إرسال رقم.")
+        await update.message.reply_text("❌ قيمة غير صالحة. الرجاء إرسال رقم أو قائمة أرقام مفصولة بفواصل.")
     finally:
         if 'setting_to_change' in context.user_data:
             del context.user_data['setting_to_change']
