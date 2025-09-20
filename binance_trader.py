@@ -237,11 +237,11 @@ async def safe_edit_message(query, text, **kwargs):
 async def init_database():
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
-            await conn.execute('CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, symbol TEXT, entry_price REAL, take_profit REAL, stop_loss REAL, quantity REAL, status TEXT, reason TEXT, order_id TEXT, highest_price REAL DEFAULT 0, trailing_sl_active BOOLEANE DEFAULT 0, close_price REAL, pnl_usdt REAL, signal_strength INTEGER DEFAULT 1, last_profit_notified_price REAL DEFAULT 0)')
+            await conn.execute('CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, symbol TEXT, entry_price REAL, take_profit REAL, stop_loss REAL, quantity REAL, status TEXT, reason TEXT, order_id TEXT, highest_price REAL DEFAULT 0, trailing_sl_active BOOLEANE DEFAULT 0, close_price REAL, pnl_usdt REAL, signal_strength INTEGER DEFAULT 1, profit_levels_notified TEXT DEFAULT "[]")')
             cursor = await conn.execute("PRAGMA table_info(trades)")
             columns = [row[1] for row in await cursor.fetchall()]
             if 'signal_strength' not in columns: await conn.execute("ALTER TABLE trades ADD COLUMN signal_strength INTEGER DEFAULT 1")
-            if 'last_profit_notified_price' not in columns: await conn.execute("ALTER TABLE trades ADD COLUMN last_profit_notified_price REAL DEFAULT 0")
+            if 'profit_levels_notified' not in columns: await conn.execute("ALTER TABLE trades ADD COLUMN profit_levels_notified TEXT DEFAULT \"[]\"")
             await conn.commit()
         logger.info("Phoenix database initialized successfully.")
     except Exception as e: logger.critical(f"Database initialization failed: {e}")
@@ -493,13 +493,11 @@ async def activate_trade(order_id, symbol):
     await bot_data.public_ws.subscribe([symbol])
     trade_cost, tp_percent, sl_percent = filled_price * net_filled_quantity, (new_take_profit / filled_price - 1) * 100, (1 - trade['stop_loss'] / filled_price) * 100
     
-    # --- START OF FIX ---
     reasons_en = trade['reason'].split(' + ')
     reasons_ar = [STRATEGY_NAMES_AR.get(r.strip(), r.strip()) for r in reasons_en]
     reason_display_str = ' + '.join(reasons_ar)
     strength_stars = '⭐' * trade.get('signal_strength', 1)
-    # --- END OF FIX ---
-
+    
     success_msg = (f"✅ **تم تأكيد الشراء | {symbol}**\n"
                    f"**الاستراتيجية:** {reason_display_str}\n"
                    f"**قوة الإشارة:** {strength_stars}\n"
@@ -588,28 +586,24 @@ class TradeGuardian:
                     
                     # --- NEW LOGIC FOR INCREMENTAL PROFIT NOTIFICATIONS & BREAKEVEN ---
                     if settings.get('profit_notifications_enabled', False):
-                        notification_increment = settings['take_profit_levels'][0] # Use the first value as the increment
-                        current_profit_percent = ((current_price / trade['entry_price']) - 1) * 100
-                        
-                        last_notified_price = trade.get('last_profit_notified_price', 0)
-                        
-                        # Set initial notification price if not set
-                        if last_notified_price == 0:
-                            next_notification_price = trade['entry_price'] * (1 + notification_increment / 100)
-                        else:
-                            next_notification_price = last_notified_price * (1 + notification_increment / 100)
-
-                        if current_price >= next_notification_price:
-                            notification_message = (
-                                f"✅ **تم الوصول لهدف ربح | #{trade['id']} {symbol}**\n"
-                                f"**الربح الحالي:** {current_profit_percent:+.2f}%\n"
-                                f"**التفاصيل:** تم رفع وقف الخسارة إلى سعر الدخول `${trade['entry_price']}` لتأمين الأرباح.\n"
-                                f"**متابعة:** سيتم إغلاق الصفقة تلقائيًا إذا لم تستمر في الصعود."
-                            )
-                            await safe_send_message(self.application.bot, notification_message)
-                            await conn.execute("UPDATE trades SET stop_loss = ?, last_profit_notified_price = ? WHERE id = ?", (trade['entry_price'], current_price, trade['id']))
-                            trade['stop_loss'] = trade['entry_price']
-                            trade['last_profit_notified_price'] = current_price
+                        notified_levels = json.loads(trade['profit_levels_notified'])
+                        for level in sorted(settings.get('take_profit_levels', []), reverse=True):
+                            if level not in notified_levels:
+                                current_profit_percent = ((current_price / trade['entry_price']) - 1) * 100
+                                if current_profit_percent >= level:
+                                    notification_message = (
+                                        f"✅ **تم الوصول لهدف ربح | #{trade['id']} {symbol}**\n"
+                                        f"**الربح الحالي:** {current_profit_percent:+.2f}%\n"
+                                        f"**التفاصيل:** تم رفع وقف الخسارة إلى سعر الدخول `${trade['entry_price']}` لتأمين الأرباح.\n"
+                                        f"**متابعة:** سيتم إغلاق الصفقة تلقائيًا إذا لم تستمر في الصعود."
+                                    )
+                                    await safe_send_message(self.application.bot, notification_message)
+                                    
+                                    # Update trade state in DB
+                                    notified_levels.append(level)
+                                    await conn.execute("UPDATE trades SET stop_loss = ?, profit_levels_notified = ? WHERE id = ?", (trade['entry_price'], json.dumps(notified_levels), trade['id']))
+                                    trade['stop_loss'] = trade['entry_price']
+                                    break
                     # --- END OF NEW LOGIC ---
 
                     if settings['trailing_sl_enabled']:
@@ -618,7 +612,6 @@ class TradeGuardian:
                         if not trade['trailing_sl_active'] and current_price >= trade['entry_price'] * (1 + settings['trailing_sl_activation_percent'] / 100):
                             trade['trailing_sl_active'] = True; trade['stop_loss'] = trade['entry_price']
                             await conn.execute("UPDATE trades SET trailing_sl_active = 1, stop_loss = ? WHERE id = ?", (trade['entry_price'], trade['id']))
-                            # الرسالة الجديدة:
                             await safe_send_message(self.application.bot, "🔒 **الصفقة مؤمنة!**\n"
                                                                          "━━━━━━━━━━━━━━━━━━━━\n"
                                                                          "**الحالة:** تم تفعيل الوقف المتحرك.\n"
@@ -646,19 +639,15 @@ class TradeGuardian:
                 logger.critical(f"Attempted to close #{trade_id} but no balance for {asset_to_sell}.", extra=log_ctx)
                 async with aiosqlite.connect(DB_FILE) as conn:
                     await conn.execute("UPDATE trades SET status = 'closure_failed', reason = 'Zero balance' WHERE id = ?", (trade_id,)); await conn.commit()
-                # الرسالة الجديدة:
                 await safe_send_message(bot, f"🚨 **فشل حرج: لا يوجد رصيد**\n"
                                              f"لا يمكن إغلاق الصفقة #{trade_id} لعدم توفر رصيد كافٍ من {asset_to_sell}.")
                 return
             formatted_quantity = bot_data.exchange.amount_to_precision(symbol, available_quantity)
-            # تم إصلاح مشكلة clOrdId عن طريق إزالة الشرطة السفلية
             params = {'tdMode': 'cash', 'clOrdId': f"close{trade_id}{int(time.time() * 1000)}"}
             await bot_data.exchange.create_market_sell_order(symbol, formatted_quantity, params)
             pnl = (close_price - trade['entry_price']) * trade['quantity']
             pnl_percent = (close_price / trade['entry_price'] - 1) * 100 if trade['entry_price'] > 0 else 0
             
-            # --- START OF FIX ---
-            # تحديث منطق السبب والإيموجي
             if pnl > 0 and reason == "فاشلة (SL)":
                 reason = "تم تأمين الربح (TSL)"
                 emoji = "✅"
@@ -667,15 +656,18 @@ class TradeGuardian:
             else:
                 emoji = "🛑"
             
-            # حساب كفاءة الخروج
             highest_price_val = max(trade.get('highest_price', 0), close_price)
             highest_pnl_percent = ((highest_price_val / trade['entry_price'] - 1) * 100) if trade['entry_price'] > 0 else 0
             
             exit_efficiency_percent = 0
             if highest_price_val > trade['entry_price']:
-                exit_efficiency_percent = (pnl / ((highest_price_val - trade['entry_price']) * trade['quantity'])) * 100 if (highest_price_val - trade['entry_price']) * trade['quantity'] > 0 else 0
-
-            # --- END OF FIX ---
+                # --- START OF FIX: Avoiding division by zero ---
+                highest_pnl_usdt = (highest_price_val - trade['entry_price']) * trade['quantity']
+                if highest_pnl_usdt > 0:
+                    exit_efficiency_percent = (pnl / highest_pnl_usdt) * 100
+                else:
+                    exit_efficiency_percent = 0
+                # --- END OF FIX ---
 
             async with aiosqlite.connect(DB_FILE) as conn:
                 await conn.execute("UPDATE trades SET status = ?, close_price = ?, pnl_usdt = ? WHERE id = ?", (reason, close_price, pnl, trade['id'])); await conn.commit()
@@ -686,7 +678,6 @@ class TradeGuardian:
             days, rem = divmod(duration.total_seconds(), 86400); hours, rem = divmod(rem, 3600); minutes, _ = divmod(rem, 60)
             duration_str = f"{int(days)}d {int(hours)}h {int(minutes)}m" if days > 0 else f"{int(hours)}h {int(minutes)}m"
             
-            # الرسالة الجديدة:
             msg = (f"{emoji} **تم إغلاق الصفقة | #{trade_id} {symbol}**\n"
                    f"**السبب:** {reason}\n"
                    f"━━━━━━━━━━━━━━━━━━\n"
@@ -758,19 +749,23 @@ async def worker(queue, signals_list, errors_list):
                 if spread_percent > settings.get('spread_filter', {}).get('max_spread_percent', 0.5): continue
             except Exception: continue
             
-            # --- START OF FIX: ADDING VOLUME AND MULTI-TIMEFRAME FILTERS ---
-            ohlcv = await exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=220)
+            # --- START OF FIX: IMPROVED MULTI-TIMEFRAME ANALYSIS ---
             if settings.get('multi_timeframe_enabled', True):
                 ohlcv_htf = await exchange.fetch_ohlcv(symbol, settings.get('multi_timeframe_htf'), limit=220)
                 df_htf = pd.DataFrame(ohlcv_htf, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                if len(df_htf) < 201: continue
                 df_htf['timestamp'] = pd.to_datetime(df_htf['timestamp'], unit='ms')
                 df_htf = df_htf.set_index('timestamp').sort_index()
                 df_htf.ta.ema(length=200, append=True)
                 ema_col_name_htf = find_col(df_htf.columns, "EMA_200")
-                if not ema_col_name_htf or pd.isna(df_htf[ema_col_name_htf].iloc[-2]) or df_htf['close'].iloc[-2] < df_htf[ema_col_name_htf].iloc[-2]:
-                    queue.task_done()
-                    continue
+                if not ema_col_name_htf or pd.isna(df_htf[ema_col_name_htf].iloc[-2]): continue
+                
+                is_htf_bullish = df_htf['close'].iloc[-2] > df_htf[ema_col_name_htf].iloc[-2]
+            else:
+                is_htf_bullish = True # Always proceed if filter is disabled
+            # --- END OF FIX ---
 
+            ohlcv = await exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=220)
             if settings.get('trend_filters', {}).get('enabled', True):
                 ema_period = settings.get('trend_filters', {}).get('ema_period', 200)
                 if len(ohlcv) < ema_period + 1: continue
@@ -785,7 +780,6 @@ async def worker(queue, signals_list, errors_list):
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                 df = df.set_index('timestamp').sort_index()
-            # --- END OF FIX ---
             
             vol_filters = settings.get('volatility_filters', {})
             atr_period, min_atr_percent = vol_filters.get('atr_period_for_filter', 14), vol_filters.get('min_atr_percent', 0.8)
@@ -800,11 +794,7 @@ async def worker(queue, signals_list, errors_list):
             if pd.isna(df['volume_sma'].iloc[-2]) or df['volume_sma'].iloc[-2] == 0: continue
             rvol = df['volume'].iloc[-2] / df['volume_sma'].iloc[-2]
             
-            # --- NEW VOLUME FILTER LOGIC ---
-            if rvol < settings.get('volume_filter_multiplier', 2.0):
-                queue.task_done()
-                continue
-            # --- END OF NEW LOGIC ---
+            if rvol < settings.get('volume_filter_multiplier', 2.0): continue
 
             adx_value = 0
             if settings.get('adx_filter_enabled', False):
@@ -824,6 +814,13 @@ async def worker(queue, signals_list, errors_list):
 
             if confirmed_reasons:
                 reason_str, strength = ' + '.join(set(confirmed_reasons)), len(set(confirmed_reasons))
+                
+                # --- START OF FIX: Reduce signal strength if HTF is not bullish ---
+                if not is_htf_bullish:
+                    strength = max(1, int(strength / 2)) # Halve strength, but keep at least 1
+                    reason_str += " (اتجاه كبير ضعيف)"
+                # --- END OF FIX ---
+                
                 entry_price = df.iloc[-2]['close']
                 df.ta.atr(length=14, append=True)
                 atr = df.iloc[-2].get(find_col(df.columns, "ATRr_14"), 0)
@@ -1309,8 +1306,9 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton(f"تفعيل الوقف المتحرك (%): {s['trailing_sl_activation_percent']}", callback_data="param_set_trailing_sl_activation_percent"),
          InlineKeyboardButton(f"مسافة الوقف المتحرك (%): {s['trailing_sl_callback_percent']}", callback_data="param_set_trailing_sl_callback_percent")],
         [InlineKeyboardButton("--- إعدادات الإشارات والفلترة ---", callback_data="noop")],
-        [InlineKeyboardButton(bool_format('multi_timeframe_enabled', 'فلتر الأطر الزمنية المتعددة'), callback_data="param_toggle_multi_timeframe_enabled")],
         [InlineKeyboardButton(f"مضاعف فلتر الحجم: {s['volume_filter_multiplier']}", callback_data="param_set_volume_filter_multiplier")],
+        [InlineKeyboardButton(bool_format('multi_timeframe_enabled', 'فلتر الأطر الزمنية المتعددة'), callback_data="param_toggle_multi_timeframe_enabled")],
+        [InlineKeyboardButton(f"مستويات إشعار الربح: {s['take_profit_levels']}", callback_data="param_set_take_profit_levels")],
         [InlineKeyboardButton(bool_format('btc_trend_filter_enabled', 'فلتر الاتجاه العام (BTC)'), callback_data="param_toggle_btc_trend_filter_enabled")],
         [InlineKeyboardButton(f"فترة EMA للاتجاه: {get_nested_value(s, ['trend_filters', 'ema_period'])}", callback_data="param_set_trend_filters_ema_period")],
         [InlineKeyboardButton(f"أقصى سبريد مسموح (%): {get_nested_value(s, ['spread_filter', 'max_spread_percent'])}", callback_data="param_set_spread_filter_max_spread_percent")],
@@ -1393,23 +1391,19 @@ async def handle_scanner_toggle(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    # استخلاص اسم النمط من بيانات الزر، مثال: "strict" من "preset_set_strict"
     preset_key = query.data.replace("preset_set_", "")
 
     if preset_settings := SETTINGS_PRESETS.get(preset_key):
-        # 1. تحديث الإعدادات بنفس المنطق السابق
         current_scanners = bot_data.settings.get('active_scanners', [])
         bot_data.settings = copy.deepcopy(preset_settings)
         bot_data.settings['active_scanners'] = current_scanners
         determine_active_preset()
         save_settings()
 
-        # 2. استخلاص أهم القيم لعرضها في رسالة التأكيد
         lf = preset_settings.get('liquidity_filters', {})
         vf = preset_settings.get('volatility_filters', {})
         sf = preset_settings.get('spread_filter', {})
 
-        # 3. إنشاء رسالة التأكيد الديناميكية والواضحة
         confirmation_text = (
             f"✅ *تم تفعيل النمط: {PRESET_NAMES_AR.get(preset_key, preset_key)}*\n\n"
             f"*أهم القيم:*\n"
@@ -1418,7 +1412,6 @@ async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"- `min_atr: {vf.get('min_atr_percent', 'N/A')}%`"
         )
         
-        # 4. إعادة بناء قائمة الأزرار لإبقاء القائمة تفاعلية
         presets_keyboard_markup = InlineKeyboardMarkup([
             [InlineKeyboardButton("🚦 احترافي", callback_data="preset_set_professional")],
             [InlineKeyboardButton("🎯 متشدد", callback_data="preset_set_strict")],
@@ -1427,7 +1420,6 @@ async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="settings_main")]
         ])
         
-        # 5. تعديل الرسالة الأصلية بسلاسة لعرض التأكيد
         try:
             await query.edit_message_text(
                 confirmation_text,
@@ -1435,7 +1427,6 @@ async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=presets_keyboard_markup
             )
         except BadRequest as e:
-            # لتجنب الأخطاء إذا لم يتغير شيء في الرسالة
             if "Message is not modified" not in str(e):
                 logger.warning(f"Error editing preset message: {e}")
 
