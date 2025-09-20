@@ -903,6 +903,21 @@ async def worker_batch(queue, signals_list, errors_list):
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df = df.set_index('timestamp').sort_index()
         
+        # --- START OF FIX: WHALE RADAR BYPASS LOGIC ---
+        whale_radar_signal = await analyze_whale_radar(df.copy(), {}, 0, 0, exchange, symbol)
+        if whale_radar_signal:
+            reason_str = whale_radar_signal['reason']
+            strength = 5 # Assign a high strength
+            entry_price = df.iloc[-2]['close']
+            df.ta.atr(length=14, append=True)
+            atr = df.iloc[-2].get(find_col(df.columns, "ATRr_14"), 0)
+            risk = atr * settings['atr_sl_multiplier']
+            stop_loss, take_profit = entry_price - risk, entry_price + (risk * settings['risk_reward_ratio'])
+            signals_list.append({"symbol": symbol, "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "reason": reason_str, "strength": strength})
+            queue.task_done()
+            continue
+        # --- END OF FIX ---
+        
         if settings.get('trend_filters', {}).get('enabled', True):
             ema_period = settings.get('trend_filters', {}).get('ema_period', 200)
             if len(df) < ema_period + 1:
@@ -951,6 +966,7 @@ async def worker_batch(queue, signals_list, errors_list):
         confirmed_reasons = []
         for name in settings['active_scanners']:
             if not (strategy_func := SCANNERS.get(name)): continue
+            if name == 'whale_radar': continue # already scanned
             params = settings.get(name, {})
             func_args = {'df': df.copy(), 'params': params, 'rvol': rvol, 'adx_value': adx_value}
             if name in ['support_rebound', 'whale_radar']:
@@ -1194,7 +1210,7 @@ async def show_strategy_report_command(update: Update, context: ContextTypes.DEF
         if not reason: continue
         reasons = reason.split(' + ')
         for r in reasons:
-            if status.startswith('ناجحة'): stats[r]['wins'] += 1
+            if status.startswith('na') and 'na' in status: stats[r]['wins'] += 1
             else: stats[r]['losses'] += 1
     report = ["**📜 تقرير أداء الاستراتيجيات**"]
     for r, s in sorted(stats.items(), key=lambda item: item[1]['wins'] + item[1]['losses'], reverse=True):
@@ -1213,8 +1229,8 @@ async def show_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     total_trades = len(trades_data)
     total_pnl = sum(t['pnl_usdt'] for t in trades_data if t['pnl_usdt'] is not None)
-    wins_data = [t['pnl_usdt'] for t in trades_data if t['status'].startswith('ناجحة') and t['pnl_usdt'] is not None]
-    losses_data = [t['pnl_usdt'] for t in trades_data if t['status'].startswith('فاشلة') and t['pnl_usdt'] is not None]
+    wins_data = [t['pnl_usdt'] for t in trades_data if t['status'].startswith('na') and 'na' in t['status'] and t['pnl_usdt'] is not None]
+    losses_data = [t['pnl_usdt'] for t in trades_data if t['status'].startswith('fa') and 'fa' in t['status'] and t['pnl_usdt'] is not None]
     win_count = len(wins_data)
     loss_count = len(losses_data)
     win_rate = (win_count / total_trades * 100) if total_trades > 0 else 0
