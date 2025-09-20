@@ -1630,16 +1630,36 @@ async def post_init(application: Application):
         config = {'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 'password': OKX_API_PASSPHRASE, 'enableRateLimit': True}
         bot_data.exchange = ccxt.okx(config)
         await bot_data.exchange.load_markets()
+        # --- START OF FIX: SYNC OPEN TRADES ON STARTUP ---
         open_positions = await bot_data.exchange.fetch_positions()
         async with aiosqlite.connect(DB_FILE) as conn:
             conn.row_factory = aiosqlite.Row
-            trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'active'")).fetchall()
-            for trade in trades:
-                position_on_exchange = next((p for p in open_positions if p['symbol'].replace('-', '/') == trade['symbol']), None)
+            trades_in_db = await (await conn.execute("SELECT * FROM trades WHERE status = 'active'")).fetchall()
+            
+            # --- Scenario 1: Trade in DB but not on Exchange ---
+            for trade in trades_in_db:
+                position_on_exchange = next((p for p in open_positions if p['symbol'].replace('-', '/') == trade['symbol'] and p['amount'] > 0), None)
                 if not position_on_exchange:
                     logger.warning(f"Trade #{trade['id']} found in DB but not on exchange. Status will be changed to 'Closed Manually'.")
                     await conn.execute("UPDATE trades SET status = 'closed manually' WHERE id = ?", (trade['id'],))
+            
+            # --- Scenario 2: Trade on Exchange but not in DB ---
+            trades_in_db_symbols = {t['symbol'] for t in trades_in_db}
+            for position in open_positions:
+                symbol = position['symbol'].replace('-', '/')
+                if position['amount'] > 0 and symbol not in trades_in_db_symbols:
+                    # Create a new trade entry for the discovered position
+                    logger.warning(f"🚨 Found active trade for {symbol} on exchange not in DB. Restoring...")
+                    timestamp = datetime.now(EGYPT_TZ).isoformat()
+                    entry_price = position['entryPrice'] or 0.0
+                    take_profit = position.get('takeProfitPrice', entry_price * 1.5) # Estimate if not available
+                    stop_loss = position.get('stopLossPrice', entry_price * 0.9) # Estimate if not available
+                    quantity = position['amount']
+                    await conn.execute("INSERT INTO trades (timestamp, symbol, entry_price, take_profit, stop_loss, quantity, status, reason, signal_strength) VALUES (?, ?, ?, ?, ?, ?, 'active', 'Restored on startup', 1)", (timestamp, symbol, entry_price, take_profit, stop_loss, quantity))
+                    await safe_send_message(application.bot, f"⚠️ **تم استعادة صفقة** ⚠️\nتم العثور على صفقة لـ `{symbol}` على المنصة وإضافتها إلى قاعدة البيانات. يرجى مراجعة إعدادات الوقف والهدف يدوياً.")
+            
             await conn.commit()
+        # --- END OF FIX ---
         await bot_data.exchange.fetch_balance()
         logger.info("✅ Successfully connected to OKX.")
     except Exception as e:
@@ -1680,4 +1700,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
