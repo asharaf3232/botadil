@@ -168,8 +168,12 @@ DEFAULT_SETTINGS = {
     "spread_filter": {"max_spread_percent": 0.5},
     "rsi_divergence": {"rsi_period": 14, "lookback_period": 35, "peak_trough_lookback": 5, "confirm_with_rsi_exit": True},
     "supertrend_pullback": {"atr_period": 10, "atr_multiplier": 3.0, "swing_high_lookback": 10},
-    "partial_take_profit_enabled": False, # new setting for partial take profit
-    "take_profit_levels": [5.0, 10.0, 15.0], # new setting for profit notification/take profit levels
+    "profit_notifications_enabled": False, # new setting for profit notification/breakeven
+    "take_profit_levels": [2.0, 5.0, 10.0], # new setting for profit notification levels
+    "multi_timeframe_enabled": True, # new setting for multi-timeframe analysis
+    "multi_timeframe_htf": '4h', # new setting for high timeframe
+    "multi_timeframe_ltf": '15m', # new setting for low timeframe
+    "volume_filter_multiplier": 2.0, # new setting for volume filter
 }
 STRATEGY_NAMES_AR = {
     "momentum_breakout": "زخم اختراقي", "breakout_squeeze_pro": "اختراق انضغاطي",
@@ -182,7 +186,6 @@ SETTINGS_PRESETS = {
     "strict": {**copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 3, "risk_reward_ratio": 2.5, "fear_and_greed_threshold": 40, "adx_filter_level": 28, "liquidity_filters": {"min_quote_volume_24h_usd": 2000000, "min_rvol": 2.0}},
     "lenient": {**copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 8, "risk_reward_ratio": 1.8, "fear_and_greed_threshold": 25, "adx_filter_level": 20, "liquidity_filters": {"min_quote_volume_24h_usd": 500000, "min_rvol": 1.2}},
     
-    # --- START OF FIX ---
     "very_lenient": {
         **copy.deepcopy(DEFAULT_SETTINGS), 
         "max_concurrent_trades": 12, 
@@ -190,11 +193,9 @@ SETTINGS_PRESETS = {
         "market_mood_filter_enabled": False, 
         "trend_filters": {"ema_period": 200, "htf_period": 50, "enabled": False}, 
         "liquidity_filters": {"min_quote_volume_24h_usd": 250000, "min_rvol": 1.0},
-        # تمت إضافة هذين السطرين لتعريف قيم خاصة بالنمط فائق التساهل
         "volatility_filters": {"atr_period_for_filter": 14, "min_atr_percent": 0.4},
         "spread_filter": {"max_spread_percent": 1.5}
     }
-    # --- END OF FIX ---
 }
 # =======================================================================================
 # --- Helper, Settings & DB Management ---
@@ -236,11 +237,11 @@ async def safe_edit_message(query, text, **kwargs):
 async def init_database():
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
-            await conn.execute('CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, symbol TEXT, entry_price REAL, take_profit REAL, stop_loss REAL, quantity REAL, status TEXT, reason TEXT, order_id TEXT, highest_price REAL DEFAULT 0, trailing_sl_active BOOLEANE DEFAULT 0, close_price REAL, pnl_usdt REAL, signal_strength INTEGER DEFAULT 1)')
+            await conn.execute('CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, symbol TEXT, entry_price REAL, take_profit REAL, stop_loss REAL, quantity REAL, status TEXT, reason TEXT, order_id TEXT, highest_price REAL DEFAULT 0, trailing_sl_active BOOLEANE DEFAULT 0, close_price REAL, pnl_usdt REAL, signal_strength INTEGER DEFAULT 1, last_profit_notified_price REAL DEFAULT 0)')
             cursor = await conn.execute("PRAGMA table_info(trades)")
             columns = [row[1] for row in await cursor.fetchall()]
-            if 'signal_strength' not in columns:
-                await conn.execute("ALTER TABLE trades ADD COLUMN signal_strength INTEGER DEFAULT 1")
+            if 'signal_strength' not in columns: await conn.execute("ALTER TABLE trades ADD COLUMN signal_strength INTEGER DEFAULT 1")
+            if 'last_profit_notified_price' not in columns: await conn.execute("ALTER TABLE trades ADD COLUMN last_profit_notified_price REAL DEFAULT 0")
             await conn.commit()
         logger.info("Phoenix database initialized successfully.")
     except Exception as e: logger.critical(f"Database initialization failed: {e}")
@@ -355,45 +356,6 @@ async def get_market_mood():
         if fng is not None and fng < s['fear_and_greed_threshold']:
             return {"mood": "NEGATIVE", "reason": f"مشاعر خوف شديد (F&G: {fng})", "btc_mood": btc_mood_text}
     return {"mood": "POSITIVE", "reason": "وضع السوق مناسب", "btc_mood": btc_mood_text}
-
-# --- NEW FUNCTION FOR MULTI-TIMEFRAME ANALYSIS ---
-async def analyze_with_multi_timeframe(symbol, timeframe_htf='4h', timeframe_ltf='15m', required_scanners=['rsi_divergence'], exchange=None):
-    try:
-        # Fetch data for HTF
-        ohlcv_htf = await exchange.fetch_ohlcv(symbol, timeframe_htf, limit=220)
-        df_htf = pd.DataFrame(ohlcv_htf, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        if len(df_htf) < 200: return None # Not enough data for robust analysis
-
-        # Analyze HTF for long-term trend (e.g., using a simple EMA)
-        df_htf.ta.ema(length=200, append=True)
-        ema_col = find_col(df_htf.columns, "EMA_200")
-        if not ema_col or df_htf['close'].iloc[-1] < df_htf[ema_col].iloc[-1]:
-            return None # Skip if not in a bullish trend on HTF
-
-        # Fetch data for LTF
-        ohlcv_ltf = await exchange.fetch_ohlcv(symbol, timeframe_ltf, limit=220)
-        df_ltf = pd.DataFrame(ohlcv_ltf, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        
-        # Run specific scanners on LTF
-        confirmed_reasons = []
-        for name in required_scanners:
-            if not (strategy_func := SCANNERS.get(name)): continue
-            params = bot_data.settings.get(name, {})
-            func_args = {'df': df_ltf.copy(), 'params': params, 'rvol': 1.0, 'adx_value': 30} # simplified for this example
-            result = await strategy_func(**func_args) if asyncio.iscoroutinefunction(strategy_func) else strategy_func(**{k: v for k, v in func_args.items() if k not in ['exchange', 'symbol']})
-            if result: confirmed_reasons.append(result['reason'])
-
-        if confirmed_reasons:
-            reason_str, strength = ' + '.join(set(confirmed_reasons)), len(set(confirmed_reasons))
-            entry_price = df_ltf.iloc[-2]['close']
-            df_ltf.ta.atr(length=14, append=True)
-            atr = df_ltf.iloc[-2].get(find_col(df_ltf.columns, "ATRr_14"), 0)
-            risk = atr * bot_data.settings['atr_sl_multiplier']
-            stop_loss, take_profit = entry_price - risk, entry_price + (risk * bot_data.settings['risk_reward_ratio'])
-            return {"symbol": symbol, "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "reason": reason_str, "strength": strength}
-    except Exception as e:
-        logger.debug(f"Multi-timeframe analysis error for {symbol}: {e}")
-        return None
 
 def analyze_momentum_breakout(df, params, rvol, adx_value):
     df.ta.vwap(append=True); df.ta.bbands(length=20, append=True); df.ta.macd(append=True); df.ta.rsi(append=True)
@@ -624,28 +586,30 @@ class TradeGuardian:
                     if not trade: return
                     trade = dict(trade); settings = bot_data.settings
                     
-                    # --- NEW LOGIC FOR PROFIT NOTIFICATIONS/BREAKEVEN ---
-                    # Check if profit notifications are enabled and trade has not reached a trigger level yet
-                    if settings.get('profit_notifications_enabled', False) and 'profit_triggers_reached' not in trade:
-                        trade_profit_percent = ((current_price / trade['entry_price']) - 1) * 100
-                        # Check against all profit triggers
-                        for trigger_level in sorted(settings.get('profit_triggers_percent', []), reverse=True):
-                            if trade_profit_percent >= trigger_level:
-                                # Send notification and set stop loss to breakeven
-                                notification_message = (
-                                    f"✅ **تم الوصول لهدف ربح | #{trade['id']} {symbol}**\n"
-                                    f"**الربح الحالي:** {trade_profit_percent:+.2f}%\n"
-                                    f"**التفاصيل:** تم رفع وقف الخسارة إلى سعر الدخول `${trade['entry_price']}` لتأمين الأرباح.\n"
-                                    f"**متابعة:** سيتم إغلاق الصفقة تلقائيًا إذا لم تستمر في الصعود."
-                                )
-                                await safe_send_message(self.application.bot, notification_message)
-                                
-                                # Update trade state in DB
-                                await conn.execute("UPDATE trades SET stop_loss = ?, profit_triggers_reached = ? WHERE id = ?", (trade['entry_price'], json.dumps([trigger_level]), trade['id']))
-                                # This is a simplification; a more robust solution would store multiple triggers.
-                                # For now, we'll stop after the first one to avoid spam.
-                                trade['stop_loss'] = trade['entry_price']
-                                break
+                    # --- NEW LOGIC FOR INCREMENTAL PROFIT NOTIFICATIONS & BREAKEVEN ---
+                    if settings.get('profit_notifications_enabled', False):
+                        notification_increment = settings['take_profit_levels'][0] # Use the first value as the increment
+                        current_profit_percent = ((current_price / trade['entry_price']) - 1) * 100
+                        
+                        last_notified_price = trade.get('last_profit_notified_price', 0)
+                        
+                        # Set initial notification price if not set
+                        if last_notified_price == 0:
+                            next_notification_price = trade['entry_price'] * (1 + notification_increment / 100)
+                        else:
+                            next_notification_price = last_notified_price * (1 + notification_increment / 100)
+
+                        if current_price >= next_notification_price:
+                            notification_message = (
+                                f"✅ **تم الوصول لهدف ربح | #{trade['id']} {symbol}**\n"
+                                f"**الربح الحالي:** {current_profit_percent:+.2f}%\n"
+                                f"**التفاصيل:** تم رفع وقف الخسارة إلى سعر الدخول `${trade['entry_price']}` لتأمين الأرباح.\n"
+                                f"**متابعة:** سيتم إغلاق الصفقة تلقائيًا إذا لم تستمر في الصعود."
+                            )
+                            await safe_send_message(self.application.bot, notification_message)
+                            await conn.execute("UPDATE trades SET stop_loss = ?, last_profit_notified_price = ? WHERE id = ?", (trade['entry_price'], current_price, trade['id']))
+                            trade['stop_loss'] = trade['entry_price']
+                            trade['last_profit_notified_price'] = current_price
                     # --- END OF NEW LOGIC ---
 
                     if settings['trailing_sl_enabled']:
@@ -796,6 +760,17 @@ async def worker(queue, signals_list, errors_list):
             
             # --- START OF FIX: ADDING VOLUME AND MULTI-TIMEFRAME FILTERS ---
             ohlcv = await exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=220)
+            if settings.get('multi_timeframe_enabled', True):
+                ohlcv_htf = await exchange.fetch_ohlcv(symbol, settings.get('multi_timeframe_htf'), limit=220)
+                df_htf = pd.DataFrame(ohlcv_htf, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df_htf['timestamp'] = pd.to_datetime(df_htf['timestamp'], unit='ms')
+                df_htf = df_htf.set_index('timestamp').sort_index()
+                df_htf.ta.ema(length=200, append=True)
+                ema_col_name_htf = find_col(df_htf.columns, "EMA_200")
+                if not ema_col_name_htf or pd.isna(df_htf[ema_col_name_htf].iloc[-2]) or df_htf['close'].iloc[-2] < df_htf[ema_col_name_htf].iloc[-2]:
+                    queue.task_done()
+                    continue
+
             if settings.get('trend_filters', {}).get('enabled', True):
                 ema_period = settings.get('trend_filters', {}).get('ema_period', 200)
                 if len(ohlcv) < ema_period + 1: continue
@@ -824,7 +799,12 @@ async def worker(queue, signals_list, errors_list):
             df['volume_sma'] = ta.sma(df['volume'], length=20)
             if pd.isna(df['volume_sma'].iloc[-2]) or df['volume_sma'].iloc[-2] == 0: continue
             rvol = df['volume'].iloc[-2] / df['volume_sma'].iloc[-2]
-            if rvol < settings['liquidity_filters']['min_rvol']: continue
+            
+            # --- NEW VOLUME FILTER LOGIC ---
+            if rvol < settings.get('volume_filter_multiplier', 2.0):
+                queue.task_done()
+                continue
+            # --- END OF NEW LOGIC ---
 
             adx_value = 0
             if settings.get('adx_filter_enabled', False):
@@ -862,7 +842,6 @@ async def initiate_real_trade(signal):
         balance = await exchange.fetch_balance(); usdt_balance = balance.get('USDT', {}).get('free', 0.0)
         if usdt_balance < trade_size:
              logger.error(f"Insufficient USDT for {signal['symbol']}. Have: {usdt_balance}, Need: {trade_size}")
-             # الرسالة الجديدة:
              await safe_send_message(bot_data.application.bot, "🚨 **فشل الشراء: رصيد غير كافٍ**\n"
                                                               f"لا يمكن فتح صفقة جديدة لأن رصيدك من USDT أقل من حجم الصفقة المحدَّد.")
              return False
@@ -887,7 +866,6 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
             if mood_result_fundamental['mood'] in ["NEGATIVE", "DANGEROUS"]:
                 bot_data.market_mood = mood_result_fundamental
                 logger.warning(f"SCAN SKIPPED: Fundamental mood is {mood_result_fundamental['mood']}. Reason: {mood_result_fundamental['reason']}")
-                # الرسالة الجديدة:
                 await safe_send_message(bot, f"🚨 **تنبيه: فحص السوق تم إيقافه!**\n"
                                              "━━━━━━━━━━━━━━━━━━━━\n"
                                              f"**السبب الرئيسي:** {mood_result_fundamental['reason']}\n"
@@ -904,7 +882,6 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         bot_data.market_mood = mood_result
         if mood_result['mood'] in ["NEGATIVE", "DANGEROUS"]:
             logger.warning(f"SCAN SKIPPED: {mood_result['reason']}")
-            # الرسالة الجديدة:
             await safe_send_message(bot, f"🚨 **تنبيه: فحص السوق تم إيقافه!**\n"
                                          "━━━━━━━━━━━━━━━━━━━━\n"
                                          f"**السبب الرئيسي:** {mood_result['reason']}\n"
@@ -943,15 +920,13 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         
         scan_duration = time.time() - scan_start_time
         bot_data.last_scan_info = {"start_time": datetime.fromtimestamp(scan_start_time, EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'), "duration_seconds": int(scan_duration), "checked_symbols": len(top_markets), "analysis_errors": len(analysis_errors)}
-        # الرسالة الجديدة:
-        summary_message = (f"✅ **فحص السوق اكتمل بنجاح**\n"
+        await safe_send_message(bot, f"✅ **فحص السوق اكتمل بنجاح**\n"
                            f"━━━━━━━━━━━━━━━━━━\n"
                            f"**المدة:** {int(scan_duration)} ثانية | **العملات المفحوصة:** {len(top_markets)}\n"
                            f"**النتائج:**\n"
                            f"  - **إشارات جديدة:** {len(signals_found)}\n"
                            f"  - **صفقات تم فتحها:** {trades_opened_count} صفقة\n"
                            f"  - **مشكلات تحليل:** {len(analysis_errors)} عملة")
-        await safe_send_message(bot, summary_message)
 
 async def check_time_sync(context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -965,7 +940,6 @@ async def check_time_sync(context: ContextTypes.DEFAULT_TYPE):
 # =======================================================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Dashboard 🖥️"], ["الإعدادات ⚙️"]]
-    # الرسالة الجديدة:
     await update.message.reply_text("أهلاً بك في **قناص OKX | Phoenix Edition**", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True), parse_mode=ParseMode.MARKDOWN)
 
 async def manual_scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -983,7 +957,6 @@ async def show_dashboard_command(update: Update, context: ContextTypes.DEFAULT_T
         [InlineKeyboardButton("🗓️ التقرير اليومي", callback_data="db_daily_report")],
         [InlineKeyboardButton(f"{ks_status_emoji} {ks_status_text}", callback_data="kill_switch_toggle"), InlineKeyboardButton("🕵️‍♂️ تقرير التشخيص", callback_data="db_diagnostics")]
     ]
-    # الرسالة الجديدة:
     message_text = "🖥️ **لوحة تحكم قناص OKX**\n\nاختر نوع التقرير الذي تريد عرضه:"
     if not bot_data.trading_enabled: message_text += "\n\n**تحذير: تم تفعيل مفتاح الإيقاف.**"
     target_message = update.message or update.callback_query.message
@@ -998,7 +971,6 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
             conn.row_factory = aiosqlite.Row
             closed_today = await (await conn.execute("SELECT * FROM trades WHERE status LIKE '%(%' AND date(timestamp) = ?", (today_str,))).fetchall()
         if not closed_today:
-            # الرسالة الجديدة:
             report_message = f"🗓️ **التقرير اليومي | {today_str}**\n━━━━━━━━━━━━━━━━━━\nلم يتم إغلاق أي صفقات اليوم."
         else:
             wins = [t for t in closed_today if t['status'].startswith('ناجحة')]
@@ -1018,7 +990,6 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
             most_active_strategy_en = strategy_counter.most_common(1)[0][0] if strategy_counter else "N/A"
             most_active_strategy_ar = STRATEGY_NAMES_AR.get(most_active_strategy_en, most_active_strategy_en)
 
-            # الرسالة الجديدة:
             report_message = (
                 f"🗓️ **التقرير اليومي | {today_str}**\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
@@ -1054,7 +1025,6 @@ async def show_trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     async with aiosqlite.connect(DB_FILE) as conn:
         conn.row_factory = aiosqlite.Row; trades = await (await conn.execute("SELECT id, symbol, status FROM trades WHERE status = 'active' OR status = 'pending' ORDER BY id DESC")).fetchall()
     if not trades: 
-        # الرسالة الجديدة:
         text = "لا توجد صفقات نشطة حاليًا."
         keyboard = [[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")]]
         await safe_edit_message(update.callback_query, text, reply_markup=InlineKeyboardMarkup(keyboard)); return
@@ -1171,7 +1141,6 @@ async def show_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         cursor = await conn.execute("SELECT pnl_usdt, status FROM trades WHERE status LIKE 'ناجحة%' OR status LIKE 'فاشلة%'")
         trades_data = await cursor.fetchall()
     if not trades_data:
-        # الرسالة الجديدة:
         await safe_edit_message(update.callback_query, "لم يتم إغلاق أي صفقات بعد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")]]))
         return
     total_trades = len(trades_data)
@@ -1184,7 +1153,6 @@ async def show_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     avg_win = sum(wins_data) / win_count if win_count > 0 else 0
     avg_loss = sum(losses_data) / loss_count if loss_count > 0 else 0
     profit_factor = sum(wins_data) / abs(sum(losses_data)) if sum(losses_data) != 0 else float('inf')
-    # الرسالة الجديدة:
     message = (
         f"📊 **إحصائيات الأداء التفصيلية**\n"
         f"━━━━━━━━━━━━━━━━━━\n"
@@ -1249,7 +1217,6 @@ async def show_trade_history_command(update: Update, context: ContextTypes.DEFAU
         cursor = await conn.execute("SELECT symbol, pnl_usdt, status FROM trades WHERE status LIKE 'ناجحة%' OR status LIKE 'فاشلة%' ORDER BY id DESC LIMIT 10")
         closed_trades = await cursor.fetchall()
     if not closed_trades:
-        # الرسالة الجديدة:
         text = "لم يتم إغلاق أي صفقات بعد."
         keyboard = [[InlineKeyboardButton("🔙 العودة للوحة التحكم", callback_data="back_to_dashboard")]]
         await safe_edit_message(update.callback_query, text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1341,9 +1308,9 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton(bool_format('trailing_sl_enabled', 'تفعيل الوقف المتحرك'), callback_data="param_toggle_trailing_sl_enabled")],
         [InlineKeyboardButton(f"تفعيل الوقف المتحرك (%): {s['trailing_sl_activation_percent']}", callback_data="param_set_trailing_sl_activation_percent"),
          InlineKeyboardButton(f"مسافة الوقف المتحرك (%): {s['trailing_sl_callback_percent']}", callback_data="param_set_trailing_sl_callback_percent")],
-        [InlineKeyboardButton(bool_format('profit_notifications_enabled', 'إشعارات الربح'), callback_data="param_toggle_profit_notifications_enabled")],
-        [InlineKeyboardButton(f"مستويات إشعار الربح: {s['take_profit_levels']}", callback_data="param_set_take_profit_levels")],
-        [InlineKeyboardButton("--- الفلاتر والاتجاه ---", callback_data="noop")],
+        [InlineKeyboardButton("--- إعدادات الإشارات والفلترة ---", callback_data="noop")],
+        [InlineKeyboardButton(bool_format('multi_timeframe_enabled', 'فلتر الأطر الزمنية المتعددة'), callback_data="param_toggle_multi_timeframe_enabled")],
+        [InlineKeyboardButton(f"مضاعف فلتر الحجم: {s['volume_filter_multiplier']}", callback_data="param_set_volume_filter_multiplier")],
         [InlineKeyboardButton(bool_format('btc_trend_filter_enabled', 'فلتر الاتجاه العام (BTC)'), callback_data="param_toggle_btc_trend_filter_enabled")],
         [InlineKeyboardButton(f"فترة EMA للاتجاه: {get_nested_value(s, ['trend_filters', 'ema_period'])}", callback_data="param_set_trend_filters_ema_period")],
         [InlineKeyboardButton(f"أقصى سبريد مسموح (%): {get_nested_value(s, ['spread_filter', 'max_spread_percent'])}", callback_data="param_set_spread_filter_max_spread_percent")],
@@ -1355,7 +1322,6 @@ async def show_parameters_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton(bool_format('news_filter_enabled', 'فلتر الأخبار والبيانات'), callback_data="param_toggle_news_filter_enabled")],
         [InlineKeyboardButton("🔙 العودة للإعدادات", callback_data="settings_main")]
     ]
-    # الرسالة الجديدة:
     await safe_edit_message(update.callback_query, "🎛️ **تعديل المعايير المتقدمة**\n\nاضغط على أي معيار لتعديل قيمته مباشرة:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def show_scanners_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1380,7 +1346,6 @@ async def show_presets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_blacklist_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     blacklist = bot_data.settings.get('asset_blacklist', [])
     blacklist_str = ", ".join(f"`{item}`" for item in blacklist) if blacklist else "لا توجد عملات في القائمة."
-    # الرسالة الجديدة:
     text = f"🚫 **القائمة السوداء**\n" \
            f"هذه قائمة بالعملات التي لن يتم التداول عليها:\n\n{blacklist_str}"
     keyboard = [
@@ -1395,7 +1360,6 @@ async def show_data_management_menu(update: Update, context: ContextTypes.DEFAUL
 
 async def handle_clear_data_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("نعم، متأكد. احذف كل شيء.", callback_data="data_clear_execute")], [InlineKeyboardButton("لا، تراجع.", callback_data="settings_data")]]
-    # الرسالة الجديدة:
     await safe_edit_message(update.callback_query, "🛑 **تأكيد نهائي: حذف البيانات**\n\nهل أنت متأكد أنك تريد حذف جميع بيانات الصفقات بشكل نهائي؟", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_clear_data_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1481,7 +1445,9 @@ async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_parameter_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; param_key = query.data.replace("param_set_", "")
     context.user_data['setting_to_change'] = param_key
-    if '_' in param_key: await query.message.reply_text(f"أرسل القيمة الرقمية الجديدة لـ `{param_key}`:\n\n*ملاحظة: هذا إعداد متقدم (متشعب)، سيتم تحديثه مباشرة.*", parse_mode=ParseMode.MARKDOWN)
+    if param_key in ['take_profit_levels']:
+        await query.message.reply_text(f"أرسل القيم الجديدة لـ `{param_key}` كقائمة أرقام مفصولة بفواصل (مثال: `2, 5, 10`):", parse_mode=ParseMode.MARKDOWN)
+    elif '_' in param_key: await query.message.reply_text(f"أرسل القيمة الرقمية الجديدة لـ `{param_key}`:\n\n*ملاحظة: هذا إعداد متقدم (متشعب)، سيتم تحديثه مباشرة.*", parse_mode=ParseMode.MARKDOWN)
     else: await query.message.reply_text(f"أرسل القيمة الرقمية الجديدة لـ `{param_key}`:", parse_mode=ParseMode.MARKDOWN)
 
 async def handle_toggle_parameter(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1512,7 +1478,6 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
     if not (setting_key := context.user_data.get('setting_to_change')): return
 
     try:
-        # --- START OF FIX: HANDLING NESTED AND LIST VALUES ---
         if setting_key == "take_profit_levels":
             new_value = [float(x.strip()) for x in user_input.split(',')]
             bot_data.settings[setting_key] = new_value
@@ -1534,7 +1499,6 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
             else:
                 new_value = float(user_input)
             current_dict[last_key] = new_value
-        # --- END OF FIX ---
 
         save_settings(); determine_active_preset()
         await update.message.reply_text(f"✅ تم تحديث `{setting_key}` إلى `{new_value}`.")
@@ -1602,7 +1566,6 @@ async def post_init(application: Application):
     jq.run_repeating(check_time_sync, interval=TIME_SYNC_INTERVAL_SECONDS, first=TIME_SYNC_INTERVAL_SECONDS, name="time_sync_job")
     jq.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
     logger.info(f"Jobs scheduled. Daily report at 23:55.")
-    # الرسالة الجديدة:
     try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 قناص OKX | Phoenix Edition - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden: logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
     logger.info("--- Phoenix Engine is now fully operational ---")
