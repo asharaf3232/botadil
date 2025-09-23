@@ -1,19 +1,21 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Sniper Bot | v33.0 (Stability & Broadcast Update) 🚀 ---
+# --- 🚀 OKX Sniper Bot | v33.1 (Activation & Stability Fix) 🚀 ---
 # =======================================================================================
 #
-# هذا الإصدار يحل مشاكل الاستقرار الأساسية ويضيف ميزة بث لوحة التحكم.
+# هذا الإصدار يحل مشكلة حرجة تمنع تفعيل الصفقات بشكل صحيح.
 #
-# --- Changelog v33.0 ---
+# --- Changelog v33.1 ---
+#   ✅ [إصلاح حرج] تم تعديل دالة `activate_trade` لمعالجة "حالة السباق" (Race Condition)
+#      عن طريق إضافة آلية انتظار وإعادة محاولة، مما يضمن تفعيل الصفقات بنجاح.
+#   ✅ [تحسين] تمت إضافة سجلات تتبع مفصلة إلى وظيفة "المشرف" لتشخيص أي
+#      مشاكل مستقبلية في الصفقات العالقة.
 #   ✅ [إصلاح] تم تعديل دالة `activate_trade` لتحديث `last_profit_notification_price`
 #      بشكل صحيح، مما يحل مشكلة إشعارات الربح المتزايد.
 #   ✅ [إصلاح] تم إعادة بناء دالة `post_init` بالكامل لاستخدام `fetch_balance` بدلاً من
 #      `fetch_positions`، مما يحل مشكلة فقدان صفقات SPOT عند إعادة التشغيل.
 #   ✅ [إصلاح] تم التأكد من ترتيب بيانات الشموع زمنيًا (`sort_index`) قبل التحليل
 #      لحل تحذيرات `VWAP` المتكررة.
-#   ✅ [إضافة] تمت إضافة دالة `broadcast_dashboard_update` التي تجمع كل بيانات
-#      الأداء والإحصائيات وتبثها كل 15 دقيقة عبر قناة Redis.
 #
 # =======================================================================================
 
@@ -596,6 +598,23 @@ SCANNERS = {
 # =======================================================================================
 async def activate_trade(order_id, symbol):
     bot = bot_data.application.bot; log_ctx = {'trade_id': 'N/A'}
+
+    # --- [إصلاح حرج] معالجة حالة السباق (Race Condition) ---
+    trade = None
+    for i in range(5): # محاولة العثور على الصفقة لمدة 5 ثوانٍ
+        async with aiosqlite.connect(DB_FILE) as conn:
+            conn.row_factory = aiosqlite.Row
+            trade = await (await conn.execute("SELECT * FROM trades WHERE order_id = ? AND status = 'pending'", (order_id,))).fetchone()
+        if trade:
+            break
+        logger.info(f"Activation for order {order_id} waiting for DB record... Attempt {i+1}/5")
+        await asyncio.sleep(1)
+
+    if not trade:
+        logger.warning(f"Activation for order {order_id} skipped: Could not find a matching 'pending' trade in DB after 5 seconds.")
+        return
+    # --- [نهاية الإصلاح] ---
+
     try:
         order_details = await bot_data.exchange.fetch_order(order_id, symbol)
         filled_price, gross_filled_quantity = order_details.get('average', 0.0), order_details.get('filled', 0.0)
@@ -680,7 +699,7 @@ class PrivateWebSocketManager:
         timestamp = str(time.time()); message = timestamp + 'GET' + '/users/self/verify'
         mac = hmac.new(bytes(OKX_API_SECRET, 'utf8'), bytes(message, 'utf8'), 'sha256')
         sign = base64.b64encode(mac.digest()).decode()
-        return [{"apiKey": OKX_API_KEY, "passphrase": OKX_API_PASSPHRASE, "timestamp": timestamp, "sign": sign}]
+        return [{"apiKey": OKX_API_KEY, "passphrase": OKX_API_PASSPHRISE, "timestamp": timestamp, "sign": sign}]
     async def _message_handler(self, msg):
         if msg == 'ping': await self.websocket.send('pong'); return
         data = json.loads(msg)
@@ -704,8 +723,21 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
     async with aiosqlite.connect(DB_FILE) as conn:
         conn.row_factory = aiosqlite.Row
         two_mins_ago = (datetime.now(EGYPT_TZ) - timedelta(minutes=2)).isoformat()
+
+        # --- [إضافة تتبع] ---
+        all_pending = await (await conn.execute("SELECT id, timestamp FROM trades WHERE status = 'pending'")).fetchall()
+        if all_pending:
+            logger.info(f"🕵️ Supervisor: Found {len(all_pending)} total pending trades in DB. Checking timestamps...")
+            for p_trade in all_pending:
+                 logger.info(f"  - Pending trade #{p_trade['id']} has timestamp: {p_trade['timestamp']}. Cutoff is {two_mins_ago}")
+        # --- [نهاية الإضافة] ---
+
         stuck_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'pending' AND timestamp <= ?", (two_mins_ago,))).fetchall()
-        if not stuck_trades: logger.info("🕵️ Supervisor: Audit complete. No abandoned trades found."); return
+        if not stuck_trades:
+            logger.info("🕵️ Supervisor: Audit complete. No abandoned trades found.")
+            return
+        
+        logger.info(f"🕵️ Supervisor: Found {len(stuck_trades)} stuck trades to process.")
         for trade_data in stuck_trades:
             trade = dict(trade_data); order_id, symbol = trade['order_id'], trade['symbol']
             logger.warning(f"🕵️ Supervisor: Found abandoned trade #{trade['id']}. Investigating.", extra={'trade_id': trade['id']})
@@ -1047,8 +1079,8 @@ async def worker_batch(queue, signals_list, errors_list):
                 signals_list.append({"symbol": symbol, "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "reason": reason_str, "strength": strength, "weight": trade_weight})
             queue.task_done()
         except Exception as e:
-            if 'symbol' in locals(): logger.error(f"Error processing symbol {symbol}: {e}", exc_info=False); errors_list.append(symbol)
-            else: logger.error(f"Worker error with no symbol context: {e}", exc_info=False)
+            if 'symbol' in locals(): logger.error(f"Error processing symbol {symbol}: {e}", exc_info=True); errors_list.append(symbol)
+            else: logger.error(f"Worker error with no symbol context: {e}", exc_info=True)
             if not queue.empty(): queue.task_done()
 
 async def initiate_real_trade(signal):
@@ -1834,3 +1866,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
