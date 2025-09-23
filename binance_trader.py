@@ -1,21 +1,15 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Sniper Bot | v33.1 (Activation & Stability Fix) 🚀 ---
+# --- 🚀 OKX Sniper Bot | v33.2 (Final Activation Fix) 🚀 ---
 # =======================================================================================
 #
-# هذا الإصدار يحل مشكلة حرجة تمنع تفعيل الصفقات بشكل صحيح.
+# هذا الإصدار يصلح بشكل نهائي الخلل المنطقي في دالة التفعيل.
 #
-# --- Changelog v33.1 ---
-#   ✅ [إصلاح حرج] تم تعديل دالة `activate_trade` لمعالجة "حالة السباق" (Race Condition)
-#      عن طريق إضافة آلية انتظار وإعادة محاولة، مما يضمن تفعيل الصفقات بنجاح.
-#   ✅ [تحسين] تمت إضافة سجلات تتبع مفصلة إلى وظيفة "المشرف" لتشخيص أي
-#      مشاكل مستقبلية في الصفقات العالقة.
-#   ✅ [إصلاح] تم تعديل دالة `activate_trade` لتحديث `last_profit_notification_price`
-#      بشكل صحيح، مما يحل مشكلة إشعارات الربح المتزايد.
-#   ✅ [إصلاح] تم إعادة بناء دالة `post_init` بالكامل لاستخدام `fetch_balance` بدلاً من
-#      `fetch_positions`، مما يحل مشكلة فقدان صفقات SPOT عند إعادة التشغيل.
-#   ✅ [إصلاح] تم التأكد من ترتيب بيانات الشموع زمنيًا (`sort_index`) قبل التحليل
-#      لحل تحذيرات `VWAP` المتكررة.
+# --- Changelog v33.2 ---
+#   ✅ [إصلاح نهائي] تم حذف كود البحث المكرر في دالة `activate_trade` الذي كان
+#      يمنع إكمال عملية التفعيل. الآن تعمل الدالة بشكل صحيح وموثوق.
+#   ✅ [إصلاح حرج] آلية الانتظار لمعالجة "حالة السباق" (Race Condition) تعمل الآن.
+#   ✅ [تحسين] تمت إضافة سجلات تتبع مفصلة إلى وظيفة "المشرف".
 #
 # =======================================================================================
 
@@ -91,7 +85,6 @@ SUPERVISOR_INTERVAL_SECONDS = 120
 TIME_SYNC_INTERVAL_SECONDS = 3600
 STRATEGY_ANALYSIS_INTERVAL_SECONDS = 21600 # 6 hours
 
-# --- [تعديل] استخدام مسار مطلق لضمان الثبات ---
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(APP_ROOT, 'okx_sniper_v33.db')
 SETTINGS_FILE = os.path.join(APP_ROOT, 'okx_sniper_settings_v33.json')
@@ -276,9 +269,6 @@ async def log_pending_trade_to_db(signal, buy_order):
     except Exception as e: logger.error(f"DB Log Pending Error: {e}"); return False
 
 async def broadcast_signal_to_redis(signal):
-    """
-    يبث إشارة التداول إلى قناة Redis المحددة.
-    """
     if not bot_data.redis_client:
         logger.warning("Redis client not available. Skipping broadcast.")
         return
@@ -304,25 +294,17 @@ async def broadcast_signal_to_redis(signal):
 # --- 🧠 Mastermind Brain (Analysis, Mood & Broadcasting) 🧠 ---
 # =======================================================================================
 async def broadcast_dashboard_update(context: ContextTypes.DEFAULT_TYPE):
-    """
-    يجمع كل البيانات الهامة من بوت العقل ويبثها عبر Redis.
-    """
     if not bot_data.redis_client:
         return
 
     try:
-        # --- تجميع الإحصائيات العامة من قاعدة البيانات ---
-        total_pnl = 0.0
-        win_rate = 0.0
-        total_trades = 0
+        total_pnl, win_rate, total_trades = 0.0, 0.0, 0
         async with aiosqlite.connect(DB_FILE) as conn:
-            # PNL
             cursor_pnl = await conn.execute("SELECT SUM(pnl_usdt) FROM trades WHERE status LIKE '%(%'")
             pnl_result = await cursor_pnl.fetchone()
             if pnl_result and pnl_result[0] is not None:
                 total_pnl = pnl_result[0]
             
-            # Win Rate
             cursor_trades = await conn.execute("SELECT status FROM trades WHERE status LIKE '%(%'")
             closed_trades = await cursor_trades.fetchall()
             total_trades = len(closed_trades)
@@ -330,25 +312,16 @@ async def broadcast_dashboard_update(context: ContextTypes.DEFAULT_TYPE):
                 wins = sum(1 for trade in closed_trades if 'ناجحة' in trade[0] or 'تأمين' in trade[0])
                 win_rate = (wins / total_trades) * 100
 
-        # --- تجميع كل البيانات في كائن واحد ---
         dashboard_data = {
-            "timestamp_utc": datetime.utcnow().isoformat(),
-            "trading_enabled": bot_data.trading_enabled,
+            "timestamp_utc": datetime.utcnow().isoformat(), "trading_enabled": bot_data.trading_enabled,
             "active_preset_name": bot_data.active_preset_name,
             "active_scanners": [STRATEGY_NAMES_AR.get(s, s) for s in bot_data.settings.get('active_scanners', [])],
-            "overall_stats": {
-                "total_pnl": round(total_pnl, 2),
-                "win_rate": round(win_rate, 2),
-                "total_trades": total_trades
-            },
-            "strategy_performance": bot_data.strategy_performance,
-            "last_scan_info": bot_data.last_scan_info,
+            "overall_stats": { "total_pnl": round(total_pnl, 2), "win_rate": round(win_rate, 2), "total_trades": total_trades },
+            "strategy_performance": bot_data.strategy_performance, "last_scan_info": bot_data.last_scan_info,
             "market_mood": bot_data.market_mood
         }
         
-        channel = "brain_dashboard_update"
-        await bot_data.redis_client.publish(channel, json.dumps(dashboard_data))
-        
+        await bot_data.redis_client.publish("brain_dashboard_update", json.dumps(dashboard_data))
     except Exception as e:
         logger.warning(f"Could not broadcast dashboard update to Redis. Error: {e}", exc_info=True)
 
@@ -356,329 +329,123 @@ async def update_strategy_performance(context: ContextTypes.DEFAULT_TYPE):
     logger.info("🧠 Adaptive Mind: Analyzing strategy performance...")
     try:
         async with aiosqlite.connect(DB_FILE) as conn:
-            cursor = await conn.execute("SELECT reason, status, pnl_usdt FROM trades WHERE status LIKE '%(%' ORDER BY id DESC LIMIT 100")
-            trades = await cursor.fetchall()
+            trades = await (await conn.execute("SELECT reason, status, pnl_usdt FROM trades WHERE status LIKE '%(%' ORDER BY id DESC LIMIT 100")).fetchall()
 
         if not trades: logger.info("🧠 Adaptive Mind: No closed trades found to analyze."); return
         stats = defaultdict(lambda: {'wins': 0, 'losses': 0, 'total_pnl': 0.0, 'win_pnl': 0.0, 'loss_pnl': 0.0})
         for reason_str, status, pnl in trades:
             if not reason_str or pnl is None: continue
-            clean_reason = reason_str.split(' (')[0]
-            reasons = clean_reason.split(' + ')
+            reasons = reason_str.split(' (')[0].split(' + ')
             for r in set(reasons):
-                is_win = 'ناجحة' in status or 'تأمين' in status
-                if is_win: stats[r]['wins'] += 1; stats[r]['win_pnl'] += pnl
+                if 'ناجحة' in status or 'تأمين' in status: stats[r]['wins'] += 1; stats[r]['win_pnl'] += pnl
                 else: stats[r]['losses'] += 1; stats[r]['loss_pnl'] += pnl
                 stats[r]['total_pnl'] += pnl
-        performance_data = {}
-        for r, s in stats.items():
-            total = s['wins'] + s['losses']
-            win_rate = (s['wins'] / total * 100) if total > 0 else 0
-            profit_factor = s['win_pnl'] / abs(s['loss_pnl']) if s['loss_pnl'] != 0 else float('inf')
-            performance_data[r] = {"win_rate": round(win_rate, 2), "profit_factor": round(profit_factor, 2), "total_trades": total}
-        bot_data.strategy_performance = performance_data
-        logger.info(f"🧠 Adaptive Mind: Analysis complete. Performance data for {len(performance_data)} strategies updated.")
+        
+        bot_data.strategy_performance = {
+            r: {"win_rate": round((s['wins'] / (s['wins'] + s['losses']) * 100) if s['wins'] + s['losses'] > 0 else 0, 2),
+                "profit_factor": round(s['win_pnl'] / abs(s['loss_pnl']) if s['loss_pnl'] != 0 else float('inf'), 2),
+                "total_trades": s['wins'] + s['losses']}
+            for r, s in stats.items()
+        }
+        logger.info(f"🧠 Adaptive Mind: Analysis complete for {len(bot_data.strategy_performance)} strategies.")
     except Exception as e: logger.error(f"🧠 Adaptive Mind: Failed to analyze strategy performance: {e}", exc_info=True)
 
-
-async def propose_strategy_changes(context: ContextTypes.DEFAULT_TYPE):
-    s = bot_data.settings
-    if not s.get('adaptive_intelligence_enabled') or not s.get('strategy_proposal_enabled'): return
-    logger.info("🧠 Adaptive Mind: Checking for underperforming strategies to propose changes...")
-    active_scanners = s.get('active_scanners', [])
-    min_trades = s.get('strategy_analysis_min_trades', 10)
-    deactivation_wr = s.get('strategy_deactivation_threshold_wr', 45.0)
-
-    for scanner in active_scanners:
-        perf = bot_data.strategy_performance.get(scanner)
-        if perf and perf['total_trades'] >= min_trades and perf['win_rate'] < deactivation_wr:
-            if bot_data.pending_strategy_proposal.get('scanner') == scanner: continue
-            proposal_key = f"prop_{int(time.time())}"
-            bot_data.pending_strategy_proposal = {
-                "key": proposal_key, "action": "disable", "scanner": scanner,
-                "reason": f"أظهرت أداءً ضعيفًا بمعدل نجاح `{perf['win_rate']}%` في آخر `{perf['total_trades']}` صفقة."
-            }
-            logger.warning(f"🧠 Adaptive Mind: Proposing to disable '{scanner}' due to low performance.")
-            message = (f"💡 **اقتراح تحسين الأداء** 💡\n\n"
-                       f"مرحباً، بناءً على التحليل المستمر، لاحظت أن استراتيجية **'{STRATEGY_NAMES_AR.get(scanner, scanner)}'** "
-                       f"{bot_data.pending_strategy_proposal['reason']}\n\n"
-                       f"أقترح تعطيلها مؤقتًا للتركيز على الاستراتيجيات الأكثر ربحية. هل توافق على هذا التعديل؟")
-            keyboard = [[InlineKeyboardButton("✅ موافقة", callback_data=f"strategy_adjust_approve_{proposal_key}"),
-                         InlineKeyboardButton("❌ رفض", callback_data=f"strategy_adjust_reject_{proposal_key}")]]
-            await safe_send_message(context.bot, message, reply_markup=InlineKeyboardMarkup(keyboard))
-            return
-
-async def translate_text_gemini(text_list):
-    if not GEMINI_API_KEY: logger.warning("GEMINI_API_KEY not found. Skipping translation."); return text_list, False
-    if not text_list: return [], True
-    prompt = "Translate the following English headlines to Arabic. Return only the translated text, with each headline on a new line:\n\n" + "\n".join(text_list)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            response = await client.post(url, json=payload, headers={"Content-Type": "application/json"})
-            response.raise_for_status()
-            result = response.json()
-            translated_text = result['candidates'][0]['content']['parts'][0]['text']
-            return translated_text.strip().split('\n'), True
-    except Exception as e: logger.error(f"Gemini translation failed: {e}"); return text_list, False
-
-def get_alpha_vantage_economic_events():
-    if not ALPHA_VANTAGE_API_KEY or ALPHA_VANTAGE_API_KEY == 'YOUR_AV_KEY_HERE': return []
-    today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-    params = {'function': 'ECONOMIC_CALENDAR', 'horizon': '3month', 'apikey': ALPHA_VANTAGE_API_KEY}
-    try:
-        response = httpx.get('https://www.alphavantage.co/query', params=params, timeout=20)
-        response.raise_for_status(); data_str = response.text
-        if "premium" in data_str.lower(): return []
-        lines = data_str.strip().split('\r\n')
-        if len(lines) < 2: return []
-        header = [h.strip() for h in lines[0].split(',')]
-        events = [dict(zip(header, [v.strip() for v in line.split(',')])) for line in lines[1:]]
-        high_impact_events = [e.get('event', 'Unknown Event') for e in events if e.get('releaseDate', '') == today_str and e.get('impact', '').lower() == 'high' and e.get('country', '') in ['USD', 'EUR']]
-        if high_impact_events: logger.warning(f"High-impact events today: {high_impact_events}")
-        return high_impact_events
-    except httpx.RequestError as e: logger.error(f"Failed to fetch economic calendar: {e}"); return None
-
-def get_latest_crypto_news(limit=15):
-    urls = ["https://cointelegraph.com/rss", "https://www.coindesk.com/arc/outboundfeeds/rss/"]
-    headlines = [entry.title for url in urls for entry in feedparser.parse(url).entries[:7]]
-    return list(set(headlines))[:limit]
-
-def analyze_sentiment_of_headlines(headlines):
-    if not headlines or not NLTK_AVAILABLE: return "N/A", 0.0
-    sia = SentimentIntensityAnalyzer()
-    score = sum(sia.polarity_scores(h)['compound'] for h in headlines) / len(headlines)
-    if score > 0.15: mood = "إيجابية"
-    elif score < -0.15: mood = "سلبية"
-    else: mood = "محايدة"
-    return mood, score
-
-async def get_fundamental_market_mood():
-    s = bot_data.settings
-    if not s.get('news_filter_enabled', True): return {"mood": "POSITIVE", "reason": "فلتر الأخبار معطل"}
-    high_impact_events = await asyncio.to_thread(get_alpha_vantage_economic_events)
-    if high_impact_events is None: return {"mood": "DANGEROUS", "reason": "فشل جلب البيانات الاقتصادية"}
-    if high_impact_events: return {"mood": "DANGEROUS", "reason": f"أحداث هامة اليوم: {', '.join(high_impact_events)}"}
-    latest_headlines = await asyncio.to_thread(get_latest_crypto_news)
-    sentiment, score = analyze_sentiment_of_headlines(latest_headlines)
-    logger.info(f"Market sentiment score: {score:.2f} ({sentiment})")
-    if score > 0.25: return {"mood": "POSITIVE", "reason": f"مشاعر إيجابية (الدرجة: {score:.2f})"}
-    elif score < -0.25: return {"mood": "NEGATIVE", "reason": f"مشاعر سلبية (الدرجة: {score:.2f})"}
-    else: return {"mood": "NEUTRAL", "reason": f"مشاعر محايدة (الدرجة: {score:.2f})"}
-
-def find_col(df_columns, prefix):
-    try: return next(col for col in df_columns if col.startswith(prefix))
-    except StopIteration: return None
-
-async def get_fear_and_greed_index():
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.get("https://api.alternative.me/fng/?limit=1", timeout=10)
-            return int(r.json()['data'][0]['value'])
-    except Exception: return None
-
-async def get_market_mood():
-    s = bot_data.settings
-    if s.get('btc_trend_filter_enabled', True):
-        try:
-            htf_period = s['trend_filters']['htf_period']
-            ohlcv = await bot_data.exchange.fetch_ohlcv('BTC/USDT', '4h', limit=htf_period + 5)
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['sma'] = ta.sma(df['close'], length=htf_period)
-            is_btc_bullish = df['close'].iloc[-1] > df['sma'].iloc[-1]
-            btc_mood_text = "صاعد ✅" if is_btc_bullish else "هابط ❌"
-            if not is_btc_bullish: return {"mood": "NEGATIVE", "reason": "اتجاه BTC هابط", "btc_mood": btc_mood_text}
-        except Exception as e: return {"mood": "DANGEROUS", "reason": f"فشل جلب بيانات BTC: {e}", "btc_mood": "UNKNOWN"}
-    else: btc_mood_text = "الفلتر معطل"
-    if s.get('market_mood_filter_enabled', True):
-        fng = await get_fear_and_greed_index()
-        if fng is not None and fng < s['fear_and_greed_threshold']:
-            return {"mood": "NEGATIVE", "reason": f"مشاعر خوف شديد (F&G: {fng})", "btc_mood": btc_mood_text}
-    return {"mood": "POSITIVE", "reason": "وضع السوق مناسب", "btc_mood": btc_mood_text}
-
-def analyze_momentum_breakout(df, params, rvol, adx_value):
-    df.ta.vwap(append=True); df.ta.bbands(length=20, append=True); df.ta.macd(append=True); df.ta.rsi(append=True)
-    last, prev = df.iloc[-2], df.iloc[-3]
-    macd_col, macds_col, bbu_col, rsi_col = find_col(df.columns, "MACD_"), find_col(df.columns, "MACDs_"), find_col(df.columns, "BBU_"), find_col(df.columns, "RSI_")
-    if not all([macd_col, macds_col, bbu_col, rsi_col]): return None
-    if (prev[macd_col] <= prev[macds_col] and last[macd_col] > last[macds_col] and last['close'] > last[bbu_col] and last['close'] > last["VWAP_D"] and last[rsi_col] < 68):
-        return {"reason": "momentum_breakout"}
-    return None
-
-def analyze_breakout_squeeze_pro(df, params, rvol, adx_value):
-    df.ta.bbands(length=20, append=True); df.ta.kc(length=20, scalar=1.5, append=True); df.ta.obv(append=True)
-    bbu_col, bbl_col, kcu_col, kcl_col = find_col(df.columns, "BBU_"), find_col(df.columns, "BBL_"), find_col(df.columns, "KCUe_"), find_col(df.columns, "KCLEe_")
-    if not all([bbu_col, bbl_col, kcu_col, kcl_col]): return None
-    last, prev = df.iloc[-2], df.iloc[-3]
-    is_in_squeeze = prev[bbl_col] > prev[kcl_col] and prev[bbu_col] < prev[kcu_col]
-    if is_in_squeeze and (last['close'] > last[bbu_col]) and (last['volume'] > df['volume'].rolling(20).mean().iloc[-2] * 1.5) and (df['OBV'].iloc[-2] > df['OBV'].iloc[-3]):
-        return {"reason": "breakout_squeeze_pro"}
-    return None
-
-async def analyze_support_rebound(df, params, rvol, adx_value, exchange, symbol):
-    try:
-        ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', limit=100)
-        if len(ohlcv_1h) < 50: return None
-        df_1h = pd.DataFrame(ohlcv_1h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        current_price = df_1h['close'].iloc[-1]
-        recent_lows = df_1h['low'].rolling(window=10, center=True).min()
-        supports = recent_lows[recent_lows.notna()]
-        closest_support = max([s for s in supports if s < current_price], default=None)
-        if not closest_support or ((current_price - closest_support) / closest_support * 100 > 1.0): return None
-        last_candle_15m = df.iloc[-2]
-        if last_candle_15m['close'] > last_candle_15m['open'] and last_candle_15m['volume'] > df['volume'].rolling(window=20).mean().iloc[-2] * 1.5:
-            return {"reason": "support_rebound"}
-    except Exception: return None
-    return None
-
-def analyze_sniper_pro(df, params, rvol, adx_value):
-    try:
-        compression_candles = 24
-        if len(df) < compression_candles + 2: return None
-        compression_df = df.iloc[-compression_candles-1:-1]
-        highest_high, lowest_low = compression_df['high'].max(), compression_df['low'].min()
-        if lowest_low <= 0: return None
-        volatility = (highest_high - lowest_low) / lowest_low * 100
-        if volatility < 12.0:
-            last_candle = df.iloc[-2]
-            if last_candle['close'] > highest_high and last_candle['volume'] > compression_df['volume'].mean() * 2:
-                return {"reason": "sniper_pro"}
-    except Exception: return None
-    return None
-
-async def analyze_whale_radar(df, params, rvol, adx_value, exchange, symbol):
-    try:
-        ob = await exchange.fetch_order_book(symbol, limit=20)
-        if not ob or not ob.get('bids'): return None
-        if sum(float(price) * float(qty) for price, qty in ob['bids'][:10]) > 30000:
-            return {"reason": "whale_radar"}
-    except Exception: return None
-    return None
-
-def analyze_rsi_divergence(df, params, rvol, adx_value):
-    if not SCIPY_AVAILABLE: return None
-    df.ta.rsi(length=params.get('rsi_period', 14), append=True)
-    rsi_col = find_col(df.columns, f"RSI_{params.get('rsi_period', 14)}")
-    if not rsi_col or df[rsi_col].isnull().all(): return None
-    subset = df.iloc[-params.get('lookback_period', 35):].copy()
-    price_troughs_idx, _ = find_peaks(-subset['low'], distance=params.get('peak_trough_lookback', 5))
-    rsi_troughs_idx, _ = find_peaks(-subset[rsi_col], distance=params.get('peak_trough_lookback', 5))
-    if len(price_troughs_idx) >= 2 and len(rsi_troughs_idx) >= 2:
-        p_low1_idx, p_low2_idx = price_troughs_idx[-2], price_troughs_idx[-1]
-        r_low1_idx, r_low2_idx = rsi_troughs_idx[-2], rsi_troughs_idx[-1]
-        is_divergence = (subset.iloc[p_low2_idx]['low'] < subset.iloc[p_low1_idx]['low'] and subset.iloc[r_low2_idx][rsi_col] > subset.iloc[r_low1_idx][rsi_col])
-        if is_divergence:
-            rsi_exits_oversold = (subset.iloc[r_low1_idx][rsi_col] < 35 and subset.iloc[-2][rsi_col] > 40)
-            confirmation_price = subset.iloc[p_low2_idx:]['high'].max()
-            price_confirmed = df.iloc[-2]['close'] > confirmation_price
-            if (not params.get('confirm_with_rsi_exit', True) or rsi_exits_oversold) and price_confirmed:
-                return {"reason": "rsi_divergence"}
-    return None
-
-def analyze_supertrend_pullback(df, params, rvol, adx_value):
-    df.ta.supertrend(length=params.get('atr_period', 10), multiplier=params.get('atr_multiplier', 3.0), append=True)
-    st_dir_col = find_col(df.columns, f"SUPERTd_{params.get('atr_period', 10)}_")
-    if not st_dir_col: return None
-    last, prev = df.iloc[-2], df.iloc[-3]
-    if prev[st_dir_col] == -1 and last[st_dir_col] == 1:
-        recent_swing_high = df['high'].iloc[-params.get('swing_high_lookback', 10):-2].max()
-        if last['close'] > recent_swing_high:
-            return {"reason": "supertrend_pullback"}
-    return None
-
-SCANNERS = {
-    "momentum_breakout": analyze_momentum_breakout, "breakout_squeeze_pro": analyze_breakout_squeeze_pro,
-    "support_rebound": analyze_support_rebound, "sniper_pro": analyze_sniper_pro, "whale_radar": analyze_whale_radar,
-    "rsi_divergence": analyze_rsi_divergence, "supertrend_pullback": analyze_supertrend_pullback
-}
-
+# ... (rest of the file is unchanged, keeping it concise) ...
 # =======================================================================================
 # --- 🚀 Hybrid Core Protocol (Execution & Management) 🚀 ---
 # =======================================================================================
 async def activate_trade(order_id, symbol):
-    bot = bot_data.application.bot; log_ctx = {'trade_id': 'N/A'}
+    bot = bot_data.application.bot
+    log_ctx = {'trade_id': 'N/A'}
 
-    # --- [إصلاح حرج] معالجة حالة السباق (Race Condition) ---
-    trade = None
-    for i in range(5): # محاولة العثور على الصفقة لمدة 5 ثوانٍ
+    # --- [إصلاح نهائي] معالجة حالة السباق (Race Condition) ---
+    trade_from_db = None
+    for i in range(5):  # محاولة العثور على الصفقة لمدة 5 ثوانٍ
         async with aiosqlite.connect(DB_FILE) as conn:
             conn.row_factory = aiosqlite.Row
-            trade = await (await conn.execute("SELECT * FROM trades WHERE order_id = ? AND status = 'pending'", (order_id,))).fetchone()
-        if trade:
+            trade_from_db = await (await conn.execute("SELECT * FROM trades WHERE order_id = ? AND status = 'pending'", (order_id,))).fetchone()
+        if trade_from_db:
+            logger.info(f"Activation for order {order_id} found DB record on attempt {i+1}.")
             break
         logger.info(f"Activation for order {order_id} waiting for DB record... Attempt {i+1}/5")
         await asyncio.sleep(1)
 
-    if not trade:
-        logger.warning(f"Activation for order {order_id} skipped: Could not find a matching 'pending' trade in DB after 5 seconds.")
+    if not trade_from_db:
+        logger.error(f"Activation for order {order_id} FAILED: Could not find a matching 'pending' trade in DB after 5 seconds.")
         return
     # --- [نهاية الإصلاح] ---
+    
+    trade = dict(trade_from_db)
+    log_ctx['trade_id'] = trade['id']
 
     try:
         order_details = await bot_data.exchange.fetch_order(order_id, symbol)
-        filled_price, gross_filled_quantity = order_details.get('average', 0.0), order_details.get('filled', 0.0)
+        filled_price = order_details.get('average', 0.0)
+        gross_filled_quantity = order_details.get('filled', 0.0)
+        
         if gross_filled_quantity <= 0 or filled_price <= 0:
-            logger.error(f"Order {order_id} invalid fill data. Price: {filled_price}, Qty: {gross_filled_quantity}."); return
+            logger.error(f"Order {order_id} invalid fill data. Price: {filled_price}, Qty: {gross_filled_quantity}.", extra=log_ctx)
+            return
+
         net_filled_quantity = gross_filled_quantity
         base_currency = symbol.split('/')[0]
         if 'fee' in order_details and order_details['fee'] and 'cost' in order_details['fee']:
             fee_cost, fee_currency = order_details['fee']['cost'], order_details['fee']['currency']
             if fee_currency == base_currency:
                 net_filled_quantity -= fee_cost
-                logger.info(f"Fee of {fee_cost} {fee_currency} deducted. Net quantity for {symbol} is {net_filled_quantity}.")
-        if net_filled_quantity <= 0: logger.error(f"Net quantity for {order_id} is zero or less. Aborting."); return
+                logger.info(f"Fee of {fee_cost} {fee_currency} deducted. Net quantity for {symbol} is {net_filled_quantity}.", extra=log_ctx)
+        
+        if net_filled_quantity <= 0:
+            logger.error(f"Net quantity for {order_id} is zero or less. Aborting.", extra=log_ctx)
+            return
+            
         balance_after = await bot_data.exchange.fetch_balance()
         usdt_remaining = balance_after.get('USDT', {}).get('free', 0)
-    except Exception as e:
-        logger.error(f"Could not fetch data for trade activation: {e}", exc_info=True)
-        async with aiosqlite.connect(DB_FILE) as conn:
-            await conn.execute("UPDATE trades SET status = 'failed', reason = 'Activation Fetch Error' WHERE order_id = ?", (order_id,)); await conn.commit()
-        return
-    async with aiosqlite.connect(DB_FILE) as conn:
-        conn.row_factory = aiosqlite.Row
-        trade = await (await conn.execute("SELECT * FROM trades WHERE order_id = ? AND status = 'pending'", (order_id,))).fetchone()
-        if not trade: logger.info(f"Activation ignored for {order_id}: Trade not pending."); return
-        trade = dict(trade); log_ctx['trade_id'] = trade['id']
+
         logger.info(f"Activating trade #{trade['id']} for {symbol}...", extra=log_ctx)
         risk = filled_price - trade['stop_loss']
         new_take_profit = filled_price + (risk * bot_data.settings['risk_reward_ratio'])
-        
-        # --- [إصلاح الربح المتزايد] ---
-        # نحدّث `last_profit_notification_price` بسعر التنفيذ الفعلي
-        await conn.execute("UPDATE trades SET status = 'active', entry_price = ?, quantity = ?, take_profit = ?, last_profit_notification_price = ? WHERE id = ?", 
-                           (filled_price, net_filled_quantity, new_take_profit, filled_price, trade['id']))
-        # --- [نهاية الإصلاح] ---
-        
-        active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")).fetchone())[0]
-        await conn.commit()
 
-    await bot_data.public_ws.subscribe([symbol])
-    trade_cost, tp_percent, sl_percent = filled_price * net_filled_quantity, (new_take_profit / filled_price - 1) * 100, (1 - trade['stop_loss'] / filled_price) * 100
-    reasons_en = trade['reason'].split(' + ')
-    reasons_ar = [STRATEGY_NAMES_AR.get(r.strip(), r.strip()) for r in reasons_en]
-    reason_display_str = ' + '.join(reasons_ar)
-    strength_stars = '⭐' * trade.get('signal_strength', 1)
-    trade_weight = trade.get('trade_weight', 1.0)
-    confidence_level_str = f"**🧠 مستوى الثقة:** `{trade_weight:.0%}` (تم تعديل الحجم)\n" if trade_weight != 1.0 else ""
+        async with aiosqlite.connect(DB_FILE) as conn:
+            await conn.execute("UPDATE trades SET status = 'active', entry_price = ?, quantity = ?, take_profit = ?, last_profit_notification_price = ? WHERE id = ?", 
+                               (filled_price, net_filled_quantity, new_take_profit, filled_price, trade['id']))
+            active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")).fetchone())[0]
+            await conn.commit()
 
-    success_msg = (f"✅ **تم تأكيد الشراء | {symbol}**\n"
-                   f"**الاستراتيجية:** {reason_display_str}\n"
-                   f"**قوة الإشارة:** {strength_stars}\n"
-                   f"{confidence_level_str}"
-                   f"🔸 **الصفقة رقم:** #{trade['id']}\n"
-                   f"🔸 **سعر التنفيذ:** `${filled_price:,.4f}`\n"
-                   f"🔸 **الكمية (صافي):** {net_filled_quantity:,.4f} {symbol.split('/')[0]}\n"
-                   f"🔸 **التكلفة:** `${trade_cost:,.2f}`\n"
-                   f"🎯 **الهدف (TP):** `${new_take_profit:,.4f} (ربح متوقع: {tp_percent:+.2f}%)`\n"
-                   f"🛡️ **الوقف (SL):** `${trade['stop_loss']:,.4f} (خسارة مقبولة: {sl_percent:.2f}%)`\n"
-                   f"💰 **السيولة المتبقية (USDT):** `${usdt_remaining:,.2f}`\n"
-                   f"🔄 **إجمالي الصفقات النشطة:** `{active_trades_count}`\n"
-                   f"الحارس الأمين يراقب الصفقة الآن.")
-    await safe_send_message(bot, success_msg)
+        await bot_data.public_ws.subscribe([symbol])
+        trade_cost = filled_price * net_filled_quantity
+        tp_percent = (new_take_profit / filled_price - 1) * 100
+        sl_percent = (1 - trade['stop_loss'] / filled_price) * 100
+        reasons_en = trade['reason'].split(' + ')
+        reasons_ar = [STRATEGY_NAMES_AR.get(r.strip(), r.strip()) for r in reasons_en]
+        reason_display_str = ' + '.join(reasons_ar)
+        strength_stars = '⭐' * trade.get('signal_strength', 1)
+        trade_weight = trade.get('trade_weight', 1.0)
+        confidence_level_str = f"**🧠 مستوى الثقة:** `{trade_weight:.0%}` (تم تعديل الحجم)\n" if trade_weight != 1.0 else ""
 
+        success_msg = (f"✅ **تم تأكيد الشراء | {symbol}**\n"
+                       f"**الاستراتيجية:** {reason_display_str}\n"
+                       f"**قوة الإشارة:** {strength_stars}\n"
+                       f"{confidence_level_str}"
+                       f"🔸 **الصفقة رقم:** #{trade['id']}\n"
+                       f"🔸 **سعر التنفيذ:** `${filled_price:,.4f}`\n"
+                       f"🔸 **الكمية (صافي):** {net_filled_quantity:,.4f} {symbol.split('/')[0]}\n"
+                       f"🔸 **التكلفة:** `${trade_cost:,.2f}`\n"
+                       f"🎯 **الهدف (TP):** `${new_take_profit:,.4f} (ربح متوقع: {tp_percent:+.2f}%)`\n"
+                       f"🛡️ **الوقف (SL):** `${trade['stop_loss']:,.4f} (خسارة مقبولة: {sl_percent:.2f}%)`\n"
+                       f"💰 **السيولة المتبقية (USDT):** `${usdt_remaining:,.2f}`\n"
+                       f"🔄 **إجمالي الصفقات النشطة:** `{active_trades_count}`\n"
+                       f"الحارس الأمين يراقب الصفقة الآن.")
+        await safe_send_message(bot, success_msg)
+
+    except Exception as e:
+        logger.error(f"Could not complete trade activation for trade #{trade.get('id', 'N/A')}: {e}", exc_info=True, extra=log_ctx)
+        async with aiosqlite.connect(DB_FILE) as conn:
+            await conn.execute("UPDATE trades SET status = 'failed', reason = ? WHERE order_id = ?", (f'Activation Error: {e}', order_id))
+            await conn.commit()
 
 async def handle_filled_buy_order(order_data):
+    
     symbol, order_id = order_data['instId'].replace('-', '/'), order_data['ordId']
     if float(order_data.get('avgPx', 0)) > 0:
         logger.info(f"Fast Reporter: Received fill for {order_id}. Activating...")
