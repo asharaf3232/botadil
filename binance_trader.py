@@ -350,7 +350,219 @@ async def update_strategy_performance(context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"🧠 Adaptive Mind: Analysis complete for {len(bot_data.strategy_performance)} strategies.")
     except Exception as e: logger.error(f"🧠 Adaptive Mind: Failed to analyze strategy performance: {e}", exc_info=True)
 
-# ... (rest of the file is unchanged, keeping it concise) ...
+
+async def propose_strategy_changes(context: ContextTypes.DEFAULT_TYPE):
+    s = bot_data.settings
+    if not s.get('adaptive_intelligence_enabled') or not s.get('strategy_proposal_enabled'): return
+    logger.info("🧠 Adaptive Mind: Checking for underperforming strategies to propose changes...")
+    active_scanners = s.get('active_scanners', [])
+    min_trades = s.get('strategy_analysis_min_trades', 10)
+    deactivation_wr = s.get('strategy_deactivation_threshold_wr', 45.0)
+
+    for scanner in active_scanners:
+        perf = bot_data.strategy_performance.get(scanner)
+        if perf and perf['total_trades'] >= min_trades and perf['win_rate'] < deactivation_wr:
+            if bot_data.pending_strategy_proposal.get('scanner') == scanner: continue
+            proposal_key = f"prop_{int(time.time())}"
+            bot_data.pending_strategy_proposal = {
+                "key": proposal_key, "action": "disable", "scanner": scanner,
+                "reason": f"أظهرت أداءً ضعيفًا بمعدل نجاح `{perf['win_rate']}%` في آخر `{perf['total_trades']}` صفقة."
+            }
+            logger.warning(f"🧠 Adaptive Mind: Proposing to disable '{scanner}' due to low performance.")
+            message = (f"💡 **اقتراح تحسين الأداء** 💡\n\n"
+                       f"مرحباً، بناءً على التحليل المستمر، لاحظت أن استراتيجية **'{STRATEGY_NAMES_AR.get(scanner, scanner)}'** "
+                       f"{bot_data.pending_strategy_proposal['reason']}\n\n"
+                       f"أقترح تعطيلها مؤقتًا للتركيز على الاستراتيجيات الأكثر ربحية. هل توافق على هذا التعديل؟")
+            keyboard = [[InlineKeyboardButton("✅ موافقة", callback_data=f"strategy_adjust_approve_{proposal_key}"),
+                         InlineKeyboardButton("❌ رفض", callback_data=f"strategy_adjust_reject_{proposal_key}")]]
+            await safe_send_message(context.bot, message, reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+
+async def translate_text_gemini(text_list):
+    if not GEMINI_API_KEY: logger.warning("GEMINI_API_KEY not found. Skipping translation."); return text_list, False
+    if not text_list: return [], True
+    prompt = "Translate the following English headlines to Arabic. Return only the translated text, with each headline on a new line:\n\n" + "\n".join(text_list)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(url, json=payload, headers={"Content-Type": "application/json"})
+            response.raise_for_status()
+            result = response.json()
+            translated_text = result['candidates'][0]['content']['parts'][0]['text']
+            return translated_text.strip().split('\n'), True
+    except Exception as e: logger.error(f"Gemini translation failed: {e}"); return text_list, False
+
+def get_alpha_vantage_economic_events():
+    if not ALPHA_VANTAGE_API_KEY or ALPHA_VANTAGE_API_KEY == 'YOUR_AV_KEY_HERE': return []
+    today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    params = {'function': 'ECONOMIC_CALENDAR', 'horizon': '3month', 'apikey': ALPHA_VANTAGE_API_KEY}
+    try:
+        response = httpx.get('https://www.alphavantage.co/query', params=params, timeout=20)
+        response.raise_for_status(); data_str = response.text
+        if "premium" in data_str.lower(): return []
+        lines = data_str.strip().split('\r\n')
+        if len(lines) < 2: return []
+        header = [h.strip() for h in lines[0].split(',')]
+        events = [dict(zip(header, [v.strip() for v in line.split(',')])) for line in lines[1:]]
+        high_impact_events = [e.get('event', 'Unknown Event') for e in events if e.get('releaseDate', '') == today_str and e.get('impact', '').lower() == 'high' and e.get('country', '') in ['USD', 'EUR']]
+        if high_impact_events: logger.warning(f"High-impact events today: {high_impact_events}")
+        return high_impact_events
+    except httpx.RequestError as e: logger.error(f"Failed to fetch economic calendar: {e}"); return None
+
+def get_latest_crypto_news(limit=15):
+    urls = ["https://cointelegraph.com/rss", "https://www.coindesk.com/arc/outboundfeeds/rss/"]
+    headlines = [entry.title for url in urls for entry in feedparser.parse(url).entries[:7]]
+    return list(set(headlines))[:limit]
+
+def analyze_sentiment_of_headlines(headlines):
+    if not headlines or not NLTK_AVAILABLE: return "N/A", 0.0
+    sia = SentimentIntensityAnalyzer()
+    score = sum(sia.polarity_scores(h)['compound'] for h in headlines) / len(headlines)
+    if score > 0.15: mood = "إيجابية"
+    elif score < -0.15: mood = "سلبية"
+    else: mood = "محايدة"
+    return mood, score
+
+async def get_fundamental_market_mood():
+    s = bot_data.settings
+    if not s.get('news_filter_enabled', True): return {"mood": "POSITIVE", "reason": "فلتر الأخبار معطل"}
+    high_impact_events = await asyncio.to_thread(get_alpha_vantage_economic_events)
+    if high_impact_events is None: return {"mood": "DANGEROUS", "reason": "فشل جلب البيانات الاقتصادية"}
+    if high_impact_events: return {"mood": "DANGEROUS", "reason": f"أحداث هامة اليوم: {', '.join(high_impact_events)}"}
+    latest_headlines = await asyncio.to_thread(get_latest_crypto_news)
+    sentiment, score = analyze_sentiment_of_headlines(latest_headlines)
+    logger.info(f"Market sentiment score: {score:.2f} ({sentiment})")
+    if score > 0.25: return {"mood": "POSITIVE", "reason": f"مشاعر إيجابية (الدرجة: {score:.2f})"}
+    elif score < -0.25: return {"mood": "NEGATIVE", "reason": f"مشاعر سلبية (الدرجة: {score:.2f})"}
+    else: return {"mood": "NEUTRAL", "reason": f"مشاعر محايدة (الدرجة: {score:.2f})"}
+
+def find_col(df_columns, prefix):
+    try: return next(col for col in df_columns if col.startswith(prefix))
+    except StopIteration: return None
+
+async def get_fear_and_greed_index():
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get("https://api.alternative.me/fng/?limit=1", timeout=10)
+            return int(r.json()['data'][0]['value'])
+    except Exception: return None
+
+async def get_market_mood():
+    s = bot_data.settings
+    if s.get('btc_trend_filter_enabled', True):
+        try:
+            htf_period = s['trend_filters']['htf_period']
+            ohlcv = await bot_data.exchange.fetch_ohlcv('BTC/USDT', '4h', limit=htf_period + 5)
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['sma'] = ta.sma(df['close'], length=htf_period)
+            is_btc_bullish = df['close'].iloc[-1] > df['sma'].iloc[-1]
+            btc_mood_text = "صاعد ✅" if is_btc_bullish else "هابط ❌"
+            if not is_btc_bullish: return {"mood": "NEGATIVE", "reason": "اتجاه BTC هابط", "btc_mood": btc_mood_text}
+        except Exception as e: return {"mood": "DANGEROUS", "reason": f"فشل جلب بيانات BTC: {e}", "btc_mood": "UNKNOWN"}
+    else: btc_mood_text = "الفلتر معطل"
+    if s.get('market_mood_filter_enabled', True):
+        fng = await get_fear_and_greed_index()
+        if fng is not None and fng < s['fear_and_greed_threshold']:
+            return {"mood": "NEGATIVE", "reason": f"مشاعر خوف شديد (F&G: {fng})", "btc_mood": btc_mood_text}
+    return {"mood": "POSITIVE", "reason": "وضع السوق مناسب", "btc_mood": btc_mood_text}
+
+def analyze_momentum_breakout(df, params, rvol, adx_value):
+    df.ta.vwap(append=True); df.ta.bbands(length=20, append=True); df.ta.macd(append=True); df.ta.rsi(append=True)
+    last, prev = df.iloc[-2], df.iloc[-3]
+    macd_col, macds_col, bbu_col, rsi_col = find_col(df.columns, "MACD_"), find_col(df.columns, "MACDs_"), find_col(df.columns, "BBU_"), find_col(df.columns, "RSI_")
+    if not all([macd_col, macds_col, bbu_col, rsi_col]): return None
+    if (prev[macd_col] <= prev[macds_col] and last[macd_col] > last[macds_col] and last['close'] > last[bbu_col] and last['close'] > last["VWAP_D"] and last[rsi_col] < 68):
+        return {"reason": "momentum_breakout"}
+    return None
+
+def analyze_breakout_squeeze_pro(df, params, rvol, adx_value):
+    df.ta.bbands(length=20, append=True); df.ta.kc(length=20, scalar=1.5, append=True); df.ta.obv(append=True)
+    bbu_col, bbl_col, kcu_col, kcl_col = find_col(df.columns, "BBU_"), find_col(df.columns, "BBL_"), find_col(df.columns, "KCUe_"), find_col(df.columns, "KCLEe_")
+    if not all([bbu_col, bbl_col, kcu_col, kcl_col]): return None
+    last, prev = df.iloc[-2], df.iloc[-3]
+    is_in_squeeze = prev[bbl_col] > prev[kcl_col] and prev[bbu_col] < prev[kcu_col]
+    if is_in_squeeze and (last['close'] > last[bbu_col]) and (last['volume'] > df['volume'].rolling(20).mean().iloc[-2] * 1.5) and (df['OBV'].iloc[-2] > df['OBV'].iloc[-3]):
+        return {"reason": "breakout_squeeze_pro"}
+    return None
+
+async def analyze_support_rebound(df, params, rvol, adx_value, exchange, symbol):
+    try:
+        ohlcv_1h = await exchange.fetch_ohlcv(symbol, '1h', limit=100)
+        if len(ohlcv_1h) < 50: return None
+        df_1h = pd.DataFrame(ohlcv_1h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        current_price = df_1h['close'].iloc[-1]
+        recent_lows = df_1h['low'].rolling(window=10, center=True).min()
+        supports = recent_lows[recent_lows.notna()]
+        closest_support = max([s for s in supports if s < current_price], default=None)
+        if not closest_support or ((current_price - closest_support) / closest_support * 100 > 1.0): return None
+        last_candle_15m = df.iloc[-2]
+        if last_candle_15m['close'] > last_candle_15m['open'] and last_candle_15m['volume'] > df['volume'].rolling(window=20).mean().iloc[-2] * 1.5:
+            return {"reason": "support_rebound"}
+    except Exception: return None
+    return None
+
+def analyze_sniper_pro(df, params, rvol, adx_value):
+    try:
+        compression_candles = 24
+        if len(df) < compression_candles + 2: return None
+        compression_df = df.iloc[-compression_candles-1:-1]
+        highest_high, lowest_low = compression_df['high'].max(), compression_df['low'].min()
+        if lowest_low <= 0: return None
+        volatility = (highest_high - lowest_low) / lowest_low * 100
+        if volatility < 12.0:
+            last_candle = df.iloc[-2]
+            if last_candle['close'] > highest_high and last_candle['volume'] > compression_df['volume'].mean() * 2:
+                return {"reason": "sniper_pro"}
+    except Exception: return None
+    return None
+
+async def analyze_whale_radar(df, params, rvol, adx_value, exchange, symbol):
+    try:
+        ob = await exchange.fetch_order_book(symbol, limit=20)
+        if not ob or not ob.get('bids'): return None
+        if sum(float(price) * float(qty) for price, qty in ob['bids'][:10]) > 30000:
+            return {"reason": "whale_radar"}
+    except Exception: return None
+    return None
+
+def analyze_rsi_divergence(df, params, rvol, adx_value):
+    if not SCIPY_AVAILABLE: return None
+    df.ta.rsi(length=params.get('rsi_period', 14), append=True)
+    rsi_col = find_col(df.columns, f"RSI_{params.get('rsi_period', 14)}")
+    if not rsi_col or df[rsi_col].isnull().all(): return None
+    subset = df.iloc[-params.get('lookback_period', 35):].copy()
+    price_troughs_idx, _ = find_peaks(-subset['low'], distance=params.get('peak_trough_lookback', 5))
+    rsi_troughs_idx, _ = find_peaks(-subset[rsi_col], distance=params.get('peak_trough_lookback', 5))
+    if len(price_troughs_idx) >= 2 and len(rsi_troughs_idx) >= 2:
+        p_low1_idx, p_low2_idx = price_troughs_idx[-2], price_troughs_idx[-1]
+        r_low1_idx, r_low2_idx = rsi_troughs_idx[-2], rsi_troughs_idx[-1]
+        is_divergence = (subset.iloc[p_low2_idx]['low'] < subset.iloc[p_low1_idx]['low'] and subset.iloc[r_low2_idx][rsi_col] > subset.iloc[r_low1_idx][rsi_col])
+        if is_divergence:
+            rsi_exits_oversold = (subset.iloc[r_low1_idx][rsi_col] < 35 and subset.iloc[-2][rsi_col] > 40)
+            confirmation_price = subset.iloc[p_low2_idx:]['high'].max()
+            price_confirmed = df.iloc[-2]['close'] > confirmation_price
+            if (not params.get('confirm_with_rsi_exit', True) or rsi_exits_oversold) and price_confirmed:
+                return {"reason": "rsi_divergence"}
+    return None
+
+def analyze_supertrend_pullback(df, params, rvol, adx_value):
+    df.ta.supertrend(length=params.get('atr_period', 10), multiplier=params.get('atr_multiplier', 3.0), append=True)
+    st_dir_col = find_col(df.columns, f"SUPERTd_{params.get('atr_period', 10)}_")
+    if not st_dir_col: return None
+    last, prev = df.iloc[-2], df.iloc[-3]
+    if prev[st_dir_col] == -1 and last[st_dir_col] == 1:
+        recent_swing_high = df['high'].iloc[-params.get('swing_high_lookback', 10):-2].max()
+        if last['close'] > recent_swing_high:
+            return {"reason": "supertrend_pullback"}
+    return None
+
+SCANNERS = {
+    "momentum_breakout": analyze_momentum_breakout, "breakout_squeeze_pro": analyze_breakout_squeeze_pro,
+    "support_rebound": analyze_support_rebound, "sniper_pro": analyze_sniper_pro, "whale_radar": analyze_whale_radar,
+    "rsi_divergence": analyze_rsi_divergence, "supertrend_pullback": analyze_supertrend_pullback
+}
+
 # =======================================================================================
 # --- 🚀 Hybrid Core Protocol (Execution & Management) 🚀 ---
 # =======================================================================================
@@ -445,7 +657,6 @@ async def activate_trade(order_id, symbol):
             await conn.commit()
 
 async def handle_filled_buy_order(order_data):
-    
     symbol, order_id = order_data['instId'].replace('-', '/'), order_data['ordId']
     if float(order_data.get('avgPx', 0)) > 0:
         logger.info(f"Fast Reporter: Received fill for {order_id}. Activating...")
@@ -466,7 +677,7 @@ class PrivateWebSocketManager:
         timestamp = str(time.time()); message = timestamp + 'GET' + '/users/self/verify'
         mac = hmac.new(bytes(OKX_API_SECRET, 'utf8'), bytes(message, 'utf8'), 'sha256')
         sign = base64.b64encode(mac.digest()).decode()
-        return [{"apiKey": OKX_API_KEY, "passphrase": OKX_API_PASSPHRISE, "timestamp": timestamp, "sign": sign}]
+        return [{"apiKey": OKX_API_KEY, "passphrase": OKX_API_PASSPHRASE, "timestamp": timestamp, "sign": sign}]
     async def _message_handler(self, msg):
         if msg == 'ping': await self.websocket.send('pong'); return
         data = json.loads(msg)
@@ -756,12 +967,9 @@ async def worker_batch(queue, signals_list, errors_list):
             market, ohlcv = item['market'], item['ohlcv']
             symbol = market['symbol']
             
-            # --- [إصلاح تحذير VWAP] ---
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            # إضافة .sort_index() يضمن أن البيانات مرتبة زمنيًا قبل التحليل
             df = df.set_index('timestamp').sort_index()
-            # --- [نهاية الإصلاح] ---
 
             if len(df) < 50: queue.task_done(); continue
             orderbook = await exchange.fetch_order_book(symbol, limit=1)
@@ -846,8 +1054,8 @@ async def worker_batch(queue, signals_list, errors_list):
                 signals_list.append({"symbol": symbol, "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "reason": reason_str, "strength": strength, "weight": trade_weight})
             queue.task_done()
         except Exception as e:
-            if 'symbol' in locals(): logger.error(f"Error processing symbol {symbol}: {e}", exc_info=True); errors_list.append(symbol)
-            else: logger.error(f"Worker error with no symbol context: {e}", exc_info=True)
+            if 'symbol' in locals(): logger.error(f"Error processing symbol {symbol}: {e}", exc_info=False); errors_list.append(symbol)
+            else: logger.error(f"Worker error with no symbol context: {e}", exc_info=False)
             if not queue.empty(): queue.task_done()
 
 async def initiate_real_trade(signal):
@@ -1544,18 +1752,14 @@ async def post_init(application: Application):
         bot_data.exchange = ccxt.okx(config)
         await bot_data.exchange.load_markets()
         
-        # --- [إصلاح منطق الحفظ والاستعادة] ---
         async with aiosqlite.connect(DB_FILE) as conn:
             conn.row_factory = aiosqlite.Row
             
-            # أولاً، نحصل على قائمة بالصفقات النشطة من قاعدة بياناتنا
             cursor = await conn.execute("SELECT symbol FROM trades WHERE status = 'active'")
             active_db_symbols = {row[0] for row in await cursor.fetchall()}
 
-            # ثانياً، نجلب أرصدة العملات الحقيقية من المنصة
             balance = await bot_data.exchange.fetch_balance()
             
-            # نقوم بمزامنة قاعدة البيانات مع المنصة
             assets_on_exchange = {asset for asset, data in balance.items() if data.get('total', 0) > 0.00001}
             for symbol_str in active_db_symbols:
                 asset = symbol_str.split('/')[0]
@@ -1563,8 +1767,7 @@ async def post_init(application: Application):
                     logger.warning(f"Trade for {symbol_str} is in DB but asset not found on exchange. Marking as manually closed.")
                     await conn.execute("UPDATE trades SET status = 'مغلقة يدوياً', reason='Asset not in balance' WHERE symbol = ? AND status = 'active'", (symbol_str,))
 
-            # ثالثاً، نبحث عن أي عملات "يتيمة" على المنصة غير مسجلة في البوت
-            ignored_assets = ['USDT', 'USDC', 'FDUSD', 'TUSD'] # عملات أساسية نتجاهلها
+            ignored_assets = ['USDT', 'USDC', 'FDUSD', 'TUSD']
             for asset, data in balance.items():
                 if asset in ignored_assets or data.get('total', 0) < 0.00001:
                     continue
@@ -1573,10 +1776,9 @@ async def post_init(application: Application):
                 if symbol_str not in active_db_symbols:
                     asset_total = data.get('total', 0)
                     logger.warning(f"🚨 Orphan asset found on exchange: {asset_total} {asset}. Not tracked in DB.")
-                    await safe_send_message(application.bot, f"⚠️ **تحذير: تم العثور على أصل غير متتبع** ⚠️\nتم العثور على `{asset_total}` من عملة `{asset}` في محفظتك وهي غير مسجلة كصفقة نشطة. يرجى مراجعتها وبيعها يدوياً.")
+                    await safe_send_message(application.bot, f"⚠️ **تحذير: تم العثور على أصل غير متتبع** ⚠️\nتم العثور на `{asset_total}` من عملة `{asset}` في محفظتك وهي غير مسجلة كصفقة نشطة. يرجى مراجعتها وبيعها يدوياً.")
             
             await conn.commit()
-        # --- [نهاية الإصلاح] ---
             
         await bot_data.exchange.fetch_balance()
         logger.info("✅ Successfully connected to OKX.")
@@ -1600,12 +1802,10 @@ async def post_init(application: Application):
     jq.run_repeating(update_strategy_performance, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=60, name="update_strategy_performance")
     jq.run_repeating(propose_strategy_changes, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=120, name="propose_strategy_changes")
 
-    # --- [إضافة] جدولة مهمة بث لوحة التحكم ---
     jq.run_repeating(broadcast_dashboard_update, interval=900, first=30, name="dashboard_broadcast")
-    # --- [نهاية الإضافة] ---
 
     logger.info(f"Jobs scheduled. Daily report at 23:55. Strategy analysis every {STRATEGY_ANALYSIS_INTERVAL_SECONDS/3600} hours.")
-    try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 قناص OKX | إصدار v33.0 - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+    try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 قناص OKX | إصدار v33.2 - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden: logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
     logger.info("--- OKX Sniper Bot is now fully operational ---")
 
@@ -1620,7 +1820,7 @@ async def post_shutdown(application: Application):
     logger.info("Bot has shut down.")
 
 def main():
-    logger.info("--- Starting OKX Sniper Bot v33.0 (Stability & Broadcast Edition) ---")
+    logger.info("--- Starting OKX Sniper Bot v33.2 (Final Activation Fix) ---")
     load_settings(); asyncio.run(init_database())
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
