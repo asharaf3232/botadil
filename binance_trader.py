@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Sniper Bot | v33.3 (Stability Release) 🚀 ---
+# --- 🚀 OKX Sniper Bot | v33.4 (Incremental Profit Fix) 🚀 ---
 # =======================================================================================
 #
-# هذا الإصدار يصلح عطلًا حرجًا كان يحدث عند بدء التشغيل.
+# هذا الإصدار يصلح الخلل المنطقي في حساب إشعارات الربح المتزايد.
 #
-# --- Changelog v33.3 ---
-#   ✅ [إصلاح حرج] تم إضافة طبقة حماية في دالة `post_init` للتعامل مع مختلف
-#      أنواع البيانات القادمة من المنصة، مما يمنع الانهيار عند بدء التشغيل.
-#   ✅ [إصلاح نهائي] تم حذف كود البحث المكرر في دالة `activate_trade`.
-#   ✅ [إصلاح حرج] آلية الانتظار لمعالجة "حالة السباق" (Race Condition) تعمل الآن.
+# --- Changelog v33.4 ---
+#   ✅ [إصلاح حرج] تمت إعادة كتابة منطق إشعار الربح المتزايد بالكامل ليعتمد
+#      على سعر الدخول الأصلي، مما يضمن إرسال الإشعارات عند النسب الصحيحة (2%, 4%, 6%..).
+#   ✅ [إصلاح حرج] تم إصلاح عطل بدء التشغيل.
+#   ✅ [إصلاح نهائي] تم إصلاح مشكلة تفعيل الصفقات (حالة السباق).
 #
 # =======================================================================================
 
@@ -313,7 +313,7 @@ async def broadcast_dashboard_update(context: ContextTypes.DEFAULT_TYPE):
                 win_rate = (wins / total_trades) * 100
 
         dashboard_data = {
-            "timestamp_utc": datetime.utcnow().isoformat(), "trading_enabled": bot_data.trading_enabled,
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(), "trading_enabled": bot_data.trading_enabled,
             "active_preset_name": bot_data.active_preset_name,
             "active_scanners": [STRATEGY_NAMES_AR.get(s, s) for s in bot_data.settings.get('active_scanners', [])],
             "overall_stats": { "total_pnl": round(total_pnl, 2), "win_rate": round(win_rate, 2), "total_trades": total_trades },
@@ -702,13 +702,11 @@ async def the_supervisor_job(context: ContextTypes.DEFAULT_TYPE):
         conn.row_factory = aiosqlite.Row
         two_mins_ago = (datetime.now(EGYPT_TZ) - timedelta(minutes=2)).isoformat()
 
-        # --- [إضافة تتبع] ---
         all_pending = await (await conn.execute("SELECT id, timestamp FROM trades WHERE status = 'pending'")).fetchall()
         if all_pending:
             logger.info(f"🕵️ Supervisor: Found {len(all_pending)} total pending trades in DB. Checking timestamps...")
             for p_trade in all_pending:
                  logger.info(f"  - Pending trade #{p_trade['id']} has timestamp: {p_trade['timestamp']}. Cutoff is {two_mins_ago}")
-        # --- [نهاية الإضافة] ---
 
         stuck_trades = await (await conn.execute("SELECT * FROM trades WHERE status = 'pending' AND timestamp <= ?", (two_mins_ago,))).fetchall()
         if not stuck_trades:
@@ -740,6 +738,7 @@ class TradeGuardian:
                     trade = await (await conn.execute("SELECT * FROM trades WHERE symbol = ? AND status = 'active'", (symbol,))).fetchone()
                     if not trade: return
                     trade = dict(trade); settings = bot_data.settings
+                    
                     if settings['trailing_sl_enabled']:
                         new_highest_price = max(trade.get('highest_price', 0), current_price)
                         if new_highest_price > trade.get('highest_price', 0):
@@ -753,16 +752,28 @@ class TradeGuardian:
                             if new_sl > trade['stop_loss']:
                                 trade['stop_loss'] = new_sl
                                 await conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
-                    if settings.get('incremental_notifications_enabled', False):
-                        last_notified_price = trade.get('last_profit_notification_price', trade['entry_price'])
+                    
+                    # --- [إصلاح حرج] منطق إشعار الربح المتزايد ---
+                    if settings.get('incremental_notifications_enabled', True):
                         entry_price = trade['entry_price']
-                        increment_percent = settings.get('incremental_notification_percent', 2.0)
-                        next_notification_target = last_notified_price * (1 + increment_percent / 100)
-                        if current_price >= next_notification_target:
-                            total_profit_percent = ((current_price / entry_price) - 1) * 100
-                            await safe_send_message(self.application.bot, f"📈 **ربح متزايد! | #{trade['id']} {symbol}**\n**الربح الحالي:** `{total_profit_percent:+.2f}%`")
-                            await conn.execute("UPDATE trades SET last_profit_notification_price = ? WHERE id = ?", (current_price, trade['id']))
+                        if entry_price > 0:
+                            last_notified_price = trade.get('last_profit_notification_price', entry_price)
+                            increment_percent = settings.get('incremental_notification_percent', 2.0)
+                            
+                            current_profit_percent = ((current_price / entry_price) - 1) * 100
+                            last_notified_percent = ((last_notified_price / entry_price) - 1) * 100
+                            
+                            next_milestone = (last_notified_percent // increment_percent + 1) * increment_percent
+                            if next_milestone <= 0:
+                                next_milestone = increment_percent
+
+                            if current_profit_percent >= next_milestone:
+                                await safe_send_message(self.application.bot, f"📈 **ربح متزايد! | #{trade['id']} {symbol}**\n**الربح الحالي:** `{current_profit_percent:+.2f}%`")
+                                await conn.execute("UPDATE trades SET last_profit_notification_price = ? WHERE id = ?", (current_price, trade['id']))
+                    # --- [نهاية الإصلاح] ---
+
                     await conn.commit()
+
                 if current_price >= trade['take_profit']: await self._close_trade(trade, "ناجحة (TP)", current_price)
                 elif current_price <= trade['stop_loss']: await self._close_trade(trade, "فاشلة (SL)", current_price)
             except Exception as e: logger.error(f"Guardian Ticker Error for {symbol}: {e}", exc_info=True)
@@ -1839,4 +1850,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
