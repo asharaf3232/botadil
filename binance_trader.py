@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Sniper Bot | v33.2 (Final Activation Fix) 🚀 ---
+# --- 🚀 OKX Sniper Bot | v33.3 (Stability Release) 🚀 ---
 # =======================================================================================
 #
-# هذا الإصدار يصلح بشكل نهائي الخلل المنطقي في دالة التفعيل.
+# هذا الإصدار يصلح عطلًا حرجًا كان يحدث عند بدء التشغيل.
 #
-# --- Changelog v33.2 ---
-#   ✅ [إصلاح نهائي] تم حذف كود البحث المكرر في دالة `activate_trade` الذي كان
-#      يمنع إكمال عملية التفعيل. الآن تعمل الدالة بشكل صحيح وموثوق.
+# --- Changelog v33.3 ---
+#   ✅ [إصلاح حرج] تم إضافة طبقة حماية في دالة `post_init` للتعامل مع مختلف
+#      أنواع البيانات القادمة من المنصة، مما يمنع الانهيار عند بدء التشغيل.
+#   ✅ [إصلاح نهائي] تم حذف كود البحث المكرر في دالة `activate_trade`.
 #   ✅ [إصلاح حرج] آلية الانتظار لمعالجة "حالة السباق" (Race Condition) تعمل الآن.
-#   ✅ [تحسين] تمت إضافة سجلات تتبع مفصلة إلى وظيفة "المشرف".
 #
 # =======================================================================================
 
@@ -1760,7 +1760,11 @@ async def post_init(application: Application):
 
             balance = await bot_data.exchange.fetch_balance()
             
-            assets_on_exchange = {asset for asset, data in balance.items() if data.get('total', 0) > 0.00001}
+            assets_on_exchange = {
+                asset for asset, data in balance.items() 
+                if isinstance(data, dict) and data.get('total', 0) > 0.00001
+            }
+
             for symbol_str in active_db_symbols:
                 asset = symbol_str.split('/')[0]
                 if asset not in assets_on_exchange:
@@ -1769,6 +1773,8 @@ async def post_init(application: Application):
 
             ignored_assets = ['USDT', 'USDC', 'FDUSD', 'TUSD']
             for asset, data in balance.items():
+                if not isinstance(data, dict):
+                    continue
                 if asset in ignored_assets or data.get('total', 0) < 0.00001:
                     continue
                 
@@ -1776,7 +1782,7 @@ async def post_init(application: Application):
                 if symbol_str not in active_db_symbols:
                     asset_total = data.get('total', 0)
                     logger.warning(f"🚨 Orphan asset found on exchange: {asset_total} {asset}. Not tracked in DB.")
-                    await safe_send_message(application.bot, f"⚠️ **تحذير: تم العثور على أصل غير متتبع** ⚠️\nتم العثور на `{asset_total}` من عملة `{asset}` في محفظتك وهي غير مسجلة كصفقة نشطة. يرجى مراجعتها وبيعها يدوياً.")
+                    await safe_send_message(application.bot, f"⚠️ **تحذير: تم العثور على أصل غير متتبع** ⚠️\nتم العثور على `{asset_total}` من عملة `{asset}` في محفظتك وهي غير مسجلة كصفقة نشطة. يرجى مراجعتها وبيعها يدوياً.")
             
             await conn.commit()
             
@@ -1805,7 +1811,7 @@ async def post_init(application: Application):
     jq.run_repeating(broadcast_dashboard_update, interval=900, first=30, name="dashboard_broadcast")
 
     logger.info(f"Jobs scheduled. Daily report at 23:55. Strategy analysis every {STRATEGY_ANALYSIS_INTERVAL_SECONDS/3600} hours.")
-    try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 قناص OKX | إصدار v33.2 - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+    try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 قناص OKX | إصدار v33.3 - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden: logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
     logger.info("--- OKX Sniper Bot is now fully operational ---")
 
@@ -1814,13 +1820,13 @@ async def post_shutdown(application: Application):
     if bot_data.exchange: await bot_data.exchange.close()
     
     if bot_data.redis_client:
-        await bot_data.redis_client.close()
+        await bot_data.redis_client.aclose()
         logger.info("Redis connection closed.")
 
     logger.info("Bot has shut down.")
 
 def main():
-    logger.info("--- Starting OKX Sniper Bot v33.2 (Final Activation Fix) ---")
+    logger.info("--- Starting OKX Sniper Bot v33.3 (Stability Release) ---")
     load_settings(); asyncio.run(init_database())
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
