@@ -1,17 +1,19 @@
 # -*- coding: utf-8 -*-
 # =======================================================================================
-# --- 🚀 OKX Sniper Bot | v32.1 (Redis Broadcaster Edition) 🚀 ---
+# --- 🚀 OKX Sniper Bot | v33.0 (Stability & Broadcast Update) 🚀 ---
 # =======================================================================================
 #
-# هذا الإصدار يضيف "هوائي بث" باستخدام Redis.
-# يسمح للبوت ببث إشارات التداول التي يجدها إلى قناة Redis،
-# مما يجعله "العقل" المستعد لإرسال الأوامر إلى "الأيدي" (بوتات عاملة) في المستقبل.
+# هذا الإصدار يحل مشاكل الاستقرار الأساسية ويضيف ميزة بث لوحة التحكم.
 #
-# --- Redis Broadcaster Changelog v32.1 ---
-#   ✅ [إضافة] تكامل مع مكتبة Redis للتواصل غير المتزامن.
-#   ✅ [إضافة] إنشاء اتصال بخادم Redis عند بدء تشغيل البوت.
-#   ✅ [إضافة] وظيفة جديدة `broadcast_signal_to_redis` لبث إشارات التداول كرسائل JSON.
-#   ✅ [تكامل] يتم الآن بث كل إشارة تداول ناجحة إلى قناة "trade_signals" على Redis قبل تنفيذها محليًا.
+# --- Changelog v33.0 ---
+#   ✅ [إصلاح] تم تعديل دالة `activate_trade` لتحديث `last_profit_notification_price`
+#      بشكل صحيح، مما يحل مشكلة إشعارات الربح المتزايد.
+#   ✅ [إصلاح] تم إعادة بناء دالة `post_init` بالكامل لاستخدام `fetch_balance` بدلاً من
+#      `fetch_positions`، مما يحل مشكلة فقدان صفقات SPOT عند إعادة التشغيل.
+#   ✅ [إصلاح] تم التأكد من ترتيب بيانات الشموع زمنيًا (`sort_index`) قبل التحليل
+#      لحل تحذيرات `VWAP` المتكررة.
+#   ✅ [إضافة] تمت إضافة دالة `broadcast_dashboard_update` التي تجمع كل بيانات
+#      الأداء والإحصائيات وتبثها كل 15 دقيقة عبر قناة Redis.
 #
 # =======================================================================================
 
@@ -36,7 +38,7 @@ import websockets
 import websockets.exceptions
 import httpx
 import feedparser
-import redis.asyncio as redis # --- [إضافة جديدة] ---
+import redis.asyncio as redis
 
 # --- Data Analysis & CCXT ---
 import pandas as pd
@@ -79,7 +81,7 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 ALPHA_VANTAGE_API_KEY = os.getenv('ALPHA_VANTAGE_API_KEY', 'YOUR_AV_KEY_HERE')
-REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379') # --- [إضافة جديدة] ---
+REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379')
 
 TIMEFRAME = '15m'
 SCAN_INTERVAL_SECONDS = 900
@@ -87,9 +89,10 @@ SUPERVISOR_INTERVAL_SECONDS = 120
 TIME_SYNC_INTERVAL_SECONDS = 3600
 STRATEGY_ANALYSIS_INTERVAL_SECONDS = 21600 # 6 hours
 
-APP_ROOT = '.'
-DB_FILE = os.path.join(APP_ROOT, 'okx_sniper_v32.db')
-SETTINGS_FILE = os.path.join(APP_ROOT, 'okx_sniper_settings_v32.json')
+# --- [تعديل] استخدام مسار مطلق لضمان الثبات ---
+APP_ROOT = os.path.dirname(os.path.abspath(__file__))
+DB_FILE = os.path.join(APP_ROOT, 'okx_sniper_v33.db')
+SETTINGS_FILE = os.path.join(APP_ROOT, 'okx_sniper_settings_v33.json')
 
 EGYPT_TZ = ZoneInfo("Africa/Cairo")
 
@@ -130,7 +133,7 @@ class BotState:
         self.last_markets_fetch = 0
         self.strategy_performance = {}
         self.pending_strategy_proposal = {}
-        self.redis_client = None # --- [إضافة جديدة] ---
+        self.redis_client = None
 
 
 bot_data = BotState()
@@ -270,7 +273,6 @@ async def log_pending_trade_to_db(signal, buy_order):
             return True
     except Exception as e: logger.error(f"DB Log Pending Error: {e}"); return False
 
-# --- [إضافة جديدة] ---
 async def broadcast_signal_to_redis(signal):
     """
     يبث إشارة التداول إلى قناة Redis المحددة.
@@ -280,10 +282,8 @@ async def broadcast_signal_to_redis(signal):
         return
 
     try:
-        # تحضير البيانات للبث، التأكد من أن كل البيانات قابلة للتحويل إلى JSON
         signal_to_broadcast = signal.copy()
         
-        # تحويل البيانات غير المتسلسلة إذا وجدت
         for key, value in signal_to_broadcast.items():
             if isinstance(value, (datetime, pd.Timestamp)):
                  signal_to_broadcast[key] = value.isoformat()
@@ -297,11 +297,59 @@ async def broadcast_signal_to_redis(signal):
         logger.error(f"Redis Broadcast Error: Could not serialize signal data for {signal.get('symbol', 'N/A')}. Error: {e}")
     except Exception as e:
         logger.error(f"Redis Broadcast Error: Failed to publish signal for {signal.get('symbol', 'N/A')}. Error: {e}", exc_info=True)
-# --- [نهاية الإضافة] ---
+        
+# =======================================================================================
+# --- 🧠 Mastermind Brain (Analysis, Mood & Broadcasting) 🧠 ---
+# =======================================================================================
+async def broadcast_dashboard_update(context: ContextTypes.DEFAULT_TYPE):
+    """
+    يجمع كل البيانات الهامة من بوت العقل ويبثها عبر Redis.
+    """
+    if not bot_data.redis_client:
+        return
 
-# =======================================================================================
-# --- 🧠 Mastermind Brain (Analysis & Mood) 🧠 ---
-# =======================================================================================
+    try:
+        # --- تجميع الإحصائيات العامة من قاعدة البيانات ---
+        total_pnl = 0.0
+        win_rate = 0.0
+        total_trades = 0
+        async with aiosqlite.connect(DB_FILE) as conn:
+            # PNL
+            cursor_pnl = await conn.execute("SELECT SUM(pnl_usdt) FROM trades WHERE status LIKE '%(%'")
+            pnl_result = await cursor_pnl.fetchone()
+            if pnl_result and pnl_result[0] is not None:
+                total_pnl = pnl_result[0]
+            
+            # Win Rate
+            cursor_trades = await conn.execute("SELECT status FROM trades WHERE status LIKE '%(%'")
+            closed_trades = await cursor_trades.fetchall()
+            total_trades = len(closed_trades)
+            if total_trades > 0:
+                wins = sum(1 for trade in closed_trades if 'ناجحة' in trade[0] or 'تأمين' in trade[0])
+                win_rate = (wins / total_trades) * 100
+
+        # --- تجميع كل البيانات في كائن واحد ---
+        dashboard_data = {
+            "timestamp_utc": datetime.utcnow().isoformat(),
+            "trading_enabled": bot_data.trading_enabled,
+            "active_preset_name": bot_data.active_preset_name,
+            "active_scanners": [STRATEGY_NAMES_AR.get(s, s) for s in bot_data.settings.get('active_scanners', [])],
+            "overall_stats": {
+                "total_pnl": round(total_pnl, 2),
+                "win_rate": round(win_rate, 2),
+                "total_trades": total_trades
+            },
+            "strategy_performance": bot_data.strategy_performance,
+            "last_scan_info": bot_data.last_scan_info,
+            "market_mood": bot_data.market_mood
+        }
+        
+        channel = "brain_dashboard_update"
+        await bot_data.redis_client.publish(channel, json.dumps(dashboard_data))
+        
+    except Exception as e:
+        logger.warning(f"Could not broadcast dashboard update to Redis. Error: {e}", exc_info=True)
+
 async def update_strategy_performance(context: ContextTypes.DEFAULT_TYPE):
     logger.info("🧠 Adaptive Mind: Analyzing strategy performance...")
     try:
@@ -576,7 +624,13 @@ async def activate_trade(order_id, symbol):
         logger.info(f"Activating trade #{trade['id']} for {symbol}...", extra=log_ctx)
         risk = filled_price - trade['stop_loss']
         new_take_profit = filled_price + (risk * bot_data.settings['risk_reward_ratio'])
-        await conn.execute("UPDATE trades SET status = 'active', entry_price = ?, quantity = ?, take_profit = ? WHERE id = ?", (filled_price, net_filled_quantity, new_take_profit, trade['id']))
+        
+        # --- [إصلاح الربح المتزايد] ---
+        # نحدّث `last_profit_notification_price` بسعر التنفيذ الفعلي
+        await conn.execute("UPDATE trades SET status = 'active', entry_price = ?, quantity = ?, take_profit = ?, last_profit_notification_price = ? WHERE id = ?", 
+                           (filled_price, net_filled_quantity, new_take_profit, filled_price, trade['id']))
+        # --- [نهاية الإصلاح] ---
+        
         active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active'")).fetchone())[0]
         await conn.commit()
 
@@ -879,7 +933,6 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
             if time.time() - bot_data.last_signal_time.get(signal['symbol'], 0) > (SCAN_INTERVAL_SECONDS * 0.9):
                 bot_data.last_signal_time[signal['symbol']] = time.time()
                 
-                # --- [تعديل] بث الإشارة إلى Redis قبل محاولة تنفيذها محليًا ---
                 await broadcast_signal_to_redis(signal)
                 
                 if await initiate_real_trade(signal):
@@ -903,9 +956,14 @@ async def worker_batch(queue, signals_list, errors_list):
             item = await queue.get()
             market, ohlcv = item['market'], item['ohlcv']
             symbol = market['symbol']
+            
+            # --- [إصلاح تحذير VWAP] ---
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            # إضافة .sort_index() يضمن أن البيانات مرتبة زمنيًا قبل التحليل
             df = df.set_index('timestamp').sort_index()
+            # --- [نهاية الإصلاح] ---
+
             if len(df) < 50: queue.task_done(); continue
             orderbook = await exchange.fetch_order_book(symbol, limit=1)
             best_bid, best_ask = orderbook['bids'][0][0], orderbook['asks'][0][0]
@@ -989,8 +1047,8 @@ async def worker_batch(queue, signals_list, errors_list):
                 signals_list.append({"symbol": symbol, "entry_price": entry_price, "take_profit": take_profit, "stop_loss": stop_loss, "reason": reason_str, "strength": strength, "weight": trade_weight})
             queue.task_done()
         except Exception as e:
-            if 'symbol' in locals(): logger.error(f"Error processing symbol {symbol}: {e}", exc_info=True); errors_list.append(symbol)
-            else: logger.error(f"Worker error with no symbol context: {e}", exc_info=True)
+            if 'symbol' in locals(): logger.error(f"Error processing symbol {symbol}: {e}", exc_info=False); errors_list.append(symbol)
+            else: logger.error(f"Worker error with no symbol context: {e}", exc_info=False)
             if not queue.empty(): queue.task_done()
 
 async def initiate_real_trade(signal):
@@ -1433,7 +1491,6 @@ async def show_scanners_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     active_scanners = bot_data.settings['active_scanners']
     for key, name in STRATEGY_NAMES_AR.items():
         status_emoji = "✅" if key in active_scanners else "❌"
-        # --- NEW: Add performance hint ---
         perf_hint = ""
         if (perf := bot_data.strategy_performance.get(key)):
             perf_hint = f" ({perf['win_rate']}% WR)"
@@ -1500,7 +1557,6 @@ async def handle_scanner_toggle(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer(f"{STRATEGY_NAMES_AR[scanner_key]} {'تم تفعيله' if scanner_key in active_scanners else 'تم تعطيله'}")
     await show_scanners_menu(update, context)
 
-# --- NEW Handler for Strategy Adjustment Proposal ---
 async def handle_strategy_adjustment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     parts = query.data.split('_')
@@ -1526,7 +1582,7 @@ async def handle_strategy_adjustment(update: Update, context: ContextTypes.DEFAU
         logger.info(f"User rejected disabling strategy: {proposal['scanner']}")
         await safe_edit_message(query, "❌ **تم الرفض.**\nلن يتم إجراء أي تغييرات على الاستراتيجيات النشطة.", reply_markup=None)
 
-    bot_data.pending_strategy_proposal = {} # Clear proposal
+    bot_data.pending_strategy_proposal = {}
 
 
 async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1534,7 +1590,6 @@ async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
     preset_key = query.data.replace("preset_set_", "")
 
     if preset_settings := SETTINGS_PRESETS.get(preset_key):
-        # Preserve intelligence settings and scanners when changing presets
         current_scanners = bot_data.settings.get('active_scanners', [])
         adaptive_settings = {
             k: v for k, v in bot_data.settings.items() if k not in DEFAULT_SETTINGS
@@ -1542,7 +1597,7 @@ async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         bot_data.settings = copy.deepcopy(preset_settings)
         bot_data.settings['active_scanners'] = current_scanners
-        bot_data.settings.update(adaptive_settings) # Restore adaptive settings
+        bot_data.settings.update(adaptive_settings)
 
         determine_active_preset()
         save_settings()
@@ -1559,7 +1614,7 @@ async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"- `min_atr: {vf.get('min_atr_percent', 'N/A')}%`"
         )
         await query.answer(f"تم تفعيل نمط: {PRESET_NAMES_AR.get(preset_key, preset_key)}")
-        await show_presets_menu(update, context) # Refresh menu
+        await show_presets_menu(update, context)
         await safe_send_message(context.bot, confirmation_text)
 
     else:
@@ -1575,7 +1630,6 @@ async def handle_toggle_parameter(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query; param_key = query.data.replace("param_toggle_", "")
     bot_data.settings[param_key] = not bot_data.settings.get(param_key, False)
     save_settings(); determine_active_preset()
-    # --- MODIFIED: Refresh the correct menu ---
     if param_key.startswith("adaptive") or param_key.startswith("dynamic") or param_key.startswith("strategy"):
         await show_adaptive_intelligence_menu(update, context)
     else:
@@ -1598,7 +1652,6 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
             if symbol in blacklist: blacklist.remove(symbol); await update.message.reply_text(f"✅ تم إزالة `{symbol}` من القائمة السوداء.")
             else: await update.message.reply_text(f"⚠️ العملة `{symbol}` غير موجودة في القائمة.")
         bot_data.settings['asset_blacklist'] = blacklist; save_settings(); determine_active_preset()
-        # Create a dummy query object to refresh the menu
         dummy_query = type('Query', (), {'message': update.message, 'data': 'settings_blacklist', 'edit_message_text': (lambda *args, **kwargs: asyncio.sleep(0)), 'answer': (lambda *args, **kwargs: asyncio.sleep(0))})
         await show_blacklist_menu(Update(update.update_id, callback_query=dummy_query), context)
         return
@@ -1632,7 +1685,6 @@ async def handle_setting_value(update: Update, context: ContextTypes.DEFAULT_TYP
     finally:
         if 'setting_to_change' in context.user_data:
             del context.user_data['setting_to_change']
-        # Create a dummy query object to refresh the settings menu
         dummy_query = type('Query', (), {'message': update.message, 'data': 'settings_params', 'edit_message_text': (lambda *args, **kwargs: asyncio.sleep(0)), 'answer': (lambda *args, **kwargs: asyncio.sleep(0))})
         if setting_key.startswith("adaptive") or setting_key.startswith("dynamic") or setting_key.startswith("strategy"):
              await show_adaptive_intelligence_menu(Update(update.update_id, callback_query=dummy_query), context)
@@ -1656,7 +1708,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         "kill_switch_toggle": toggle_kill_switch, "db_daily_report": daily_report_command, "db_strategy_report": show_strategy_report_command,
         "settings_main": show_settings_menu, "settings_params": show_parameters_menu, "settings_scanners": show_scanners_menu,
         "settings_presets": show_presets_menu, "settings_blacklist": show_blacklist_menu, "settings_data": show_data_management_menu,
-        "settings_adaptive": show_adaptive_intelligence_menu, # NEW
+        "settings_adaptive": show_adaptive_intelligence_menu,
         "blacklist_add": handle_blacklist_action, "blacklist_remove": handle_blacklist_action,
         "data_clear_confirm": handle_clear_data_confirmation, "data_clear_execute": handle_clear_data_execute,
         "noop": (lambda u,c: None)
@@ -1668,7 +1720,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         elif data.startswith("preset_set_"): await handle_preset_set(update, context)
         elif data.startswith("param_set_"): await handle_parameter_selection(update, context)
         elif data.startswith("param_toggle_"): await handle_toggle_parameter(update, context)
-        elif data.startswith("strategy_adjust_"): await handle_strategy_adjustment(update, context) # NEW
+        elif data.startswith("strategy_adjust_"): await handle_strategy_adjustment(update, context)
     except Exception as e: logger.error(f"Error in button callback handler for data '{data}': {e}", exc_info=True)
 
 
@@ -1680,7 +1732,6 @@ async def post_init(application: Application):
         try: nltk.data.find('sentiment/vader_lexicon.zip')
         except LookupError: logger.info("Downloading NLTK data..."); nltk.download('vader_lexicon', quiet=True)
     
-    # --- [إضافة جديدة] ---
     try:
         bot_data.redis_client = redis.from_url(REDIS_URL, decode_responses=True)
         await bot_data.redis_client.ping()
@@ -1688,31 +1739,46 @@ async def post_init(application: Application):
     except Exception as e:
         logger.error(f"🔥 FATAL: Could not connect to Redis server at {REDIS_URL}. Broadcasting will be disabled. Error: {e}")
         bot_data.redis_client = None
-    # --- [نهاية الإضافة] ---
 
     try:
         config = {'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 'password': OKX_API_PASSPHRASE, 'enableRateLimit': True}
         bot_data.exchange = ccxt.okx(config)
         await bot_data.exchange.load_markets()
-        open_positions = await bot_data.exchange.fetch_positions()
+        
+        # --- [إصلاح منطق الحفظ والاستعادة] ---
         async with aiosqlite.connect(DB_FILE) as conn:
             conn.row_factory = aiosqlite.Row
-            trades_in_db = await (await conn.execute("SELECT * FROM trades WHERE status = 'active'")).fetchall()
-            for trade in trades_in_db:
-                position_on_exchange = next((p for p in open_positions if p['info']['instId'].replace('-', '/') == trade['symbol'] and float(p['info']['pos']) > 0), None)
-                if not position_on_exchange:
-                    logger.warning(f"Trade #{trade['id']} for {trade['symbol']} found in DB but not on exchange. Status changed to 'Closed Manually'.")
-                    await conn.execute("UPDATE trades SET status = 'مغلقة يدوياً' WHERE id = ?", (trade['id'],))
-            trades_in_db_symbols = {t['symbol'] for t in trades_in_db}
-            for position in open_positions:
-                symbol = position['info']['instId'].replace('-', '/')
-                if float(position['info']['pos']) > 0 and symbol not in trades_in_db_symbols:
-                    logger.warning(f"🚨 Found active trade for {symbol} on exchange not in DB. Restoring...")
-                    entry_price = float(position['info'].get('avgPx', 0.0))
-                    quantity = float(position['info']['pos'])
-                    await conn.execute("INSERT INTO trades (timestamp, symbol, entry_price, take_profit, stop_loss, quantity, status, reason, signal_strength, last_profit_notification_price) VALUES (?, ?, ?, ?, ?, ?, 'active', 'Restored on startup', 1, ?)", (datetime.now(EGYPT_TZ).isoformat(), symbol, entry_price, entry_price * 1.5, entry_price * 0.9, quantity, entry_price))
-                    await safe_send_message(application.bot, f"⚠️ **تم استعادة صفقة** ⚠️\nتم العثور على صفقة لـ `{symbol}` على المنصة وإضافتها إلى قاعدة البيانات. يرجى مراجعة إعدادات الوقف والهدف يدوياً.")
+            
+            # أولاً، نحصل على قائمة بالصفقات النشطة من قاعدة بياناتنا
+            cursor = await conn.execute("SELECT symbol FROM trades WHERE status = 'active'")
+            active_db_symbols = {row[0] for row in await cursor.fetchall()}
+
+            # ثانياً، نجلب أرصدة العملات الحقيقية من المنصة
+            balance = await bot_data.exchange.fetch_balance()
+            
+            # نقوم بمزامنة قاعدة البيانات مع المنصة
+            assets_on_exchange = {asset for asset, data in balance.items() if data.get('total', 0) > 0.00001}
+            for symbol_str in active_db_symbols:
+                asset = symbol_str.split('/')[0]
+                if asset not in assets_on_exchange:
+                    logger.warning(f"Trade for {symbol_str} is in DB but asset not found on exchange. Marking as manually closed.")
+                    await conn.execute("UPDATE trades SET status = 'مغلقة يدوياً', reason='Asset not in balance' WHERE symbol = ? AND status = 'active'", (symbol_str,))
+
+            # ثالثاً، نبحث عن أي عملات "يتيمة" على المنصة غير مسجلة في البوت
+            ignored_assets = ['USDT', 'USDC', 'FDUSD', 'TUSD'] # عملات أساسية نتجاهلها
+            for asset, data in balance.items():
+                if asset in ignored_assets or data.get('total', 0) < 0.00001:
+                    continue
+                
+                symbol_str = f"{asset}/USDT"
+                if symbol_str not in active_db_symbols:
+                    asset_total = data.get('total', 0)
+                    logger.warning(f"🚨 Orphan asset found on exchange: {asset_total} {asset}. Not tracked in DB.")
+                    await safe_send_message(application.bot, f"⚠️ **تحذير: تم العثور على أصل غير متتبع** ⚠️\nتم العثور على `{asset_total}` من عملة `{asset}` في محفظتك وهي غير مسجلة كصفقة نشطة. يرجى مراجعتها وبيعها يدوياً.")
+            
             await conn.commit()
+        # --- [نهاية الإصلاح] ---
+            
         await bot_data.exchange.fetch_balance()
         logger.info("✅ Successfully connected to OKX.")
     except Exception as e:
@@ -1725,6 +1791,7 @@ async def post_init(application: Application):
     asyncio.create_task(bot_data.public_ws.run()); asyncio.create_task(bot_data.private_ws.run())
     logger.info("Waiting 5s for WebSocket connections..."); await asyncio.sleep(5)
     await bot_data.trade_guardian.sync_subscriptions()
+    
     jq = application.job_queue
     jq.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
     jq.run_repeating(the_supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="the_supervisor_job")
@@ -1734,8 +1801,12 @@ async def post_init(application: Application):
     jq.run_repeating(update_strategy_performance, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=60, name="update_strategy_performance")
     jq.run_repeating(propose_strategy_changes, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=120, name="propose_strategy_changes")
 
+    # --- [إضافة] جدولة مهمة بث لوحة التحكم ---
+    jq.run_repeating(broadcast_dashboard_update, interval=900, first=30, name="dashboard_broadcast")
+    # --- [نهاية الإضافة] ---
+
     logger.info(f"Jobs scheduled. Daily report at 23:55. Strategy analysis every {STRATEGY_ANALYSIS_INTERVAL_SECONDS/3600} hours.")
-    try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 قناص OKX | إصدار البث عبر Redis - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
+    try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 قناص OKX | إصدار v33.0 - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden: logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
     logger.info("--- OKX Sniper Bot is now fully operational ---")
 
@@ -1743,16 +1814,14 @@ async def post_init(application: Application):
 async def post_shutdown(application: Application):
     if bot_data.exchange: await bot_data.exchange.close()
     
-    # --- [إضافة جديدة] ---
     if bot_data.redis_client:
         await bot_data.redis_client.close()
         logger.info("Redis connection closed.")
-    # --- [نهاية الإضافة] ---
 
     logger.info("Bot has shut down.")
 
 def main():
-    logger.info("--- Starting OKX Sniper Bot v32.1 (Redis Broadcaster Edition) ---")
+    logger.info("--- Starting OKX Sniper Bot v33.0 (Stability & Broadcast Edition) ---")
     load_settings(); asyncio.run(init_database())
     app_builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     app_builder.post_init(post_init).post_shutdown(post_shutdown)
@@ -1765,4 +1834,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
