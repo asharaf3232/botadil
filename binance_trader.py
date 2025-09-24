@@ -1927,8 +1927,7 @@ async def post_init(application: Application):
     except Exception as e:
         logger.error(f"🔥 FATAL: Could not connect to Redis server: {e}")
         bot_data.redis_client = None
-
-    try:
+try:
         config = {'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 'password': OKX_API_PASSPHRASE, 'enableRateLimit': True}
         bot_data.exchange = ccxt.okx(config)
         await bot_data.exchange.load_markets()
@@ -1936,9 +1935,7 @@ async def post_init(application: Application):
         # [# <-- تغيير جذري] بدء منطق المزامنة الجديد المخصص لسوق SPOT
         logger.info("Reconciling SPOT trading state with OKX exchange...")
         
-        # 1. جلب الأرصدة بدلاً من المراكز المفتوحة
         balance = await bot_data.exchange.fetch_balance()
-        # إنشاء قائمة بالعملات التي نمتلكها فقط
         owned_assets = {asset for asset, data in balance.items() if data.get('total', 0) > 0.00001}
         logger.info(f"Found {len(owned_assets)} assets with balance in the wallet.")
 
@@ -1951,21 +1948,16 @@ async def post_init(application: Application):
 
             for trade in trades_in_db:
                 base_currency = trade['symbol'].split('/')[0]
-                # 2. التحقق مما إذا كنا لا نزال نمتلك العملة
                 if base_currency not in owned_assets and trade['status'] == 'active':
                     logger.warning(f"Trade #{trade['id']} for {trade['symbol']} is in DB, but asset balance is zero. Marking as manually closed.")
                     await conn.execute("UPDATE trades SET status = 'مغلقة يدوياً' WHERE id = ?", (trade['id'],))
             
-            # [# <-- حذف] تم حذف منطق "استعادة الصفقات" لأنه غير دقيق في سوق SPOT
-            # لا يمكننا معرفة سعر الشراء الأصلي من مجرد وجود رصيد
-            
             await conn.commit()
         logger.info("State reconciliation for SPOT complete.")
-        # [# <-- نهاية التغيير الجذري]
-
+        
     except Exception as e:
-        logger.critical(f"🔥 FATAL: Could not connect or reconcile state with OKX: {e}", exc_info=True); return
-
+        logger.critical(f"🔥 FATAL: Could not connect or reconcile state with OKX: {e}", exc_info=True)
+        return
     await check_time_sync(ContextTypes.DEFAULT_TYPE(application=application))
     bot_data.trade_guardian = TradeGuardian(application)
     bot_data.public_ws = PublicWebSocketManager(bot_data.trade_guardian.handle_ticker_update)
@@ -1992,7 +1984,7 @@ async def post_init(application: Application):
     except Forbidden: logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
     logger.info("--- OKX Sniper Bot is now fully operational ---")
     
-   except Exception as e:
+    except Exception as e:
         logger.critical(f"🔥 FATAL: Could not connect or reconcile state with OKX: {e}", exc_info=True); return
 
     await check_time_sync(ContextTypes.DEFAULT_TYPE(application=application))
