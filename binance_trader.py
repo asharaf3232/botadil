@@ -1991,6 +1991,7 @@ async def post_init(application: Application):
     try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 قناص OKX | إصدار المايسترو - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden: logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
     logger.info("--- OKX Sniper Bot is now fully operational ---")
+    
     except Exception as e:
         logger.critical(f"🔥 FATAL: Could not connect or reconcile state with OKX: {e}", exc_info=True); return
 
