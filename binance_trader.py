@@ -160,7 +160,7 @@ DEFAULT_SETTINGS = {
     "trailing_sl_enabled": True,
     "trailing_sl_activation_percent": 1.5,
     "trailing_sl_callback_percent": 1.0,
-    "active_scanners": ["momentum_breakout", "breakout_squeeze_pro", "support_rebound", "sniper_pro", "whale_radar", "rsi_divergence", "supertrend_pullback"],
+    "active_scanners": ["momentum_breakout", "breakout_squeeze_pro", "support_rebound", "sniper_pro", "whale_radar", "rsi_divergence", "supertrend_pullback", "bollinger_reversal"],
     "market_mood_filter_enabled": True,
     "fear_and_greed_threshold": 30,
     "adx_filter_enabled": True,
@@ -202,24 +202,96 @@ STRATEGY_NAMES_AR = {
     # New Strategy
     "bollinger_reversal": "انعكاس بولينجر"
 }
-PRESET_NAMES_AR = {"professional": "احترافي", "strict": "متشدد", "lenient": "متساهل", "very_lenient": "فائق التساهل", "bold_heart": "القلب الجريء"}
+PRESET_NAMES_AR = {"professional": "المحترف 🧠", "strict": "المتشدد 🎯", "lenient": "المتساهل 🌙", "very_lenient": "فائق التساهل ⚠️", "bold_heart": "القلب الجريء ❤️"}
+
+# ==============================================================================
+# --- 🔴 START OF MODIFICATION: NEW TRADING PERSONAS 🔴 ---
+# ==============================================================================
 SETTINGS_PRESETS = {
-    "professional": copy.deepcopy(DEFAULT_SETTINGS),
-    "strict": {**copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 3, "risk_reward_ratio": 2.5, "fear_and_greed_threshold": 40, "adx_filter_level": 28, "liquidity_filters": {"min_quote_volume_24h_usd": 2000000, "min_rvol": 2.0}},
-    "lenient": {**copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 8, "risk_reward_ratio": 1.8, "fear_and_greed_threshold": 25, "adx_filter_level": 20, "liquidity_filters": {"min_quote_volume_24h_usd": 500000, "min_rvol": 1.2}},
+    "professional": {
+        "maestro_mode_enabled": True,
+        "multi_timeframe_confluence_enabled": True,
+        "intelligent_reviewer_enabled": True,
+        "momentum_scalp_mode_enabled": False,
+        "active_scanners": ["momentum_breakout", "breakout_squeeze_pro", "support_rebound", "sniper_pro", "rsi_divergence", "supertrend_pullback", "bollinger_reversal"],
+        "max_concurrent_trades": 5,
+        "real_trade_size_usdt": 15.0,
+        "risk_reward_ratio": 2.0,
+        "atr_sl_multiplier": 2.5,
+        "trailing_sl_enabled": True,
+        "adx_filter_enabled": True,
+        "adx_filter_level": 25,
+        "btc_trend_filter_enabled": True,
+        "news_filter_enabled": True
+    },
+    "strict": {
+        "maestro_mode_enabled": False,
+        "multi_timeframe_confluence_enabled": True,
+        "intelligent_reviewer_enabled": True,
+        "momentum_scalp_mode_enabled": False,
+        "active_scanners": ["support_rebound", "rsi_divergence", "supertrend_pullback"],
+        "max_concurrent_trades": 2,
+        "real_trade_size_usdt": 20.0,
+        "risk_reward_ratio": 3.0,
+        "atr_sl_multiplier": 2.0,
+        "trailing_sl_enabled": True,
+        "adx_filter_enabled": True,
+        "adx_filter_level": 28,
+        "btc_trend_filter_enabled": True,
+        "news_filter_enabled": True
+    },
+    "lenient": {
+        "maestro_mode_enabled": False,
+        "multi_timeframe_confluence_enabled": False,
+        "intelligent_reviewer_enabled": True,
+        "momentum_scalp_mode_enabled": False,
+        "active_scanners": ["momentum_breakout", "support_rebound", "supertrend_pullback", "bollinger_reversal"],
+        "max_concurrent_trades": 6,
+        "real_trade_size_usdt": 15.0,
+        "risk_reward_ratio": 1.8,
+        "atr_sl_multiplier": 2.8,
+        "trailing_sl_enabled": True,
+        "adx_filter_enabled": True,
+        "adx_filter_level": 22,
+        "btc_trend_filter_enabled": True,
+        "news_filter_enabled": True
+    },
     "very_lenient": {
-        **copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 12, "adx_filter_enabled": False,
-        "market_mood_filter_enabled": False, "trend_filters": {"ema_period": 200, "htf_period": 50, "enabled": False},
-        "liquidity_filters": {"min_quote_volume_24h_usd": 250000, "min_rvol": 1.0},
-        "volatility_filters": {"atr_period_for_filter": 14, "min_atr_percent": 0.4}, "spread_filter": {"max_spread_percent": 1.5}
+        "maestro_mode_enabled": False,
+        "multi_timeframe_confluence_enabled": False,
+        "intelligent_reviewer_enabled": False,
+        "momentum_scalp_mode_enabled": True,
+        "momentum_scalp_target_percent": 0.7,
+        "active_scanners": ["momentum_breakout", "breakout_squeeze_pro", "bollinger_reversal"],
+        "max_concurrent_trades": 8,
+        "real_trade_size_usdt": 10.0,
+        "risk_reward_ratio": 1.2,
+        "atr_sl_multiplier": 1.5,
+        "trailing_sl_enabled": False,
+        "adx_filter_enabled": False,
+        "btc_trend_filter_enabled": False,
+        "news_filter_enabled": False
     },
     "bold_heart": {
-        **copy.deepcopy(DEFAULT_SETTINGS), "max_concurrent_trades": 15, "risk_reward_ratio": 1.5, "multi_timeframe_enabled": False,
-        "market_mood_filter_enabled": False, "adx_filter_enabled": False, "btc_trend_filter_enabled": False, "news_filter_enabled": False,
-        "volume_filter_multiplier": 1.0, "liquidity_filters": {"min_quote_volume_24h_usd": 100000, "min_rvol": 1.0},
-        "volatility_filters": {"atr_period_for_filter": 14, "min_atr_percent": 0.2}, "spread_filter": {"max_spread_percent": 2.0}
+        "maestro_mode_enabled": False,
+        "multi_timeframe_confluence_enabled": False,
+        "intelligent_reviewer_enabled": False,
+        "momentum_scalp_mode_enabled": False,
+        "active_scanners": ["momentum_breakout", "breakout_squeeze_pro", "sniper_pro", "supertrend_pullback", "whale_radar"],
+        "max_concurrent_trades": 12,
+        "real_trade_size_usdt": 15.0,
+        "risk_reward_ratio": 1.5,
+        "atr_sl_multiplier": 3.0,
+        "trailing_sl_enabled": True,
+        "adx_filter_enabled": False,
+        "btc_trend_filter_enabled": False,
+        "news_filter_enabled": False
     }
 }
+# ==============================================================================
+# --- 🔴 END OF MODIFICATION 🔴 ---
+# ==============================================================================
+
 
 # New: Decision Matrix for Maestro (JSON-like dict)
 DECISION_MATRIX = {
@@ -1772,37 +1844,37 @@ async def handle_preset_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
     preset_key = query.data.replace("preset_set_", "")
 
     if preset_settings := SETTINGS_PRESETS.get(preset_key):
-        # Preserve intelligence settings and scanners when changing presets
-        current_scanners = bot_data.settings.get('active_scanners', [])
-        adaptive_settings = {
-            k: v for k, v in bot_data.settings.items() if k not in DEFAULT_SETTINGS
-        }
-
-        bot_data.settings = copy.deepcopy(preset_settings)
-        bot_data.settings['active_scanners'] = current_scanners
-        bot_data.settings.update(adaptive_settings) # Restore adaptive settings
+        # --- بداية التعديل الجوهري ---
+        # 1. نبدأ بنسخة نظيفة من الإعدادات الافتراضية لضمان وجود كل المفاتيح
+        new_settings = copy.deepcopy(DEFAULT_SETTINGS)
+        
+        # 2. نقوم بتطبيق إعدادات "الشخصية" المختارة فوق الإعدادات الافتراضية
+        new_settings.update(preset_settings)
+        
+        # 3. نعتمد التكوين الجديد بالكامل للبوت
+        bot_data.settings = new_settings
+        # --- نهاية التعديل الجوهري ---
 
         determine_active_preset()
         save_settings()
 
-        lf = preset_settings.get('liquidity_filters', {})
-        vf = preset_settings.get('volatility_filters', {})
-        sf = preset_settings.get('spread_filter', {})
-
+        # رسالة تأكيد جديدة ومبسطة
+        preset_name = PRESET_NAMES_AR.get(preset_key, preset_key)
+        await query.answer(f"تم تفعيل شخصية: {preset_name}")
+        
         confirmation_text = (
-            f"✅ *تم تفعيل النمط: {PRESET_NAMES_AR.get(preset_key, preset_key)}*\n\n"
-            f"*أهم القيم:*\n"
-            f"- `min_rvol: {lf.get('min_rvol', 'N/A')}`\n"
-            f"- `max_spread: {sf.get('max_spread_percent', 'N/A')}%`\n"
-            f"- `min_atr: {vf.get('min_atr_percent', 'N/A')}%`"
+            f"✅ **تم تفعيل شخصية: {preset_name}**\n\n"
+            f"سيقوم البوت الآن بالتداول وفقًا للفلسفة والقواعد الجديدة لهذه الشخصية."
         )
-        await query.answer(f"تم تفعيل نمط: {PRESET_NAMES_AR.get(preset_key, preset_key)}")
-        await show_presets_menu(update, context) # Refresh menu
+        
         await safe_send_message(context.bot, confirmation_text)
+        
+        # تحديث قائمة الأنماط لإظهار التغيير
+        await show_presets_menu(update, context)
 
     else:
         await query.answer("لم يتم العثور على النمط.")
-
+        
 async def handle_parameter_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; param_key = query.data.replace("param_set_", "")
     context.user_data['setting_to_change'] = param_key
