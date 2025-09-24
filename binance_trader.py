@@ -1927,12 +1927,13 @@ async def post_init(application: Application):
     except Exception as e:
         logger.error(f"🔥 FATAL: Could not connect to Redis server: {e}")
         bot_data.redis_client = None
-try:
+
+    try:
         config = {'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 'password': OKX_API_PASSPHRASE, 'enableRateLimit': True}
         bot_data.exchange = ccxt.okx(config)
         await bot_data.exchange.load_markets()
 
-        # [# <-- تغيير جذري] بدء منطق المزامنة الجديد المخصص لسوق SPOT
+        # --- بدء منطق المزامنة الجديد المخصص لسوق SPOT ---
         logger.info("Reconciling SPOT trading state with OKX exchange...")
         
         balance = await bot_data.exchange.fetch_balance()
@@ -1954,38 +1955,11 @@ try:
             
             await conn.commit()
         logger.info("State reconciliation for SPOT complete.")
-        
+        # --- نهاية منطق المزامنة ---
+
     except Exception as e:
         logger.critical(f"🔥 FATAL: Could not connect or reconcile state with OKX: {e}", exc_info=True)
         return
-    await check_time_sync(ContextTypes.DEFAULT_TYPE(application=application))
-    bot_data.trade_guardian = TradeGuardian(application)
-    bot_data.public_ws = PublicWebSocketManager(bot_data.trade_guardian.handle_ticker_update)
-    bot_data.private_ws = PrivateWebSocketManager()
-    asyncio.create_task(bot_data.public_ws.run()); asyncio.create_task(bot_data.private_ws.run())
-    logger.info("Waiting 5s for WebSocket connections..."); await asyncio.sleep(5)
-    await bot_data.trade_guardian.sync_subscriptions()
-    
-    jq = application.job_queue
-    # ... (باقي الدالة كما هي بدون تغيير)
-    jq.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
-    jq.run_repeating(the_supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="the_supervisor_job")
-    jq.run_repeating(check_time_sync, interval=TIME_SYNC_INTERVAL_SECONDS, first=TIME_SYNC_INTERVAL_SECONDS, name="time_sync_job")
-    jq.run_repeating(critical_trade_monitor, interval=SUPERVISOR_INTERVAL_SECONDS * 2, first=SUPERVISOR_INTERVAL_SECONDS * 2, name="critical_trade_monitor")
-    jq.run_daily(send_daily_report, time=dt_time(hour=23, minute=55, tzinfo=EGYPT_TZ), name='daily_report')
-    jq.run_repeating(update_strategy_performance, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=60, name="update_strategy_performance")
-    jq.run_repeating(propose_strategy_changes, interval=STRATEGY_ANALYSIS_INTERVAL_SECONDS, first=120, name="propose_strategy_changes")
-    reviewer_interval = bot_data.settings.get('intelligent_reviewer_interval_minutes', 30) * 60
-    jq.run_repeating(intelligent_reviewer_job, interval=reviewer_interval, first=reviewer_interval, name="intelligent_reviewer_job")
-    jq.run_repeating(maestro_job, interval=MAESTRO_INTERVAL_HOURS * 3600, first=MAESTRO_INTERVAL_HOURS * 3600, name="maestro_job")
-
-    logger.info(f"Jobs scheduled. Daily report at 23:55. Strategy analysis every {STRATEGY_ANALYSIS_INTERVAL_SECONDS/3600} hours. Reviewer every {reviewer_interval/60} min. Maestro every {MAESTRO_INTERVAL_HOURS} hour.")
-    try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 قناص OKX | إصدار المايسترو - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
-    except Forbidden: logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
-    logger.info("--- OKX Sniper Bot is now fully operational ---")
-    
-    except Exception as e:
-        logger.critical(f"🔥 FATAL: Could not connect or reconcile state with OKX: {e}", exc_info=True); return
 
     await check_time_sync(ContextTypes.DEFAULT_TYPE(application=application))
     bot_data.trade_guardian = TradeGuardian(application)
@@ -1994,6 +1968,7 @@ try:
     asyncio.create_task(bot_data.public_ws.run()); asyncio.create_task(bot_data.private_ws.run())
     logger.info("Waiting 5s for WebSocket connections..."); await asyncio.sleep(5)
     await bot_data.trade_guardian.sync_subscriptions()
+    
     jq = application.job_queue
     jq.run_repeating(perform_scan, interval=SCAN_INTERVAL_SECONDS, first=10, name="perform_scan")
     jq.run_repeating(the_supervisor_job, interval=SUPERVISOR_INTERVAL_SECONDS, first=30, name="the_supervisor_job")
