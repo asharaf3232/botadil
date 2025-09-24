@@ -1933,11 +1933,11 @@ async def post_init(application: Application):
         bot_data.exchange = ccxt.okx(config)
         await bot_data.exchange.load_markets()
 
-        # --- بدء منطق المزامنة الجديد المخصص لسوق SPOT ---
         logger.info("Reconciling SPOT trading state with OKX exchange...")
         
         balance = await bot_data.exchange.fetch_balance()
-        owned_assets = {asset for asset, data in balance.items() if data.get('total', 0) > 0.00001}
+        # [# <-- الإصلاح النهائي هنا]
+        owned_assets = {asset for asset, data in balance.items() if isinstance(data, dict) and data.get('total', 0) > 0.00001}
         logger.info(f"Found {len(owned_assets)} assets with balance in the wallet.")
 
         async with aiosqlite.connect(DB_FILE) as conn:
@@ -1955,7 +1955,6 @@ async def post_init(application: Application):
             
             await conn.commit()
         logger.info("State reconciliation for SPOT complete.")
-        # --- نهاية منطق المزامنة ---
 
     except Exception as e:
         logger.critical(f"🔥 FATAL: Could not connect or reconcile state with OKX: {e}", exc_info=True)
@@ -1985,7 +1984,6 @@ async def post_init(application: Application):
     try: await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 قناص OKX | إصدار المايسترو - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
     except Forbidden: logger.critical(f"FATAL: Bot not authorized for chat ID {TELEGRAM_CHAT_ID}."); return
     logger.info("--- OKX Sniper Bot is now fully operational ---")
-
 
 async def post_shutdown(application: Application):
     if bot_data.exchange: await bot_data.exchange.close()
