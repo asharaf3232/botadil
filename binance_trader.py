@@ -705,7 +705,9 @@ async def analyze_whale_radar(df, params, rvol, adx_value, exchange, symbol):
     try:
         ob = await exchange.fetch_order_book(symbol, limit=20)
         if not ob or not ob.get('bids'): return None
-        if sum(float(price) * float(qty) for price, qty in ob['bids'][:10]) > WHALE_RADAR_MIN_BIDS_USD:
+        # --- ✅ هنا التعديل ---
+        # تجاهل القيم الإضافية باستخدام *_
+        if sum(float(price) * float(qty) for price, qty, *_ in ob['bids'][:10]) > WHALE_RADAR_MIN_BIDS_USD:
             return {"reason": "whale_radar"}
     except ccxt.BaseError as e:
         logger.warning(f"Scanner 'whale_radar' for {symbol} failed: {e}")
