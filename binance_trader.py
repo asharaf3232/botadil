@@ -1303,25 +1303,35 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         scan_start_time = time.time()
         logger.info("--- Starting new Adaptive Intelligence scan... ---")
         settings, bot = bot_data.settings, context.bot
+        
+        # --- ✅ هنا التعديلات ---
+        logger.info("==> [Step 1/5] Checking fundamental market mood...")
         if settings.get('news_filter_enabled', True):
             mood_result_fundamental = await get_fundamental_market_mood()
             if mood_result_fundamental['mood'] in ["NEGATIVE", "DANGEROUS"]:
                 bot_data.market_mood = mood_result_fundamental
                 logger.warning(f"SCAN SKIPPED: Fundamental mood is {mood_result_fundamental['mood']}. Reason: {mood_result_fundamental['reason']}")
                 return
+        logger.info("==> [Step 2/5] Fundamental mood OK. Checking technical market mood...")
+        
         mood_result = await get_market_mood()
         bot_data.market_mood = mood_result
         if mood_result['mood'] in ["NEGATIVE", "DANGEROUS"]:
             logger.warning(f"SCAN SKIPPED: {mood_result['reason']}")
             return
+        logger.info("==> [Step 3/5] Technical mood OK. Checking trade limits...")
+
         async with aiosqlite.connect(DB_FILE) as conn:
             active_trades_count = (await (await conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'active' OR status = 'pending'")).fetchone())[0]
         if active_trades_count >= settings['max_concurrent_trades']:
             logger.info(f"Scan skipped: Max trades ({active_trades_count}) reached."); return
+        logger.info(f"==> [Step 4/5] Trade limits OK ({active_trades_count}/{settings['max_concurrent_trades']}). Fetching markets...")
+
         top_markets = await get_okx_markets()
         if not top_markets:
             logger.warning("Scan aborted: No valid markets found after filtering.")
             return
+        logger.info(f"==> [Step 5/5] Found {len(top_markets)} markets. Starting analysis workers...")
 
         symbols_to_scan = [m['symbol'] for m in top_markets]
         ohlcv_data = await fetch_ohlcv_batch(bot_data.exchange, symbols_to_scan, TIMEFRAME, 220)
@@ -1349,7 +1359,8 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
 
         scan_duration = time.time() - scan_start_time
         bot_data.last_scan_info = {"start_time": datetime.fromtimestamp(scan_start_time, EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'), "duration_seconds": int(scan_duration), "checked_symbols": len(top_markets), "analysis_errors": len(analysis_errors)}
-
+        logger.info(f"--- Scan finished in {scan_duration:.2f}s. Found {len(signals_found)} signals, opened {trades_opened_count} new trades. ---")
+        
 async def initiate_real_trade(signal: Dict[str, Any]) -> bool:
     if not bot_data.trading_enabled:
         logger.warning(f"Trade for {signal['symbol']} blocked: Kill Switch active."); return False
