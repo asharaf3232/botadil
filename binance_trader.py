@@ -1231,30 +1231,44 @@ def _calculate_trade_parameters(df, settings, reasons, is_htf_bullish, symbol):
 async def worker_batch(queue, signals_list, errors_list):
     settings, exchange = bot_data.settings, bot_data.exchange
     while not queue.empty():
+        symbol = "N/A" # قيمة افتراضية
         try:
             item = await queue.get()
-        except asyncio.QueueEmpty:
-            continue
+            market, ohlcv = item['market'], item['ohlcv']
+            symbol = market['symbol']
             
-        market, ohlcv = item['market'], item['ohlcv']
-        symbol = market['symbol']
-        try:
+            # --- ✅ هنا التعديلات ---
+            logger.info(f"Worker starting analysis for: {symbol}")
+
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             df = df.set_index('timestamp').sort_index()
-            if len(df) < 50: continue
+            if len(df) < 50: 
+                # أضفنا هذا السطر لضمان اكتمال المهمة حتى لو تم تخطي العملة
+                queue.task_done()
+                continue
 
             is_valid, metrics = await _apply_pre_scan_filters(df.copy(), settings, symbol, exchange)
-            if not is_valid: continue
+            if not is_valid: 
+                # أضفنا هذا السطر لضمان اكتمال المهمة حتى لو تم تخطي العملة
+                queue.task_done()
+                continue
             
             confirmed_reasons = await _run_all_scanners(df.copy(), settings, metrics, exchange, symbol)
-            if not confirmed_reasons: continue
+            if not confirmed_reasons:
+                # أضفنا هذا السطر لضمان اكتمال المهمة حتى لو تم تخطي العملة
+                queue.task_done()
+                continue
             
             is_htf_bullish = True # Placeholder logic, can be expanded
             signal = _calculate_trade_parameters(df, settings, confirmed_reasons, is_htf_bullish, symbol)
             if signal:
                 signals_list.append(signal)
 
+            logger.info(f"Worker FINISHED analysis for: {symbol}")
+
+        except (asyncio.QueueEmpty):
+            continue
         except (ccxt.BaseError, aiosqlite.Error) as e:
             logger.warning(f"Recoverable worker error on {symbol}: {e}")
             errors_list.append(symbol)
@@ -1262,7 +1276,9 @@ async def worker_batch(queue, signals_list, errors_list):
             logger.error(f"CRITICAL WORKER FAILURE on {symbol}: {e}", exc_info=True)
             errors_list.append(symbol)
         finally:
-            queue.task_done()
+            # تم نقل task_done إلى finally لضمان تنفيذها حتى لو حدث خطأ
+            if 'item' in locals(): # نتأكد من أننا سحبنا عنصرا من الطابور قبل أن نقول أننا انتهينا منه
+                queue.task_done()
 
 async def get_okx_markets() -> List[Dict]:
     settings = bot_data.settings
@@ -1360,7 +1376,7 @@ async def perform_scan(context: ContextTypes.DEFAULT_TYPE):
         scan_duration = time.time() - scan_start_time
         bot_data.last_scan_info = {"start_time": datetime.fromtimestamp(scan_start_time, EGYPT_TZ).strftime('%Y-%m-%d %H:%M:%S'), "duration_seconds": int(scan_duration), "checked_symbols": len(top_markets), "analysis_errors": len(analysis_errors)}
         logger.info(f"--- Scan finished in {scan_duration:.2f}s. Found {len(signals_found)} signals, opened {trades_opened_count} new trades. ---")
-        
+
 async def initiate_real_trade(signal: Dict[str, Any]) -> bool:
     if not bot_data.trading_enabled:
         logger.warning(f"Trade for {signal['symbol']} blocked: Kill Switch active."); return False
