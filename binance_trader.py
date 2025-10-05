@@ -2368,28 +2368,3 @@ def main():
 if __name__ == '__main__':
     main()
 
-
-# --- [✅ إضافة جديدة] ---
-# هذه الدالتنا الجديدة المخصصة لقناة العمليات
-async def send_operations_log(bot, text, **kwargs):
-    """يرسل رسالة مخصصة إلى قناة العمليات فقط."""
-    try:
-        # نقوم بجلب ID القناة من متغيرات البيئة
-        operations_channel_id = os.getenv('TELEGRAM_OPERATIONS_CHANNEL_ID')
-        if not operations_channel_id:
-            logger.warning("TELEGRAM_OPERATIONS_CHANNEL_ID not set. Skipping operations log.")
-            return
-
-        # نستخدم دالة الإرسال الآمنة ولكن مع ID القناة الجديد
-        max_length = 4096
-        if len(text) > max_length:
-            parts = [text[j:j+max_length] for j in range(0, len(text), max_length)]
-            for part in parts:
-                await bot.send_message(operations_channel_id, part, parse_mode=ParseMode.MARKDOWN, **kwargs)
-                await asyncio.sleep(0.5)
-        else:
-            await bot.send_message(operations_channel_id, text, parse_mode=ParseMode.MARKDOWN, **kwargs)
-
-    except Exception as e:
-        logger.error(f"Failed to send message to operations channel: {e}", exc_info=True)
-
