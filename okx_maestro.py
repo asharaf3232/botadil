@@ -126,8 +126,7 @@ OKX_API_KEY = get_encrypted_env('OKX_API_KEY')
 OKX_API_SECRET = get_encrypted_env('OKX_API_SECRET')
 OKX_API_PASSWORD = get_encrypted_env('OKX_API_PASSWORD')
 GEMINI_API_KEY = get_encrypted_env('GEMINI_API_KEY')
-ALPHA_VANTAGE_API_KEY = get_encrypted_env('ALPHA_VANTAGE_API_KEY') or \'YOUR_AV_KEY_HERE\'
-
+ALPHA_VANTAGE_API_KEY = get_encrypted_env('ALPHA_VANTAGE_API_KEY') or 'YOUR_AV_KEY_HERE'
 # --- إعدادات البوت ---
 DB_FILE = 'trading_bot_v8.1_okx.db'
 SETTINGS_FILE = 'trading_bot_v8.1_okx_settings.json'
