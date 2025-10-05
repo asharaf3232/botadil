@@ -1,4 +1,4 @@
-# ملف: webhook_server.py (الإصدار الأولي للاختبار)
+# ملف: webhook_server.py (مع إضافة رابط اختبار)
 
 import logging
 from fastapi import FastAPI, Request, HTTPException
@@ -7,6 +7,14 @@ app = FastAPI()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("WebhookServer")
 
+# --- [✅ الإضافة الجديدة] ---
+# هذا هو "باب الاختبار" الذي يستجيب للروابط
+@app.get("/")
+async def root_health_check():
+    return {"status": "ok", "message": "تهانينا! خادم الويب يعمل بنجاح!"}
+# -------------------------
+
+# هذا هو "صندوق البريد" الرئيسي الذي يستقبل إشارات TradingView
 @app.post("/tradingview-webhook")
 async def receive_webhook(request: Request):
     try:
@@ -19,4 +27,4 @@ async def receive_webhook(request: Request):
 
 @app.on_event("startup")
 async def startup_event():
-    logger.info("Webhook server started. Listening on http://0.0.0.0:8000/tradingview-webhook")
+    logger.info("Webhook server started. Listening on http://0.0.0.0:8008")
