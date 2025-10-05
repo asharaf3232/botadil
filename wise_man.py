@@ -23,7 +23,7 @@ from telegram.ext import Application
 from collections import defaultdict, deque
 import asyncio
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import os
 
 # --- [تعديل V2.0] إضافة مكتبات جديدة ---
@@ -65,17 +65,17 @@ class WiseMan:
         self.bot_data = bot_data_ref
         self.db_file = db_file
         self.telegram_chat_id = application.bot_data.get('TELEGRAM_CHAT_ID')
-        
+
         # --- [تعديل V2.0] تهيئة مكونات تعلم الآلة وإدارة المخاطر ---
         self.ml_model = LogisticRegression() if SKLEARN_AVAILABLE else None
         self.scaler = StandardScaler() if SKLEARN_AVAILABLE else None
         self.model_trained = False
         self.historical_features = deque(maxlen=200) # Buffer for potential future live training
-        
+
         self.correlation_cache = {} # Cache for BTC correlation
         self.request_semaphore = asyncio.Semaphore(3) # Rate limiting for Wise Man's own API calls
         self.entry_event = asyncio.Event() # Event for signaling purposes
-        
+
         logger.info("🧠 Wise Man module upgraded to V2.0 'ML Guardian & Maestro' model.")
 
     # ==============================================================================
@@ -98,7 +98,7 @@ class WiseMan:
             if len(closed_trades) < 20:
                 logger.warning(f"Wise Man: Not enough historical data to train ML model (found {len(closed_trades)} trades).")
                 return
-            
+
             # Fetch BTC data for trend analysis
             btc_ohlcv = await self.exchange.fetch_ohlcv('BTC/USDT', '1h', limit=1000)
             btc_df = pd.DataFrame(btc_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -112,7 +112,7 @@ class WiseMan:
                     ohlcv = await self.exchange.fetch_ohlcv(trade['symbol'], '15m', since=int((trade_time - timedelta(hours=20)).timestamp() * 1000), limit=80)
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                    
+
                     # Find data point closest to trade entry time
                     entry_df = df.iloc[(df['timestamp'] - trade_time).abs().argsort()[:1]]
                     if entry_df.empty: continue
@@ -129,7 +129,7 @@ class WiseMan:
                     labels.append(is_win)
                 except Exception:
                     continue # Skip trade if data fetching fails
-            
+
             if len(features) < 10:
                 logger.warning("Wise Man: Could not generate enough features for ML training.")
                 return
@@ -164,7 +164,7 @@ class WiseMan:
             for cand_data in candidates:
                 candidate = dict(cand_data)
                 symbol = candidate['symbol']
-                
+
                 # Check for existing trade
                 trade_exists = await (await conn.execute("SELECT 1 FROM trades WHERE symbol = ? AND status IN ('active', 'pending')", (symbol,))).fetchone()
                 if trade_exists:
@@ -175,7 +175,7 @@ class WiseMan:
                     async with self.request_semaphore:
                         ticker = await self.exchange.fetch_ticker(symbol)
                         ohlcv = await self.exchange.fetch_ohlcv(symbol, '15m', limit=50)
-                    
+
                     # 1. Price check
                     current_price = ticker['last']
                     signal_price = candidate['entry_price']
@@ -212,11 +212,11 @@ class WiseMan:
                         btc_df = pd.DataFrame(btc_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                         btc_ema_50 = ta.ema(btc_df['close'], length=50).iloc[-1]
                         btc_trend = 1 if btc_df['close'].iloc[-1] > btc_ema_50 else 0
-                        
+
                         adx_data = ta.adx(df['high'], df['low'], df['close'])
                         rsi = ta.rsi(df['close']).iloc[-1]
                         adx = adx_data['ADX_14'].iloc[-1] if adx_data is not None else 25
-                        
+
                         current_features = np.array([[rsi, adx, btc_trend]])
                         scaled_features = self.scaler.transform(current_features)
                         win_prob = self.ml_model.predict_proba(scaled_features)[0][1]
@@ -232,15 +232,16 @@ class WiseMan:
                     from okx_maestro import initiate_real_trade, send_operations_log # <-- استيراد الدالة الجديدة
 
                     if await initiate_real_trade(candidate, self.bot_data.settings, self.exchange, self.application.bot):
-                        await conn.execute("UPDATE trade_candidates SET status = \'executed\' WHERE id = ?", (candidate[\'id\'],))
+                        await conn.execute("UPDATE trade_candidates SET status = 'executed' WHERE id = ?", (candidate['id'],))
 
-                        # --- [✅ إضافة جديدة] ---
-                        # بناء وإرسال رسالة التنفيذ بعد موافقة الرجل الحكيم
+                        # --- [✅ الكود المصحح] ---
                         try:
-                            win_prob_percent = candidate.get(\'win_prob\', 0.5) * 100
-                            trade_size = candidate.get(\'trade_size\', \'N/A\')
-                            tp_percent = (candidate[\'take_profit\'] / candidate[\'entry_price\'] - 1) * 100
-                            sl_percent = (1 - candidate[\'stop_loss\'] / candidate[\'entry_price\']) * 100
+                            win_prob_percent = candidate.get('win_prob', 0.5) * 100
+                            trade_size = candidate.get('trade_size', 'N/A')
+                            tp_percent = (candidate['take_profit'] / candidate['entry_price'] - 1) * 100
+                            sl_percent = (1 - candidate['stop_loss'] / candidate['entry_price']) * 100
+
+                            trade_size_formatted = f"${trade_size:.2f}" if isinstance(trade_size, (int, float)) else trade_size
 
                             log_message = (
                                 f"✅ **[تم تأكيد الشراء | بواسطة الرجل الحكيم]**\n"
@@ -249,18 +250,20 @@ class WiseMan:
                                 f"- **سبب الموافقة:** جميع الفلاتر إيجابية واحتمالية النجاح عالية.\n"
                                 f"**تحليل الرجل الحكيم:**\n"
                                 f"  - **احتمالية النجاح (ML):** `{win_prob_percent:.1f}%`\n"
-                                f"  - **حجم الصفقة المقترح:** `${trade_size:.2f}`\n"
+                                f"  - **حجم الصفقة المقترح:** `{trade_size_formatted}`\n"
                                 f"**تفاصيل التنفيذ المبدئي:**\n"
-                                f"  - **سعر الدخول المستهدف:** `${candidate[\"entry_price\"]:.4f}`\n"
-                                f"  - **الهدف (TP):** `${candidate[\"take_profit\"]:.4f}` `({tp_percent:+.2f}%)`\n"
-                                f"  - **الوقف (SL):** `${candidate[\"stop_loss\"]:.4f}` `({sl_percent:.2f}%)`"
+                                f"  - **سعر الدخول المستهدف:** `${candidate['entry_price']:.4f}`\n"
+                                f"  - **الهدف (TP):** `${candidate['take_profit']:.4f}` `({tp_percent:+.2f}%)`\n"
+                                f"  - **الوقف (SL):** `${candidate['stop_loss']:.4f}` `({sl_percent:.2f}%)`"
                             )
                             await send_operations_log(self.application.bot, log_message)
                         except Exception as e:
                             logger.error(f"Failed to build/send wise_man confirmation log: {e}")
-
+                        # --- [نهاية الكود المصحح] ---
+                    
                     else:
-                        await conn.execute("UPDATE trade_candidates SET status = \'failed_execution\' WHERE id = ?", (candidate[\'id\'],))
+                        await conn.execute("UPDATE trade_candidates SET status = 'failed_execution' WHERE id = ?", (candidate['id'],))
+                    
                     await conn.commit()
                     await asyncio.sleep(1) # Stagger executions
                 except Exception as e:
@@ -292,14 +295,13 @@ class WiseMan:
                     df['ema_9'] = ta.ema(df['close'], length=9)
                     current_price = df['close'].iloc[-1]
                     last_ema = df['ema_9'].iloc[-1]
-                    
+
                     # --- [تعديل V2.0] تشديد شرط الخروج إذا كانت المشاعر سلبية
-                    # نجعل الخروج أكثر حساسية (يحدث أسرع) عندما يكون المزاج سيئًا
                     exit_threshold = last_ema
                     if is_negative_mood:
-                        exit_threshold *= 0.998 # A tighter stop: exit even if price is only slightly below EMA
+                        exit_threshold *= 0.998 # A tighter stop
                         logger.info(f"Wise Man: Negative market mood detected. Tightening SL for {symbol}.")
-                    
+
                     if current_price < exit_threshold:
                         logger.warning(f"Wise Man confirms exit for {symbol}. Momentum is weak. Closing trade #{trade['id']}.")
                         await self.bot_data.trade_guardian._close_trade(trade, "فاشلة (بقرار حكيم)", current_price)
@@ -338,23 +340,23 @@ class WiseMan:
                         ohlcv = await self.exchange.fetch_ohlcv(symbol, '15m', limit=50)
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     current_price = df['close'].iloc[-1]
-                    
+
                     trade_open_time = datetime.fromisoformat(trade['timestamp'])
                     minutes_since_open = (datetime.now(timezone.utc).astimezone(trade_open_time.tzinfo) - trade_open_time).total_seconds() / 60
                     if minutes_since_open > 45:
                         df['ema_slow'] = ta.ema(df['close'], length=30)
                         if current_price < (df["ema_slow"].iloc[-1] * 0.995) and btc_momentum_is_negative and current_price < trade["entry_price"]:
                             logger.warning(f"Wise Man proactively detected SUSTAINED weakness in {symbol}. Requesting exit.")
-                            await conn.execute("UPDATE trades SET status = \'pending_exit_confirmation\' WHERE id = ?", (trade["id"],))
+                            await conn.execute("UPDATE trades SET status = 'pending_exit_confirmation' WHERE id = ?", (trade["id"],))
                             await conn.commit()
 
                             # --- [✅ إضافة جديدة فائتة] ---
                             from okx_maestro import send_operations_log
-                            log_message = f"🧠 **[تدخل الرجل الحكيم | صفقة #{trade[\"id\"]} {symbol}]**\n- **السبب:** تم رصد ضعف مستمر في الزخم.\n- **الإجراء:** تم تسليم الصفقة للمراجعة اللحظية لإمكانية الخروج المبكر."
+                            log_message = f"🧠 **[تدخل الرجل الحكيم | صفقة #{trade['id']} {symbol}]**\n- **السبب:** تم رصد ضعف مستمر في الزخم.\n- **الإجراء:** تم تسليم الصفقة للمراجعة اللحظية لإمكانية الخروج المبكر."
                             await send_operations_log(self.application.bot, log_message)
-                            
+
                             continue
-                    
+
                     strong_profit_pct = self.bot_data.settings.get('wise_man_strong_profit_pct', 3.0)
                     strong_adx_level = self.bot_data.settings.get('wise_man_strong_adx_level', 30)
                     current_profit_pct = (current_price / trade['entry_price'] - 1) * 100
@@ -366,7 +368,7 @@ class WiseMan:
                             await conn.execute("UPDATE trades SET take_profit = ? WHERE id = ?", (new_tp, trade['id'],)); await conn.commit()
                             logger.info(f"Wise Man extended TP for trade #{trade['id']} on {symbol} to {new_tp}")
                             from okx_maestro import safe_send_message, send_operations_log # <-- استيراد الدالة الجديدة
-                            message_to_send = f"🚀 **[تمديد الهدف | صفقة #{trade[\"id\"]} {symbol}]**\n- **السبب:** زخم إيجابي قوي ومستمر (ADX > {strong_adx_level}).\n- **الهدف الجديد:** `${new_tp:.4f}`"
+                            message_to_send = f"🚀 **[تمديد الهدف | صفقة #{trade['id']} {symbol}]**\n- **السبب:** زخم إيجابي قوي ومستمر (ADX > {strong_adx_level}).\n- **الهدف الجديد:** `${new_tp:.4f}`"
                             await safe_send_message(self.application.bot, message_to_send)
                             await send_operations_log(self.application.bot, message_to_send) # <-- إرسال نفس الرسالة للقناة
                         await asyncio.sleep(2)
@@ -386,11 +388,11 @@ class WiseMan:
                 balance = await self.exchange.fetch_balance()
             assets = {a: d['total'] for a, d in balance.items() if isinstance(d, dict) and d.get('total', 0) > 1e-5 and a != 'USDT'}
             if not assets: return
-            
+
             asset_list = [f"{asset}/USDT" for asset in assets.keys()]
             async with self.request_semaphore:
                 tickers = await self.exchange.fetch_tickers(asset_list)
-            
+
             total_portfolio_value = balance.get('USDT', {}).get('total', 0.0)
             asset_values = {}
             for asset, amount in assets.items():
@@ -401,13 +403,13 @@ class WiseMan:
                         asset_values[asset] = value_usdt
                         total_portfolio_value += value_usdt
             if total_portfolio_value < 1.0: return
-            
+
             # 1. Asset Concentration Check
             for asset, value in asset_values.items():
                 concentration = (value / total_portfolio_value) * 100
                 if concentration > PORTFOLIO_RISK_RULES['max_asset_concentration_pct']:
                     alerts.append(f"High Asset Concentration: `{asset}` is **{concentration:.1f}%** of portfolio.")
-            
+
             # 2. Sector Concentration Check
             sector_values = defaultdict(float)
             for asset, value in asset_values.items():
@@ -416,14 +418,14 @@ class WiseMan:
                 concentration = (value / total_portfolio_value) * 100
                 if concentration > PORTFOLIO_RISK_RULES['max_sector_concentration_pct']:
                     alerts.append(f"High Sector Concentration: '{sector}' sector is **{concentration:.1f}%** of portfolio.")
-            
+
             # 3. Correlation Check for major holdings
             major_holdings = sorted(asset_values.items(), key=lambda item: item[1], reverse=True)[:3]
             for asset, value in major_holdings:
                 correlation = await self._get_correlation(f"{asset}/USDT")
                 if correlation > 0.9:
                     alerts.append(f"High Correlation Warning: `{asset}` has a very high correlation of **{correlation:.2f}** with BTC.")
-            
+
             if alerts:
                 from okx_maestro import safe_send_message
                 message_body = "\n- ".join(alerts)
@@ -433,7 +435,7 @@ class WiseMan:
 
         except Exception as e:
             logger.error(f"Wise Man: Error during portfolio risk review: {e}", exc_info=True)
-            
+
     # ==============================================================================
     # --- 🛠️ دوال مساعدة V2.0 🛠️ ---
     # ==============================================================================
@@ -447,10 +449,10 @@ class WiseMan:
                 if df_symbol is None:
                     ohlcv_symbol = await self.exchange.fetch_ohlcv(symbol, '1h', limit=100)
                     df_symbol = pd.DataFrame(ohlcv_symbol, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                
+
                 ohlcv_btc = await self.exchange.fetch_ohlcv('BTC/USDT', '1h', limit=100)
                 df_btc = pd.DataFrame(ohlcv_btc, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            
+
             correlation = df_symbol['close'].corr(df_btc['close'])
             self.correlation_cache[symbol] = {'timestamp': now, 'value': correlation}
             return correlation
