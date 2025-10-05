@@ -1338,7 +1338,7 @@ class TradeGuardian:
                             if new_sl > trade['stop_loss']:
                                 await conn.execute("UPDATE trades SET trailing_sl_active = 1, stop_loss = ? WHERE id = ?", (new_sl, trade['id']))
                                 await conn.commit()
-                                message_to_send = f"🛡️ **[تأمين الأرباح | صفقة #{trade[\"id\"]} {symbol}]**\n- **السبب:** تفعيل الوقف المتحرك.\n- **الوقف الجديد:** `${new_sl:.4f}`"
+                                message_to_send = f"🛡️ **[تأمين الأرباح | صفقة #{trade['id']} {symbol}]**\n- **السبب:** تفعيل الوقف المتحرك.\n- **الوقف الجديد:** `${new_sl:.4f}`"
                                 await safe_send_message(self.application.bot, message_to_send)
                                 await send_operations_log(self.application.bot, message_to_send) # <-- إرسال نفس الرسالة للقناة
                         trade_after_activation = await (await conn.execute("SELECT * FROM trades WHERE id = ?", (trade['id'],))).fetchone()
@@ -2375,7 +2375,7 @@ async def send_operations_log(bot, text, **kwargs):
     """يرسل رسالة مخصصة إلى قناة العمليات فقط."""
     try:
         # نقوم بجلب ID القناة من متغيرات البيئة
-        operations_channel_id = os.getenv(\'TELEGRAM_OPERATIONS_CHANNEL_ID\')
+        operations_channel_id = os.getenv('TELEGRAM_OPERATIONS_CHANNEL_ID')
         if not operations_channel_id:
             logger.warning("TELEGRAM_OPERATIONS_CHANNEL_ID not set. Skipping operations log.")
             return
