@@ -8,3 +8,5 @@ feedparser
 nltk
 websockets
 scipy
+fastapi
+uvicorn[standard
