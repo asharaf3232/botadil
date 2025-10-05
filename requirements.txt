@@ -9,4 +9,4 @@ nltk
 websockets
 scipy
 fastapi
-uvicorn[standard
+uvicorn[standard]
