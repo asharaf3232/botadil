@@ -447,7 +447,17 @@ async def safe_edit_message(query, text, **kwargs):
     except BadRequest as e:
         if "Message is not modified" not in str(e): logger.warning(f"Edit Message Error: {e}")
     except Exception as e: logger.error(f"Edit Message Error: {e}")
-
+async def send_operations_log(bot, message):
+    #Sends a message to the dedicated operations channel if it's configured.#
+    if TELEGRAM_OPERATIONS_CHANNEL_ID:
+        try:
+            await bot.send_message(
+                chat_id=TELEGRAM_OPERATIONS_CHANNEL_ID,
+                text=message,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as e:
+            logger.error(f"Failed to send message to operations channel: {e}")
 # --- [تعديل V8.1] دالة لإرسال التنبيهات عبر البريد الإلكتروني
 async def _send_email_alert(subject, body):
     if not all([SMTP_SERVER, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, RECIPIENT_EMAIL]):
