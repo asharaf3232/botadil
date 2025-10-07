@@ -1213,7 +1213,7 @@ async def handle_filled_buy_order(order_data):
 
 class PrivateWebSocketManager:
     def __init__(self):
-        self.ws_url = "wss://ws.okx.com:8443/ws/v5/private"
+        self.ws_url = "wss://wspap.okx.com:8443/ws/v5/private?brokerId=9999"
         self.websocket = None
 
     def _get_auth_args(self):
@@ -1252,7 +1252,7 @@ class PrivateWebSocketManager:
 
 class PublicWebSocketManager:
     def __init__(self, handler_coro):
-        self.ws_url = "wss://ws.okx.com:8443/ws/v5/public"
+        self.ws_url = "wss://wspap.okx.com:8443/ws/v5/public?brokerId=9999"
         self.handler = handler_coro
         self.subscriptions = set()
         self.websocket = None
