@@ -280,40 +280,40 @@ class WiseMan:
             if not trades_to_review: return
 
             # --- [تعديل V2.0] جلب مشاعر السوق مرة واحدة لجميع المراجعات
-          from binance_trader import get_fundamental_market_mood
-            mood_result = await get_fundamental_market_mood()
-            is_negative_mood = mood_result['mood'] in ["NEGATIVE", "DANGEROUS"]
+        from binance_trader import get_fundamental_market_mood
+        mood_result = await get_fundamental_market_mood()
+        is_negative_mood = mood_result['mood'] in ["NEGATIVE", "DANGEROUS"]
 
-            for trade_data in trades_to_review:
-                trade = dict(trade_data)
-                symbol = trade['symbol']
-                try:
-                    async with self.request_semaphore:
-                        ohlcv = await self.exchange.fetch_ohlcv(symbol, '1m', limit=20)
-                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    df['ema_9'] = ta.ema(df['close'], length=9)
-                    current_price = df['close'].iloc[-1]
-                    last_ema = df['ema_9'].iloc[-1]
+        for trade_data in trades_to_review:
+            trade = dict(trade_data)
+            symbol = trade['symbol']
+            try:
+                async with self.request_semaphore:
+                    ohlcv = await self.exchange.fetch_ohlcv(symbol, '1m', limit=20)
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['ema_9'] = ta.ema(df['close'], length=9)
+                current_price = df['close'].iloc[-1]
+                last_ema = df['ema_9'].iloc[-1]
 
-                    # --- [تعديل V2.0] تشديد شرط الخروج إذا كانت المشاعر سلبية
-                    exit_threshold = last_ema
-                    if is_negative_mood:
-                        exit_threshold *= 0.998 # A tighter stop
-                        logger.info(f"Wise Man: Negative market mood detected. Tightening SL for {symbol}.")
+                # --- [تعديل V2.0] تشديد شرط الخروج إذا كانت المشاعر سلبية
+                exit_threshold = last_ema
+                if is_negative_mood:
+                    exit_threshold *= 0.998 # A tighter stop
+                    logger.info(f"Wise Man: Negative market mood detected. Tightening SL for {symbol}.")
 
-                    if current_price < exit_threshold:
-                        logger.warning(f"Wise Man confirms exit for {symbol}. Momentum is weak. Closing trade #{trade['id']}.")
-                        await self.bot_data.trade_guardian._close_trade(trade, "فاشلة (بقرار حكيم)", current_price)
-                    else:
-                        logger.info(f"Wise Man cancels exit for {symbol}. Price recovered. Resetting status to active for trade #{trade['id']}.")
-                       from binance_trader import safe_send_message
-                        message = f"✅ **إلغاء الخروج | #{trade['id']} {symbol}**\nقرر الرجل الحكيم إعطاء الصفقة فرصة أخرى بعد تعافي السعر لحظيًا."
-                        await safe_send_message(self.application.bot, message)
-                        await conn.execute("UPDATE trades SET status = 'active' WHERE id = ?", (trade['id'],))
-                        await conn.commit()
-                except Exception as e:
-                    logger.error(f"Wise Man: Error making final exit decision for {symbol}: {e}. Forcing closure.", exc_info=True)
-                    await self.bot_data.trade_guardian._close_trade(trade, "فاشلة (خطأ في المراجعة)", trade['stop_loss'])
+                if current_price < exit_threshold:
+                    logger.warning(f"Wise Man confirms exit for {symbol}. Momentum is weak. Closing trade #{trade['id']}.")
+                    await self.bot_data.trade_guardian._close_trade(trade, "فاشلة (بقرار حكيم)", current_price)
+                else:
+                    logger.info(f"Wise Man cancels exit for {symbol}. Price recovered. Resetting status to active for trade #{trade['id']}.")
+                    from binance_trader import safe_send_message
+                    message = f"✅ **إلغاء الخروج | #{trade['id']} {symbol}**\nقرر الرجل الحكيم إعطاء الصفقة فرصة أخرى بعد تعافي السعر لحظيًا."
+                    await safe_send_message(self.application.bot, message)
+                    await conn.execute("UPDATE trades SET status = 'active' WHERE id = ?", (trade['id'],))
+                    await conn.commit()
+            except Exception as e:
+                logger.error(f"Wise Man: Error making final exit decision for {symbol}: {e}. Forcing closure.", exc_info=True)
+                await self.bot_data.trade_guardian._close_trade(trade, "فاشلة (خطأ في المراجعة)", trade['stop_loss'])
 
     # ==============================================================================
     # --- 🎼 المايسترو التكتيكي (يعمل كل 15 دقيقة) 🎼 ---
@@ -349,12 +349,12 @@ class WiseMan:
                             await conn.execute("UPDATE trades SET status = 'pending_exit_confirmation' WHERE id = ?", (trade["id"],))
                             await conn.commit()
 
-                            # --- [✅ إضافة جديدة فائتة] ---
-                           from binance_trader import send_operations_log
-                            log_message = f"🧠 **[تدخل الرجل الحكيم | صفقة #{trade['id']} {symbol}]**\n- **السبب:** تم رصد ضعف مستمر في الزخم.\n- **الإجراء:** تم تسليم الصفقة للمراجعة اللحظية لإمكانية الخروج المبكر."
-                            await send_operations_log(self.application.bot, log_message)
+                        # --- [✅ إضافة جديدة فائتة] ---
+                        from binance_trader import send_operations_log
+                        log_message = f"🧠 **[تدخل الرجل الحكيم | صفقة #{trade['id']} {symbol}]**\n- **السبب:** تم رصد ضعف مستمر في الزخم.\n- **الإجراء:** تم تسليم الصفقة للمراجعة اللحظية لإمكانية الخروج المبكر."
+                        await send_operations_log(self.application.bot, log_message)
 
-                            continue
+                        continue
 
                     strong_profit_pct = self.bot_data.settings.get('wise_man_strong_profit_pct', 3.0)
                     strong_adx_level = self.bot_data.settings.get('wise_man_strong_adx_level', 30)
@@ -366,7 +366,7 @@ class WiseMan:
                             new_tp = trade['take_profit'] * 1.05
                             await conn.execute("UPDATE trades SET take_profit = ? WHERE id = ?", (new_tp, trade['id'],)); await conn.commit()
                             logger.info(f"Wise Man extended TP for trade #{trade['id']} on {symbol} to {new_tp}")
-                           from binance_trader import safe_send_message, send_operations_log # <-- استيراد الدالة الجديدة
+                            from binance_trader import safe_send_message, send_operations_log # <-- استيراد الدالة الجديدة
                             message_to_send = f"🚀 **[تمديد الهدف | صفقة #{trade['id']} {symbol}]**\n- **السبب:** زخم إيجابي قوي ومستمر (ADX > {strong_adx_level}).\n- **الهدف الجديد:** `${new_tp:.4f}`"
                             await safe_send_message(self.application.bot, message_to_send)
                             await send_operations_log(self.application.bot, message_to_send) # <-- إرسال نفس الرسالة للقناة
@@ -427,10 +427,10 @@ class WiseMan:
 
             if alerts:
               from binance_trader import safe_send_message
-                message_body = "\n- ".join(alerts)
-                message = f"⚠️ **تنبيه من الرجل الحكيم (إدارة المخاطر):**\n- {message_body}"
-                await safe_send_message(self.application.bot, message)
-                await self._send_email_alert("Wise Man: Portfolio Risk Warning", message.replace('`', '').replace('*', ''))
+              message_body = "\n- ".join(alerts)
+              message = f"⚠️ **تنبيه من الرجل الحكيم (إدارة المخاطر):**\n- {message_body}"
+              await safe_send_message(self.application.bot, message)
+              await self._send_email_alert("Wise Man: Portfolio Risk Warning", message.replace('`', '').replace('*', ''))
 
         except Exception as e:
             logger.error(f"Wise Man: Error during portfolio risk review: {e}", exc_info=True)
