@@ -229,7 +229,7 @@ class WiseMan:
 
                     # 5. Final Confirmation & Execution
                     logger.info(f"Wise Man confirms entry for {symbol}. All checks passed. Initiating trade.")
-                   from binance_trader import initiate_real_trade, send_operations_log
+                    from binance_trader import initiate_real_trade, send_operations_log
                     if await initiate_real_trade(candidate, self.bot_data.settings, self.exchange, self.application.bot):
                         await conn.execute("UPDATE trade_candidates SET status = 'executed' WHERE id = ?", (candidate['id'],))
 
