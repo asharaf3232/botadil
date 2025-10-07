@@ -2294,13 +2294,24 @@ async def post_init(application: Application):
 
     try:
         logger.info("Attempting to connect to OKX...")
-        bot_data.exchange = ccxt.okx({
+        
+        # --- vvv --- التعديل هنا --- vvv ---
+        # 1. نقوم بإنشاء كائن المنصة أولاً
+        exchange = ccxt.okx({
             'apiKey': OKX_API_KEY, 'secret': OKX_API_SECRET, 'password': OKX_API_PASSWORD,
             'enableRateLimit': True, 'options': {'defaultType': 'spot', 'timeout': 30000}
         })
+        
+        # 2. نقوم بتفعيل وضع التداول التجريبي (Sandbox/Demo)
+        exchange.set_sandbox_mode(True)
+        
+        # 3. نقوم بتعيين المنصة المعدلة إلى بيانات البوت
+        bot_data.exchange = exchange
+        # --- ^^^ --- نهاية التعديل --- ^^^ ---
+
         await bot_data.exchange.load_markets()
         await bot_data.exchange.fetch_balance()
-        logger.info("✅ Successfully connected to OKX Spot.")
+        logger.info("✅ Successfully connected to OKX Spot (DEMO MODE).")
     except Exception as e:
         logger.critical(f"🔥 FATAL: Could not connect to OKX. PLEASE CHECK YOUR API KEYS AND PASSPHRASE.", exc_info=True)
         await application.bot.send_message(TELEGRAM_CHAT_ID, "🚨 **فشل تشغيل البوت** 🚨\n\nلم يتمكن البوت من الاتصال بمنصة OKX. يرجى التحقق من مفاتيح الـ API وكلمة المرور الخاصة بها.")
@@ -2344,7 +2355,6 @@ async def post_init(application: Application):
 
     logger.info(f"All jobs scheduled. OKX Bot is fully operational.")
     await application.bot.send_message(TELEGRAM_CHAT_ID, "*🤖 بوت OKX V8.1 (مستقر) - بدأ العمل...*", parse_mode=ParseMode.MARKDOWN)
-
 async def post_shutdown(application: Application):
     logger.info("Bot shutdown initiated...")
     if bot_data.websocket_manager:
