@@ -1585,7 +1585,7 @@ async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else: await target_message.reply_text(message_text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def universal_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if 'setting_to_change' in context.user_data or 'blacklist_action' in context.user_data:
+    if context.user_data and ('setting_to_change' in context.user_data or 'blacklist_action' in context.user_data):
         await handle_setting_value(update, context)
         return
         
