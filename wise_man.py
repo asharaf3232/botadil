@@ -229,7 +229,7 @@ class WiseMan:
 
                     # 5. Final Confirmation & Execution
                     logger.info(f"Wise Man confirms entry for {symbol}. All checks passed. Initiating trade.")
-                    from okx_maestro import initiate_real_trade, send_operations_log # <-- استيراد الدالة الجديدة
+                    binance_trader import initiate_real_trade, send_operations_log # <-- استيراد الدالة الجديدة
 
                     if await initiate_real_trade(candidate, self.bot_data.settings, self.exchange, self.application.bot):
                         await conn.execute("UPDATE trade_candidates SET status = 'executed' WHERE id = ?", (candidate['id'],))
@@ -281,7 +281,7 @@ class WiseMan:
             if not trades_to_review: return
 
             # --- [تعديل V2.0] جلب مشاعر السوق مرة واحدة لجميع المراجعات
-            from okx_maestro import get_fundamental_market_mood
+            binance_trader import get_fundamental_market_mood
             mood_result = await get_fundamental_market_mood()
             is_negative_mood = mood_result['mood'] in ["NEGATIVE", "DANGEROUS"]
 
@@ -307,7 +307,7 @@ class WiseMan:
                         await self.bot_data.trade_guardian._close_trade(trade, "فاشلة (بقرار حكيم)", current_price)
                     else:
                         logger.info(f"Wise Man cancels exit for {symbol}. Price recovered. Resetting status to active for trade #{trade['id']}.")
-                        from okx_maestro import safe_send_message
+                        binance_trader import safe_send_message
                         message = f"✅ **إلغاء الخروج | #{trade['id']} {symbol}**\nقرر الرجل الحكيم إعطاء الصفقة فرصة أخرى بعد تعافي السعر لحظيًا."
                         await safe_send_message(self.application.bot, message)
                         await conn.execute("UPDATE trades SET status = 'active' WHERE id = ?", (trade['id'],))
@@ -351,7 +351,7 @@ class WiseMan:
                             await conn.commit()
 
                             # --- [✅ إضافة جديدة فائتة] ---
-                            from okx_maestro import send_operations_log
+                            binance_trader import send_operations_log
                             log_message = f"🧠 **[تدخل الرجل الحكيم | صفقة #{trade['id']} {symbol}]**\n- **السبب:** تم رصد ضعف مستمر في الزخم.\n- **الإجراء:** تم تسليم الصفقة للمراجعة اللحظية لإمكانية الخروج المبكر."
                             await send_operations_log(self.application.bot, log_message)
 
@@ -367,7 +367,7 @@ class WiseMan:
                             new_tp = trade['take_profit'] * 1.05
                             await conn.execute("UPDATE trades SET take_profit = ? WHERE id = ?", (new_tp, trade['id'],)); await conn.commit()
                             logger.info(f"Wise Man extended TP for trade #{trade['id']} on {symbol} to {new_tp}")
-                            from okx_maestro import safe_send_message, send_operations_log # <-- استيراد الدالة الجديدة
+                            binance_trader import safe_send_message, send_operations_log # <-- استيراد الدالة الجديدة
                             message_to_send = f"🚀 **[تمديد الهدف | صفقة #{trade['id']} {symbol}]**\n- **السبب:** زخم إيجابي قوي ومستمر (ADX > {strong_adx_level}).\n- **الهدف الجديد:** `${new_tp:.4f}`"
                             await safe_send_message(self.application.bot, message_to_send)
                             await send_operations_log(self.application.bot, message_to_send) # <-- إرسال نفس الرسالة للقناة
@@ -427,7 +427,7 @@ class WiseMan:
                     alerts.append(f"High Correlation Warning: `{asset}` has a very high correlation of **{correlation:.2f}** with BTC.")
 
             if alerts:
-                from okx_maestro import safe_send_message
+               binance_trader import safe_send_message
                 message_body = "\n- ".join(alerts)
                 message = f"⚠️ **تنبيه من الرجل الحكيم (إدارة المخاطر):**\n- {message_body}"
                 await safe_send_message(self.application.bot, message)
