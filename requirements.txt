@@ -1,6 +1,6 @@
 ccxt==4.3.39
 pandas==2.2.2
-pandas-ta==0.3.14b0
+pandas-ta
 python-telegram-bot==21.2
 aiosqlite==0.20.0
 httpx==0.27.0
