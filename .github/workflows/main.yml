@@ -1,26 +1,17 @@
 name: Deploy Botadil
 
 on:
-  # المشغل الأول: يعمل تلقائياً عند أي تحديث لفرع main
   push:
     branches:
       - main
-
-  # المشغل الثاني: يسمح لك بالتشغيل اليدوي من صفحة Actions
   workflow_dispatch:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
+    
     steps:
-    - name: SSH and Deploy
-      uses: appleboy/ssh-action@master
-      with:
-        host: ${{ secrets.VPS_SSH_HOST }}
-        username: ${{ secrets.VPS_SSH_USERNAME }}
-        key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-        script: |
-          cd /root/bots/botadil
-          git pull
-          pip install -r requirements.txt
-          pm2 reload BinanceTraderBot
+    - name: Deploy using the master script
+      run: |
+        # نادي "السكرتير" واديه "المسار الحقيقي" واسم pm2 "الحقيقي"
+        sudo /usr/local/bin/deploy_bot.sh /root/bots/botadil BinanceTraderBot
